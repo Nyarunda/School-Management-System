@@ -3,7 +3,7 @@ from django.core.exceptions import ValidationError
 from apps.activity.services import record_activity
 from apps.tenancy.services import require_same_tenant
 
-from .models import Student, StudentStatus
+from .models import Student, StudentDocument, StudentStatus
 
 
 STUDENT_TRANSITIONS = {
@@ -43,3 +43,21 @@ def place_student(*, student, campus, actor=None):
         metadata={"campus_id": str(campus.id)},
     )
     return student
+
+
+def add_student_document(*, student, document_type, file_name, actor=None):
+    document = StudentDocument.objects.create(
+        tenant=student.tenant,
+        student=student,
+        document_type=document_type,
+        file_name=file_name,
+    )
+    record_activity(
+        tenant=student.tenant,
+        actor=actor,
+        action="student.document_added",
+        resource_type="student",
+        resource_id=str(student.id),
+        metadata={"document_id": str(document.id)},
+    )
+    return document

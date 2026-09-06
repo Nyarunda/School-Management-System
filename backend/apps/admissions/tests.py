@@ -59,3 +59,18 @@ class AdmissionLifecycleTests(TestCase):
             enroll_application(application=self.application, admission_number="ADM-002", campus=self.campus_b)
 
         self.assertEqual(Student.objects.count(), 0)
+
+    def test_rejected_application_cannot_be_enrolled(self):
+        self.application.status = ApplicationStatus.REJECTED
+        self.application.save(update_fields=["status"])
+
+        with self.assertRaises(ValidationError):
+            enroll_application(application=self.application, admission_number="ADM-003")
+
+    def test_application_cannot_be_enrolled_twice(self):
+        self.application.status = ApplicationStatus.ACCEPTED
+        self.application.save(update_fields=["status"])
+        enroll_application(application=self.application, admission_number="ADM-004")
+
+        with self.assertRaises(ValidationError):
+            enroll_application(application=self.application, admission_number="ADM-005")

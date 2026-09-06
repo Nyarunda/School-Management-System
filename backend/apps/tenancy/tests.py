@@ -3,7 +3,7 @@ from django.test import TestCase
 
 from .context import active_tenant
 from .models import AuditEvent, Campus, Membership, Role, Tenant, User
-from .services import require_membership, require_same_tenant
+from .services import require_membership, require_permission, require_same_tenant
 
 
 class TenantIsolationTests(TestCase):
@@ -25,6 +25,21 @@ class TenantIsolationTests(TestCase):
         self.assertEqual(require_membership(user=self.user, tenant=self.school_a).tenant, self.school_a)
         with self.assertRaises(ValidationError):
             require_membership(user=self.user, tenant=self.school_b)
+
+    def test_inactive_membership_cannot_access_tenant(self):
+        Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role_a, is_active=False)
+
+        with self.assertRaises(ValidationError):
+            require_membership(user=self.user, tenant=self.school_a)
+
+    def test_role_permission_is_enforced(self):
+        self.role_a.permissions = ["students.view"]
+        self.role_a.save(update_fields=["permissions"])
+        Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role_a)
+
+        require_permission(user=self.user, tenant=self.school_a, permission="students.view")
+        with self.assertRaises(ValidationError):
+            require_permission(user=self.user, tenant=self.school_a, permission="students.edit")
 
     def test_cross_tenant_objects_are_rejected(self):
         campus_b = Campus.objects.create(tenant=self.school_b, name="Main", code="MAIN")
@@ -52,6 +67,10 @@ class TenantIsolationTests(TestCase):
         )
 
         self.assertEqual(list(AuditEvent.objects.for_tenant(self.school_a)), [event_a])
+
+    def test_activity_like_records_cannot_be_retrieved_without_tenant(self):
+        with self.assertRaises(ValueError):
+            AuditEvent.objects.for_tenant(None)
 
     def test_active_tenant_context_is_empty_outside_a_request(self):
         self.assertIsNone(active_tenant.get())

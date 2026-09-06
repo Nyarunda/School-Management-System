@@ -34,6 +34,11 @@ h2, h3, p { margin-top: 0; }
 .overview div { padding: 1rem; background: #e8e3d7; }
 .overview small, .overview strong { display: block; }
 .overview strong { margin-top: .6rem; font-size: 1.8rem; font-weight: 500; }
+.academic-summary { display: grid; gap: 1rem; }
+.academic-summary div { padding: 1rem; border-left: 3px solid #a14f32; background: #e8e3d7; }
+.academic-summary strong, .academic-summary p { display: block; margin-top: .5rem; }
+.academic-summary strong { font-size: 1.45rem; font-weight: 500; }
+.academic-summary p { margin-bottom: 0; color: #68736d; }
 .empty-state { padding: 2rem 0; color: #68736d; }
 .empty-state h3 { color: #20302a; }
 .modal-backdrop { position: fixed; inset: 0; display: grid; place-items: center; padding: 1rem; background: rgba(32, 48, 42, .45); }

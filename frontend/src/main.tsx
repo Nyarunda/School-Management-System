@@ -62,9 +62,9 @@ function StudentsWorkspace() {
         {selected && <section className="panel student-detail">
           <div className="student-heading"><div><p className="eyebrow">{selected.admissionNumber}</p><h2>{selected.name}</h2><p>{selected.campus} · Active student</p></div><span className="status-pill">{selected.status}</span></div>
           <nav className="tabs" aria-label="Student details">
-            {["Overview", "Guardians", "Documents", "Activity"].map((item) => <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>{item}</button>)}
+            {["Overview", "Academics", "Guardians", "Documents", "Activity"].map((item) => <button className={tab === item ? "active" : ""} key={item} onClick={() => setTab(item)}>{item}</button>)}
           </nav>
-          <div className="tab-content">{tab === "Overview" && <Overview />}{tab === "Guardians" && <Info title="Guardians" text="No guardians linked yet." />}{tab === "Documents" && <Info title="Documents" text="Birth certificate and admission documents will appear here." />}{tab === "Activity" && <Info title="Activity" text="Student admitted · Today" />}</div>
+          <div className="tab-content">{tab === "Overview" && <Overview />}{tab === "Academics" && <AcademicsInfo />}{tab === "Guardians" && <Info title="Guardians" text="No guardians linked yet." />}{tab === "Documents" && <Info title="Documents" text="Birth certificate and admission documents will appear here." />}{tab === "Activity" && <Info title="Activity" text="Student admitted · Today" />}</div>
         </section>}
       </div>
       {showAdmission && <div className="modal-backdrop"><form className="modal" onSubmit={admitStudent}><div className="panel-heading"><h2>New admission</h2><button type="button" className="close-button" onClick={() => setShowAdmission(false)}>×</button></div><label>Student name<input name="name" required placeholder="Full name" /></label><label>Admission number<input name="admissionNumber" required placeholder="ADM-003" /></label><label>Campus<select name="campus" defaultValue="Main Campus"><option>Main Campus</option><option>North Campus</option></select></label><button className="primary-button" type="submit">Admit student</button></form></div>}
@@ -73,6 +73,7 @@ function StudentsWorkspace() {
 }
 
 function Overview() { return <div className="overview"><div><small>Status</small><strong>Active</strong></div><div><small>Attendance</small><strong>94%</strong></div><div><small>Average</small><strong>76%</strong></div></div>; }
+function AcademicsInfo() { return <div className="academic-summary"><div><small>Current placement</small><strong>Grade 8 East</strong><p>2026 · Main Campus · Term 1</p></div><div><small>Academic history</small><strong>2025</strong><p>Grade 7 West · Main Campus</p></div></div>; }
 function Info({ title, text }: { title: string; text: string }) { return <div className="empty-state"><h3>{title}</h3><p>{text}</p></div>; }
 
 createRoot(document.getElementById("root")!).render(

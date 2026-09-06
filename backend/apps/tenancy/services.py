@@ -15,6 +15,15 @@ def require_membership(*, user, tenant):
     return membership
 
 
+def require_permission(*, user, tenant, permission):
+    if getattr(user, "is_superuser", False):
+        return None
+    membership = require_membership(user=user, tenant=tenant)
+    if permission not in membership.role.permissions:
+        raise ValidationError(f"User lacks permission: {permission}")
+    return membership
+
+
 def require_same_tenant(*, tenant, **objects):
     """Reject a domain operation when any tenant-owned object crosses boundaries."""
     mismatched = [name for name, value in objects.items() if value.tenant_id != tenant.id]

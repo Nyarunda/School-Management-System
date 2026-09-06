@@ -4,7 +4,7 @@ from django.test import TestCase
 from apps.tenancy.models import Campus, Tenant
 
 from .models import Student, StudentStatus
-from .services import change_student_status, place_student
+from .services import add_student_document, change_student_status, place_student
 
 
 class StudentLifecycleTests(TestCase):
@@ -32,3 +32,13 @@ class StudentLifecycleTests(TestCase):
 
         self.student.refresh_from_db()
         self.assertIsNone(self.student.campus)
+
+    def test_document_is_created_through_student_tenant_boundary(self):
+        document = add_student_document(
+            student=self.student,
+            document_type="Birth certificate",
+            file_name="birth-certificate.pdf",
+        )
+
+        self.assertEqual(document.tenant, self.school_a)
+        self.assertEqual(self.student.documents.count(), 1)
