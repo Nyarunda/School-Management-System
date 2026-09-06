@@ -16,5 +16,8 @@
     "react-dom": "latest",
     "@tanstack/react-query": "latest"
   },
-  "devDependencies": {}
+  "devDependencies": {
+    "@types/react": "latest",
+    "@types/react-dom": "latest"
+  }
 }
