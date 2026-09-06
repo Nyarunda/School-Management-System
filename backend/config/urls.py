@@ -7,3 +7,4 @@ urlpatterns = [
 ]
 urlpatterns += [path("api/v1/finance/", include("apps.finance.urls"))]
 urlpatterns += [path("api/v1/attendance/", include("apps.attendance.urls"))]
+urlpatterns += [path("api/v1/assessments/", include("apps.assessments.urls"))]
