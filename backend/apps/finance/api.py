@@ -329,7 +329,7 @@ class StudentFinanceView(APIView):
     def get(self, request, student_id):
         tenant = resolve_finance_tenant(request, "finance.student_account.view")
         student = get_object_or_404(Student.objects.for_tenant(tenant), pk=student_id)
-        invoices = Invoice.objects.for_tenant(tenant).filter(student=student).order_by("-created_at")
+        invoices = Invoice.objects.for_tenant(tenant).filter(student=student).prefetch_related("lines").order_by("-created_at")
         ledger = StudentLedgerEntry.objects.for_tenant(tenant).filter(student=student).order_by("-posted_at")
         return Response({
             "student": {"id": student.id, "admission_number": student.admission_number, "name": student.full_name},
