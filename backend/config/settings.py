@@ -19,6 +19,7 @@ INSTALLED_APPS = [
     "apps.guardians",
     "apps.activity",
     "apps.academics",
+    "apps.finance",
 ]
 
 MIDDLEWARE = [
