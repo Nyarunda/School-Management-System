@@ -1,5 +1,6 @@
 from .context import active_tenant
-from .models import Membership, Tenant
+from django.core.exceptions import ValidationError
+from .services import require_membership
 
 
 class TenantResolutionMiddleware:
@@ -12,12 +13,11 @@ class TenantResolutionMiddleware:
         token = None
         tenant_slug = request.headers.get("X-Tenant-Slug")
         if tenant_slug and request.user.is_authenticated:
-            tenant = Tenant.objects.filter(slug=tenant_slug, is_active=True).first()
-            if tenant and Membership.objects.filter(
-                tenant=tenant,
-                user=request.user,
-                is_active=True,
-            ).exists():
+            try:
+                tenant = require_membership(user=request.user, tenant_slug=tenant_slug).tenant
+            except ValidationError:
+                tenant = None
+            if tenant is not None:
                 token = active_tenant.set(tenant)
                 request.active_tenant = tenant
 

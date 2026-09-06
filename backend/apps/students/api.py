@@ -3,7 +3,8 @@ from rest_framework.generics import ListAPIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import NotFound, PermissionDenied
-from apps.tenancy.models import Membership
+from django.core.exceptions import ValidationError
+from apps.tenancy.services import require_permission
 
 from .selectors import list_students
 
@@ -29,16 +30,12 @@ def resolve_request_tenant(request):
     slug = request.headers.get("X-Tenant-Slug")
     if not slug:
         raise NotFound("Tenant context is required")
-    membership = Membership.objects.filter(
-        tenant__slug=slug,
-        tenant__is_active=True,
-        user=request.user,
-        is_active=True,
-    ).select_related("tenant", "role").first()
-    if membership is None:
-        raise PermissionDenied("You do not have access to this tenant")
-    if not getattr(request.user, "is_superuser", False) and "students.view" not in membership.role.permissions:
-        raise PermissionDenied("User lacks permission: students.view")
+    try:
+        membership = require_permission(
+            user=request.user, tenant_slug=slug, permission="students.view"
+        )
+    except ValidationError as error:
+        raise PermissionDenied(error.messages) from error
     return membership.tenant
 
 

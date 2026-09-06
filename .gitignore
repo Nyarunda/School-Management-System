@@ -7,3 +7,6 @@ node_modules/
 dist/
 .pytest_cache/
 .vscode/
+.test-postgres/
+.test-deps/
+.test-postgres.log
