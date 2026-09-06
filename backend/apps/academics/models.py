@@ -113,3 +113,9 @@ class StudentEnrollment(TenantOwnedModel):
             related.append(self.term)
         if any(item.tenant_id != self.tenant_id for item in related):
             raise ValidationError("Academic enrollment records must belong to the same tenant")
+        if self.term is not None and self.term.academic_year_id != self.academic_year_id:
+            raise ValidationError("Term must belong to the selected academic year")
+        if self.class_group.academic_level_id != self.academic_level_id:
+            raise ValidationError("Class must belong to the selected academic level")
+        if self.class_group.campus_id != self.campus_id:
+            raise ValidationError("Class must belong to the selected campus")
