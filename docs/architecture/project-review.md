@@ -2,6 +2,8 @@
 
 Reviewed twice on 2026-09-06 against the local source; this revision includes the academics and student API additions. This is an assessment, not a claim of production readiness.
 
+Subsequent implementation: see [authorization and concurrency follow-up](concurrency-verification.md) for the shared authorization policy, academic relationship checks, removal of the explicit student lock, and PostgreSQL test procedure. The findings below describe the earlier review baseline, not the final implementation of those paths. Finance was also added after this baseline.
+
 ## Product and structure
 
 The product is a multi-school management platform. Each school is a Tenant; users access schools through Membership records with a tenant-owned Role and optional Campus. The backend is a Django modular monolith with tenancy, admissions, students, guardians, activity, and academics apps. Migrations exist for all six apps.
