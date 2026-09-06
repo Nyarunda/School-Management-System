@@ -9,8 +9,8 @@ from apps.activity.models import ActivityEvent
 from apps.students.models import Student
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
-from .models import AttendanceRecord, AttendanceSession, AttendanceSetup, AttendanceStatus
-from .services import open_attendance_session, record_attendance_bulk
+from .models import AttendanceRecord, AttendanceSession, AttendanceSessionStatus, AttendanceSetup, AttendanceStatus
+from .services import open_attendance_session, record_attendance_bulk, submit_attendance_session
 
 
 class AttendanceFoundationTests(TestCase):
@@ -21,7 +21,10 @@ class AttendanceFoundationTests(TestCase):
         self.admin = User.objects.create_user(username="admin", password="secret")
         self.admin_role = Role.objects.create(
             tenant=self.school_a, name="Admin",
-            permissions=["attendance.session.manage", "attendance.record.view", "attendance.any_class"],
+            permissions=[
+                "attendance.session.manage", "attendance.record.view", "attendance.any_class",
+                "attendance.session.override_calendar",
+            ],
         )
         Membership.objects.create(tenant=self.school_a, user=self.admin, role=self.admin_role)
 
@@ -35,6 +38,7 @@ class AttendanceFoundationTests(TestCase):
         Membership.objects.create(tenant=self.school_a, user=self.other_teacher, role=self.teacher_role)
 
         self.campus = Campus.objects.create(tenant=self.school_a, name="Main", code="MAIN")
+        self.other_campus = Campus.objects.create(tenant=self.school_a, name="Annex", code="ANNEX")
         self.year = AcademicYear.objects.create(
             tenant=self.school_a, name="2026", starts_on=date(2026, 1, 1), ends_on=date(2026, 12, 31), is_current=True,
         )
@@ -77,14 +81,28 @@ class RosterResolutionTests(AttendanceFoundationTests):
             class_group=self.class_group, campus=self.campus, status=EnrollmentStatus.ACTIVE,
         )
 
-        session, roster = self.open_session()
+        session, records = self.open_session()
 
-        roster_student_ids = {enrollment.student_id for enrollment in roster}
+        roster_student_ids = {record.student_id for record in records}
         self.assertEqual(roster_student_ids, {self.student.id, self.other_student.id})
 
     def test_no_covering_academic_year_is_rejected(self):
         with self.assertRaisesMessage(ValidationError, "No academic year covers this date"):
             self.open_session(session_date=date(2030, 1, 1))
+
+    def test_roster_is_snapshotted_and_immune_to_later_enrollment_changes(self):
+        session, records = self.open_session()
+        self.assertEqual({r.student_id for r in records}, {self.student.id, self.other_student.id})
+
+        # A later correction to enrollment must not retroactively change who
+        # this already-opened session expected on the roster.
+        StudentEnrollment.objects.filter(tenant=self.school_a, student=self.other_student, academic_year=self.year).update(
+            status=EnrollmentStatus.TRANSFERRED,
+        )
+        _, records_again = open_attendance_session(
+            user=self.teacher, tenant=self.school_a, class_group=self.class_group, session_date=self.session_date,
+        )
+        self.assertEqual({r.student_id for r in records_again}, {self.student.id, self.other_student.id})
 
 
 class SessionOpenTests(AttendanceFoundationTests):
@@ -94,16 +112,33 @@ class SessionOpenTests(AttendanceFoundationTests):
         self.assertEqual(first.pk, second.pk)
         self.assertEqual(AttendanceSession.objects.count(), 1)
 
+    def test_open_materializes_not_marked_placeholder_records(self):
+        session, records = self.open_session()
+        self.assertEqual(len(records), 2)
+        for record in records:
+            self.assertEqual(record.status, AttendanceStatus.NOT_MARKED)
+            self.assertIsNone(record.recorded_by_id)
+        self.assertEqual(AttendanceRecord.objects.filter(session=session).count(), 2)
+
     def test_non_instructional_day_is_rejected_without_force(self):
         saturday = date(2026, 3, 7)
         with self.assertRaisesMessage(ValidationError, "not an instructional day"):
             self.open_session(session_date=saturday)
         self.assertEqual(AttendanceSession.objects.count(), 0)
 
-    def test_non_instructional_day_can_be_forced(self):
+    def test_non_instructional_day_can_be_forced_with_override_permission(self):
         saturday = date(2026, 3, 7)
-        session, _ = self.open_session(session_date=saturday, force=True)
+        session, _ = self.open_session(user=self.admin, session_date=saturday, force=True)
         self.assertEqual(session.session_date, saturday)
+        self.assertEqual(
+            ActivityEvent.objects.filter(action="attendance.session.calendar_overridden").count(), 1,
+        )
+
+    def test_force_without_override_permission_is_rejected(self):
+        saturday = date(2026, 3, 7)
+        with self.assertRaisesMessage(ValidationError, "User lacks permission: attendance.session.override_calendar"):
+            self.open_session(user=self.teacher, session_date=saturday, force=True)
+        self.assertEqual(AttendanceSession.objects.count(), 0)
 
     def test_custom_instructional_days_are_respected(self):
         AttendanceSetup.objects.create(tenant=self.school_a, instructional_days=[6, 7])  # weekends only
@@ -128,6 +163,26 @@ class AuthorizationTests(AttendanceFoundationTests):
         session, _ = self.open_session(user=self.admin)
         self.assertIsNotNone(session)
 
+    def test_campus_scoped_membership_is_rejected_for_a_different_campus_class(self):
+        other_campus_class = ClassGroup.objects.create(
+            tenant=self.school_a, name="Annex Grade 8", code="G8-ANNEX", academic_level=self.level, campus=self.other_campus,
+        )
+        Membership.objects.filter(tenant=self.school_a, user=self.teacher).update(campus=self.campus)
+        with self.assertRaisesMessage(ValidationError, "not authorized for this campus"):
+            open_attendance_session(
+                user=self.teacher, tenant=self.school_a, class_group=other_campus_class, session_date=self.session_date,
+            )
+
+    def test_any_class_does_not_bypass_campus_scope(self):
+        other_campus_class = ClassGroup.objects.create(
+            tenant=self.school_a, name="Annex Grade 8", code="G8-ANNEX", academic_level=self.level, campus=self.other_campus,
+        )
+        Membership.objects.filter(tenant=self.school_a, user=self.admin).update(campus=self.campus)
+        with self.assertRaisesMessage(ValidationError, "not authorized for this campus"):
+            open_attendance_session(
+                user=self.admin, tenant=self.school_a, class_group=other_campus_class, session_date=self.session_date,
+            )
+
 
 class RecordAttendanceBulkTests(AttendanceFoundationTests):
     def test_creates_records_for_valid_roster_entries(self):
@@ -148,13 +203,15 @@ class RecordAttendanceBulkTests(AttendanceFoundationTests):
         with self.assertRaisesMessage(ValidationError, "is not enrolled in this class"):
             record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
                                    entries=[{"student": outsider, "status": AttendanceStatus.PRESENT}])
-        self.assertEqual(AttendanceRecord.objects.count(), 0)
+        # The two roster placeholders from session-open still exist -- only
+        # the outsider's entry was rejected.
+        self.assertEqual(AttendanceRecord.objects.count(), 2)
 
     def test_status_correction_updates_the_record_and_logs_activity(self):
         session, _ = self.open_session()
         record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
                                entries=[{"student": self.student, "status": AttendanceStatus.ABSENT}])
-        self.assertEqual(ActivityEvent.objects.count(), 0)  # first-time creation is not a "correction"
+        self.assertEqual(ActivityEvent.objects.count(), 0)  # first-time entry off NOT_MARKED is not a "correction"
 
         record_attendance_bulk(user=self.admin, tenant=self.school_a, session=session,
                                entries=[{"student": self.student, "status": AttendanceStatus.PRESENT, "remarks": "Arrived late, marked present"}])
@@ -164,7 +221,24 @@ class RecordAttendanceBulkTests(AttendanceFoundationTests):
         self.assertEqual(ActivityEvent.objects.count(), 1)
         event = ActivityEvent.objects.get()
         self.assertEqual(event.action, "attendance.record.corrected")
-        self.assertEqual(event.metadata, {"previous_status": AttendanceStatus.ABSENT, "new_status": AttendanceStatus.PRESENT})
+        self.assertEqual(event.metadata, {
+            "previous": {"status": AttendanceStatus.ABSENT, "remarks": ""},
+            "new": {"status": AttendanceStatus.PRESENT, "remarks": "Arrived late, marked present"},
+        })
+
+    def test_remarks_only_change_is_audited(self):
+        session, _ = self.open_session()
+        record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
+                               entries=[{"student": self.student, "status": AttendanceStatus.ABSENT}])
+        self.assertEqual(ActivityEvent.objects.count(), 0)
+
+        record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
+                               entries=[{"student": self.student, "status": AttendanceStatus.ABSENT, "remarks": "Parent called; medical appointment"}])
+
+        self.assertEqual(ActivityEvent.objects.count(), 1)
+        event = ActivityEvent.objects.get()
+        self.assertEqual(event.metadata["previous"], {"status": AttendanceStatus.ABSENT, "remarks": ""})
+        self.assertEqual(event.metadata["new"], {"status": AttendanceStatus.ABSENT, "remarks": "Parent called; medical appointment"})
 
     def test_resubmitting_the_same_status_is_a_no_op_for_the_audit_log(self):
         session, _ = self.open_session()
@@ -173,6 +247,21 @@ class RecordAttendanceBulkTests(AttendanceFoundationTests):
         record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
                                entries=[{"student": self.student, "status": AttendanceStatus.PRESENT}])
         self.assertEqual(ActivityEvent.objects.count(), 0)
+
+    def test_corrections_remain_allowed_after_session_submission(self):
+        session, _ = self.open_session()
+        record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
+                               entries=[
+                                   {"student": self.student, "status": AttendanceStatus.PRESENT},
+                                   {"student": self.other_student, "status": AttendanceStatus.PRESENT},
+                               ])
+        submit_attendance_session(user=self.teacher, tenant=self.school_a, session=session)
+
+        record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
+                               entries=[{"student": self.student, "status": AttendanceStatus.LATE}])
+        record = AttendanceRecord.objects.get(session=session, student=self.student)
+        self.assertEqual(record.status, AttendanceStatus.LATE)
+        self.assertEqual(ActivityEvent.objects.filter(action="attendance.record.corrected").count(), 1)
 
     def test_cross_tenant_session_is_rejected(self):
         foreign_campus = Campus.objects.create(tenant=self.school_b, name="Main", code="MAIN")
@@ -197,3 +286,34 @@ class RecordAttendanceBulkTests(AttendanceFoundationTests):
                                        entries=[{"student": self.student, "status": AttendanceStatus.PRESENT}])
         record = AttendanceRecord.objects.get(session=session, student=self.student)
         self.assertEqual(record.status, AttendanceStatus.ABSENT)
+
+
+class SubmitAttendanceSessionTests(AttendanceFoundationTests):
+    def mark_all(self, session, status=AttendanceStatus.PRESENT):
+        record_attendance_bulk(
+            user=self.teacher, tenant=self.school_a, session=session,
+            entries=[{"student": self.student, "status": status}, {"student": self.other_student, "status": status}],
+        )
+
+    def test_submit_requires_every_roster_student_to_be_marked(self):
+        session, _ = self.open_session()
+        record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
+                               entries=[{"student": self.student, "status": AttendanceStatus.PRESENT}])
+        with self.assertRaisesMessage(ValidationError, "must be marked before submission"):
+            submit_attendance_session(user=self.teacher, tenant=self.school_a, session=session)
+
+    def test_submit_succeeds_once_complete_and_logs_activity(self):
+        session, _ = self.open_session()
+        self.mark_all(session)
+        submitted = submit_attendance_session(user=self.teacher, tenant=self.school_a, session=session)
+        self.assertEqual(submitted.status, AttendanceSessionStatus.SUBMITTED)
+        self.assertEqual(submitted.submitted_by_id, self.teacher.id)
+        self.assertIsNotNone(submitted.submitted_at)
+        self.assertEqual(ActivityEvent.objects.filter(action="attendance.session.submitted").count(), 1)
+
+    def test_submitting_twice_is_rejected(self):
+        session, _ = self.open_session()
+        self.mark_all(session)
+        submit_attendance_session(user=self.teacher, tenant=self.school_a, session=session)
+        with self.assertRaisesMessage(ValidationError, "already been submitted"):
+            submit_attendance_session(user=self.teacher, tenant=self.school_a, session=session)

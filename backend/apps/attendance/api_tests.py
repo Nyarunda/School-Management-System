@@ -19,7 +19,8 @@ class AttendanceApiTests(TestCase):
 
         self.teacher = User.objects.create_user(username="teacher", password="secret")
         self.role = Role.objects.create(
-            tenant=self.school_a, name="Teacher", permissions=["attendance.session.manage", "attendance.record.view"],
+            tenant=self.school_a, name="Teacher",
+            permissions=["attendance.session.manage", "attendance.record.view", "attendance.session.override_calendar"],
         )
         Membership.objects.create(tenant=self.school_a, user=self.teacher, role=self.role)
         self.client.force_authenticate(self.teacher)
@@ -61,9 +62,9 @@ class AttendanceApiTests(TestCase):
             format="json", **self.headers(),
         )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.data["roster"]), 1)
-        self.assertEqual(response.data["roster"][0]["admission_number"], "ADM-001")
-        self.assertEqual(response.data["records"], [])
+        self.assertEqual(len(response.data["records"]), 1)
+        self.assertEqual(response.data["records"][0]["status"], "NOT_MARKED")
+        self.assertIsNone(response.data["records"][0]["recorded_by"])
 
     def test_unassigned_teacher_is_forbidden(self):
         other_teacher = User.objects.create_user(username="other-teacher", password="secret")
@@ -142,9 +143,30 @@ class AttendanceApiTests(TestCase):
         response = self.client.get(f"/api/v1/attendance/students/{self.student.id}/summary/", **self.headers())
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["status_counts"]["PRESENT"], 1)
+        self.assertEqual(response.data["marked_sessions"], 1)
         self.assertIn("recent_records", response.data)
 
     def test_student_record_history_is_paginated(self):
         response = self.client.get(f"/api/v1/attendance/students/{self.student.id}/records/", **self.headers())
         self.assertEqual(response.status_code, 200)
         self.assertIn("results", response.data)
+
+    def test_submit_requires_every_roster_student_marked_then_succeeds(self):
+        open_response = self.client.post(
+            "/api/v1/attendance/sessions/open/",
+            {"class_group": str(self.class_group.id), "session_date": self.session_date},
+            format="json", **self.headers(),
+        )
+        session_id = open_response.data["session"]["id"]
+
+        incomplete_response = self.client.post(f"/api/v1/attendance/sessions/{session_id}/submit/", **self.headers())
+        self.assertEqual(incomplete_response.status_code, 400)
+
+        self.client.post(
+            f"/api/v1/attendance/sessions/{session_id}/records/",
+            {"entries": [{"student": str(self.student.id), "status": "PRESENT"}]},
+            format="json", **self.headers(),
+        )
+        submit_response = self.client.post(f"/api/v1/attendance/sessions/{session_id}/submit/", **self.headers())
+        self.assertEqual(submit_response.status_code, 200)
+        self.assertEqual(submit_response.data["status"], "SUBMITTED")

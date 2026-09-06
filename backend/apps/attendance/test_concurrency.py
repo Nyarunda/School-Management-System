@@ -70,6 +70,10 @@ class AttendanceConcurrencyTests(TransactionTestCase):
         # violation, opening the same session twice is not an error.
         self.assertEqual(outcomes, ["created", "created"])
         self.assertEqual(AttendanceSession.objects.count(), 1)
+        session = AttendanceSession.objects.get()
+        records = AttendanceRecord.objects.filter(session=session)
+        self.assertEqual(records.count(), 1)  # exactly one roster student, no duplicates
+        self.assertEqual(records.get().status, AttendanceStatus.NOT_MARKED)
 
     def attempt_record(self, status, barrier):
         connections.close_all()

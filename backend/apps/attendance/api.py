@@ -16,7 +16,7 @@ from apps.students.models import Student
 from apps.tenancy.services import require_permission
 
 from .models import AttendanceRecord, AttendanceSession, AttendanceStatus
-from .services import open_attendance_session, record_attendance_bulk
+from .services import open_attendance_session, record_attendance_bulk, submit_attendance_session
 
 
 class AttendancePagination(PageNumberPagination):
@@ -59,7 +59,10 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
 class AttendanceSessionSerializer(serializers.ModelSerializer):
     class Meta:
         model = AttendanceSession
-        fields = ["id", "class_group", "session_date", "opened_by", "opened_at", "last_submitted_at"]
+        fields = [
+            "id", "class_group", "session_date", "opened_by", "opened_at", "last_submitted_at",
+            "status", "submitted_by", "submitted_at",
+        ]
         read_only_fields = fields
 
 
@@ -71,9 +74,11 @@ class SessionOpenSerializer(serializers.Serializer):
 
 class SessionOpenView(APIView):
     """Opens (or fetches, idempotently) the one register for a class on a
-    given day, and returns the resolved roster alongside any existing
-    records -- the client renders the roster with whatever's already
-    recorded, prefilled, ready for correction.
+    given day. The roster is snapshotted at creation time: every active
+    enrollment gets a placeholder AttendanceRecord (status=NOT_MARKED)
+    immediately, so the response's "records" list already reflects the full
+    expected roster -- the client fills each one in, rather than separately
+    reconciling a live roster against whatever's been recorded so far.
     """
     permission_classes = [IsAuthenticated]
 
@@ -84,20 +89,15 @@ class SessionOpenView(APIView):
         data = serializer.validated_data
         class_group = resolve_tenant_object(ClassGroup.objects.for_tenant(tenant), str(data["class_group"]))
         try:
-            session, roster = open_attendance_session(
+            session, records = open_attendance_session(
                 user=request.user, tenant=tenant, class_group=class_group,
                 session_date=data["session_date"], force=data["force"],
             )
         except DjangoValidationError as error:
             return api_validation_error(error)
-        existing_records = AttendanceRecord.objects.filter(tenant=tenant, session=session).select_related("student")
         return Response({
             "session": AttendanceSessionSerializer(session).data,
-            "roster": [
-                {"student_id": enrollment.student_id, "admission_number": enrollment.student.admission_number, "name": enrollment.student.full_name}
-                for enrollment in roster
-            ],
-            "records": AttendanceRecordSerializer(existing_records, many=True).data,
+            "records": AttendanceRecordSerializer(records, many=True).data,
         }, status=status.HTTP_200_OK)
 
 
@@ -150,6 +150,19 @@ class SessionRecordsView(APIView):
         return Response(AttendanceRecordSerializer(records, many=True).data, status=status.HTTP_200_OK)
 
 
+class SessionSubmitView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, session_id):
+        tenant = resolve_attendance_tenant(request, "attendance.session.manage")
+        session = resolve_tenant_object(AttendanceSession.objects.filter(tenant=tenant), session_id)
+        try:
+            submitted = submit_attendance_session(user=request.user, tenant=tenant, session=session)
+        except DjangoValidationError as error:
+            return api_validation_error(error)
+        return Response(AttendanceSessionSerializer(submitted).data, status=status.HTTP_200_OK)
+
+
 class SessionListView(ListAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = AttendanceSessionSerializer
@@ -186,20 +199,25 @@ class StudentAttendanceSummaryView(APIView):
         student = resolve_tenant_object(Student.objects.for_tenant(tenant), student_id)
 
         since = timezone.now().date() - timedelta(days=self.SUMMARY_WINDOW_DAYS)
-        recent_records = (
-            AttendanceRecord.objects.filter(tenant=tenant, student=student, session__session_date__gte=since)
+        window_records = AttendanceRecord.objects.filter(tenant=tenant, student=student, session__session_date__gte=since)
+        counts = {choice: 0 for choice, _ in AttendanceStatus.choices}
+        for status_value in window_records.values_list("status", flat=True):
+            counts[status_value] = counts.get(status_value, 0) + 1
+        marked_sessions = sum(count for choice, count in counts.items() if choice != AttendanceStatus.NOT_MARKED)
+
+        # Only actually-marked records are surfaced here -- NOT_MARKED
+        # placeholders are roster bookkeeping, not attendance history.
+        recent_marked = (
+            window_records.exclude(status=AttendanceStatus.NOT_MARKED)
             .select_related("session")
             .order_by("-session__session_date")
         )
-        counts = {choice: 0 for choice, _ in AttendanceStatus.choices}
-        for status_value in recent_records.values_list("status", flat=True):
-            counts[status_value] = counts.get(status_value, 0) + 1
-
         return Response({
             "student": {"id": student.id, "admission_number": student.admission_number, "name": student.full_name},
             "window_days": self.SUMMARY_WINDOW_DAYS,
             "status_counts": counts,
-            "recent_records": AttendanceRecordSerializer(recent_records[: self.RECENT_LIMIT], many=True).data,
+            "marked_sessions": marked_sessions,
+            "recent_records": AttendanceRecordSerializer(recent_marked[: self.RECENT_LIMIT], many=True).data,
         })
 
 
