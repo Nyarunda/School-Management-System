@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .api import (
+    AllocationReversalView,
     AssignmentListCreateView,
     CreditNoteListCreateView,
     FeeCategoryListCreateView,
@@ -12,7 +13,10 @@ from .api import (
     InvoiceGenerateView,
     InvoiceIssueView,
     InvoiceListView,
+    PaymentAllocateView,
+    PaymentListCreateView,
     StudentFinanceView,
+    StudentLedgerListView,
 )
 
 
@@ -28,5 +32,9 @@ urlpatterns = [
     path("invoices/", InvoiceListView.as_view(), name="invoice-list"),
     path("invoices/<uuid:invoice_id>/issue/", InvoiceIssueView.as_view(), name="invoice-issue"),
     path("credit-notes/", CreditNoteListCreateView.as_view(), name="credit-note-list"),
+    path("payments/", PaymentListCreateView.as_view(), name="payment-list"),
+    path("payments/<uuid:payment_id>/allocate/", PaymentAllocateView.as_view(), name="payment-allocate"),
+    path("payment-allocations/<uuid:allocation_id>/reverse/", AllocationReversalView.as_view(), name="payment-allocation-reverse"),
+    path("ledger-entries/", StudentLedgerListView.as_view(), name="ledger-entry-list"),
     path("students/<uuid:student_id>/finance/", StudentFinanceView.as_view(), name="student-finance"),
 ]

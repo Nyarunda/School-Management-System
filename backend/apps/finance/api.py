@@ -2,6 +2,7 @@ from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
+from django.db.models import Sum
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.exceptions import NotFound, PermissionDenied
@@ -16,7 +17,9 @@ from apps.students.models import Student
 from apps.tenancy.services import require_permission
 
 from .models import (
+    AllocationReversal,
     CreditNote,
+    CreditNoteStatus,
     FeeCategory,
     FeeItem,
     FeeStructure,
@@ -24,19 +27,27 @@ from .models import (
     FinanceSetup,
     Invoice,
     InvoiceLine,
+    InvoiceStatus,
     NumberSeries,
+    Payment,
+    PaymentAllocation,
+    PaymentMethod,
+    Receipt,
     StudentFeeAssignment,
     StudentLedgerEntry,
 )
 from .selectors import student_balance
 from .services import (
     add_fee_structure_line,
+    allocate_payment,
     approve_fee_structure,
     assign_fee_structure,
     create_fee_structure,
     generate_invoice,
     issue_credit_note,
     issue_invoice,
+    record_payment,
+    reverse_allocation,
 )
 
 
@@ -332,17 +343,212 @@ class CreditNoteListCreateView(ListCreateAPIView):
         return Response(self.get_serializer(credit_note).data, status=status.HTTP_201_CREATED)
 
 
-class StudentFinanceView(APIView):
+class ReceiptSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Receipt
+        fields = ["id", "receipt_number", "issued_at"]
+        read_only_fields = fields
+
+
+class PaymentAllocationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PaymentAllocation
+        fields = ["id", "payment", "invoice", "amount", "allocated_at"]
+        read_only_fields = fields
+
+
+class AllocationReversalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AllocationReversal
+        fields = ["id", "allocation", "amount", "reason", "reversed_at"]
+        read_only_fields = fields
+
+
+# Money amounts use a plain serializers.Serializer with an explicit DecimalField
+# (max_digits/decimal_places matching the model, min_value rejecting zero/negative)
+# rather than Decimal(str(request.data[...])). DRF's DecimalField already rejects
+# non-finite input (NaN, Infinity, -Infinity) and wrong precision/scale at the
+# request boundary, before any domain/service code ever sees it.
+class PaymentCreateSerializer(serializers.Serializer):
+    student = serializers.UUIDField()
+    payment_method = serializers.UUIDField()
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    idempotency_key = serializers.CharField(max_length=120)
+    external_reference = serializers.CharField(max_length=120, required=False, allow_blank=True, default="")
+
+
+class PaymentAllocationCreateSerializer(serializers.Serializer):
+    invoice = serializers.UUIDField()
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+
+
+class AllocationReversalCreateSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    reason = serializers.CharField(max_length=240)
+
+
+class PaymentSerializer(serializers.ModelSerializer):
+    receipt = ReceiptSerializer(read_only=True)
+    allocations = PaymentAllocationSerializer(many=True, read_only=True)
+    allocated_amount = serializers.SerializerMethodField()
+    unallocated_amount = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Payment
+        fields = [
+            "id", "student", "payment_method", "amount", "external_reference",
+            "idempotency_key", "received_at", "created_at",
+            "receipt", "allocations", "allocated_amount", "unallocated_amount",
+        ]
+        read_only_fields = ["id", "received_at", "created_at", "receipt", "allocations", "allocated_amount", "unallocated_amount"]
+
+    def get_allocated_amount(self, payment):
+        # Net of reversals: a reversed allocation frees that cash again.
+        # Relies on "allocations__reversals" being prefetched by the caller.
+        total = Decimal("0")
+        for allocation in payment.allocations.all():
+            total += allocation.amount - sum((reversal.amount for reversal in allocation.reversals.all()), Decimal("0"))
+        return total
+
+    def get_unallocated_amount(self, payment):
+        return payment.amount - self.get_allocated_amount(payment)
+
+
+class PaymentListCreateView(ListCreateAPIView):
     permission_classes = [IsAuthenticated]
+    serializer_class = PaymentSerializer
+    pagination_class = FinancePagination
+
+    def get_queryset(self):
+        tenant = resolve_finance_tenant(self.request, "finance.payment.view")
+        queryset = (
+            Payment.objects.for_tenant(tenant)
+            .select_related("student", "payment_method")
+            .prefetch_related("allocations__reversals", "receipt")
+            .order_by("-received_at")
+        )
+        student_id = self.request.query_params.get("student")
+        if not student_id:
+            return queryset
+        try:
+            return queryset.filter(student_id=student_id)
+        except ValidationError as error:
+            raise NotFound("No matching record for the given identifier") from error
+
+    def create(self, request, *args, **kwargs):
+        tenant = resolve_finance_tenant(request, "finance.payment.record")
+        input_serializer = PaymentCreateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+        student = resolve_tenant_object(Student.objects.for_tenant(tenant), str(data["student"]))
+        payment_method = resolve_tenant_object(PaymentMethod.objects.for_tenant(tenant), str(data["payment_method"]))
+        payment = record_payment(
+            user=request.user,
+            tenant=tenant,
+            student=student,
+            payment_method=payment_method,
+            amount=data["amount"],
+            idempotency_key=data["idempotency_key"],
+            external_reference=data["external_reference"],
+        )
+        return Response(self.get_serializer(payment).data, status=status.HTTP_201_CREATED)
+
+
+class PaymentAllocateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, payment_id):
+        tenant = resolve_finance_tenant(request, "finance.payment.allocate")
+        payment = resolve_tenant_object(Payment.objects.for_tenant(tenant), payment_id)
+        input_serializer = PaymentAllocationCreateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+        invoice = resolve_tenant_object(Invoice.objects.for_tenant(tenant), str(data["invoice"]))
+        allocation = allocate_payment(user=request.user, tenant=tenant, payment=payment, invoice=invoice, amount=data["amount"])
+        return Response(PaymentAllocationSerializer(allocation).data, status=status.HTTP_201_CREATED)
+
+
+class AllocationReversalView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, allocation_id):
+        tenant = resolve_finance_tenant(request, "finance.allocation.reverse")
+        allocation = resolve_tenant_object(PaymentAllocation.objects.for_tenant(tenant), allocation_id)
+        input_serializer = AllocationReversalCreateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+        reversal = reverse_allocation(user=request.user, tenant=tenant, allocation=allocation, amount=data["amount"], reason=data["reason"])
+        return Response(AllocationReversalSerializer(reversal).data, status=status.HTTP_201_CREATED)
+
+
+class LedgerEntrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StudentLedgerEntry
+        fields = ["id", "entry_type", "amount", "posted_at", "invoice", "credit_note", "payment_allocation", "allocation_reversal"]
+        read_only_fields = fields
+
+
+class StudentLedgerListView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = LedgerEntrySerializer
+    pagination_class = FinancePagination
+
+    def get_queryset(self):
+        tenant = resolve_finance_tenant(self.request, "finance.student_account.view")
+        queryset = StudentLedgerEntry.objects.for_tenant(tenant).order_by("-posted_at")
+        student_id = self.request.query_params.get("student")
+        if not student_id:
+            return queryset
+        try:
+            return queryset.filter(student_id=student_id)
+        except ValidationError as error:
+            raise NotFound("No matching record for the given identifier") from error
+
+
+class StudentFinanceView(APIView):
+    """A bounded snapshot for a student's account -- summary totals plus a
+    short recent-activity preview. Full history is independently paginated
+    through /invoices/, /payments/, and /ledger-entries/ with ?student=,
+    not returned here in full (see docs/architecture/api-query-performance.md).
+    """
+
+    permission_classes = [IsAuthenticated]
+    RECENT_LIMIT = 5
 
     def get(self, request, student_id):
         tenant = resolve_finance_tenant(request, "finance.student_account.view")
         student = get_object_or_404(Student.objects.for_tenant(tenant), pk=student_id)
-        invoices = Invoice.objects.for_tenant(tenant).filter(student=student).prefetch_related("lines").order_by("-created_at")
-        ledger = StudentLedgerEntry.objects.for_tenant(tenant).filter(student=student).order_by("-posted_at")
+
+        invoices = Invoice.objects.for_tenant(tenant).filter(student=student)
+        total_invoiced = invoices.filter(status=InvoiceStatus.ISSUED).aggregate(total=Sum("total"))["total"] or Decimal("0")
+
+        credit_notes = CreditNote.objects.for_tenant(tenant).filter(student=student, status=CreditNoteStatus.ISSUED)
+        total_credited = credit_notes.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+
+        payments = Payment.objects.for_tenant(tenant).filter(student=student)
+        total_received = payments.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        allocated = PaymentAllocation.objects.filter(tenant=tenant, payment__student=student).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        reversed_amount = AllocationReversal.objects.filter(tenant=tenant, allocation__payment__student=student).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        total_paid = allocated - reversed_amount
+
+        recent_invoices = invoices.prefetch_related("lines").order_by("-created_at")[: self.RECENT_LIMIT]
+        recent_payments = (
+            payments.select_related("payment_method")
+            .prefetch_related("allocations__reversals", "receipt")
+            .order_by("-received_at")[: self.RECENT_LIMIT]
+        )
+        recent_ledger_entries = StudentLedgerEntry.objects.for_tenant(tenant).filter(student=student).order_by("-posted_at")[: self.RECENT_LIMIT]
+
         return Response({
             "student": {"id": student.id, "admission_number": student.admission_number, "name": student.full_name},
-            "balance": student_balance(tenant=tenant, student=student),
-            "invoices": InvoiceSerializer(invoices, many=True).data,
-            "ledger": [{"id": entry.id, "entry_type": entry.entry_type, "amount": entry.amount, "posted_at": entry.posted_at} for entry in ledger],
+            "summary": {
+                "outstanding_balance": student_balance(tenant=tenant, student=student),
+                "total_invoiced": total_invoiced,
+                "total_credited": total_credited,
+                "total_paid": total_paid,
+                "unapplied_cash": total_received - total_paid,
+            },
+            "recent_invoices": InvoiceSerializer(recent_invoices, many=True).data,
+            "recent_payments": PaymentSerializer(recent_payments, many=True).data,
+            "recent_ledger_entries": LedgerEntrySerializer(recent_ledger_entries, many=True).data,
         })
