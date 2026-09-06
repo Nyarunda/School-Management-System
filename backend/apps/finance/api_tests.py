@@ -51,6 +51,10 @@ class FinanceApiTests(TestCase):
                 "finance.payment.allocate",
                 "finance.payment.reverse",
                 "finance.allocation.reverse",
+                "finance.reconciliation.view",
+                "finance.reconciliation.ingest",
+                "finance.reconciliation.match",
+                "finance.reconciliation.ignore",
             ],
         )
         Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role)
@@ -419,4 +423,107 @@ class FinanceApiTests(TestCase):
 
         response = self.client.get("/api/v1/finance/fee-structures/", **self.headers())
 
+        self.assertEqual(response.status_code, 403)
+
+    def _incoming_payment_payload(self, **overrides):
+        payload = {
+            "payment_method": str(self.payment_method.id),
+            "amount": "10.00",
+            "external_reference": "",
+            "external_transaction_id": "bank-001",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_incoming_payment_ingest_auto_match_and_auto_allocate_flow(self):
+        invoice_id = self._issued_invoice("Grade 8 2026 Recon")
+
+        response = self.client.post(
+            "/api/v1/finance/incoming-payments/",
+            self._incoming_payment_payload(amount="50000.00", external_reference=f"BANK/{self.student.admission_number}/JAN", external_transaction_id="bank-recon-1"),
+            format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["status"], "MATCHED")
+        self.assertIsNotNone(response.data["matched_payment"])
+
+        payment_response = self.client.get(f"/api/v1/finance/payments/{response.data['matched_payment']}/", **self.headers())
+        self.assertEqual(len(payment_response.data["allocations"]), 1)
+        self.assertEqual(str(payment_response.data["allocations"][0]["invoice"]), invoice_id)
+
+    def test_incoming_payment_manual_match_flow(self):
+        ingest_response = self.client.post(
+            "/api/v1/finance/incoming-payments/",
+            self._incoming_payment_payload(external_transaction_id="bank-recon-2"),
+            format="json", **self.headers(),
+        )
+        self.assertEqual(ingest_response.status_code, 201)
+        self.assertEqual(ingest_response.data["status"], "UNMATCHED")
+        incoming_id = ingest_response.data["id"]
+
+        match_response = self.client.post(
+            f"/api/v1/finance/incoming-payments/{incoming_id}/match/",
+            {"student": str(self.student.id)}, format="json", **self.headers(),
+        )
+        self.assertEqual(match_response.status_code, 200)
+        self.assertEqual(match_response.data["status"], "MATCHED")
+
+    def test_incoming_payment_ignore_flow(self):
+        ingest_response = self.client.post(
+            "/api/v1/finance/incoming-payments/",
+            self._incoming_payment_payload(external_transaction_id="bank-recon-3"),
+            format="json", **self.headers(),
+        )
+        incoming_id = ingest_response.data["id"]
+
+        ignore_response = self.client.post(
+            f"/api/v1/finance/incoming-payments/{incoming_id}/ignore/",
+            {"reason": "Bank fee"}, format="json", **self.headers(),
+        )
+        self.assertEqual(ignore_response.status_code, 200)
+        self.assertEqual(ignore_response.data["status"], "IGNORED")
+        self.assertEqual(ignore_response.data["ignored_reason"], "Bank fee")
+
+    def test_incoming_payment_status_and_received_after_filtering(self):
+        self.client.post("/api/v1/finance/incoming-payments/", self._incoming_payment_payload(external_transaction_id="bank-recon-4"), format="json", **self.headers())
+        matched_response = self.client.post(
+            "/api/v1/finance/incoming-payments/",
+            self._incoming_payment_payload(external_reference=f"BANK/{self.student.admission_number}/JAN", external_transaction_id="bank-recon-5"),
+            format="json", **self.headers(),
+        )
+        self.assertEqual(matched_response.data["status"], "MATCHED")
+
+        unmatched_only = self.client.get("/api/v1/finance/incoming-payments/?status=UNMATCHED", **self.headers())
+        self.assertEqual(unmatched_only.data["count"], 1)
+
+        future_only = self.client.get("/api/v1/finance/incoming-payments/?received_after=2999-01-01T00:00:00Z", **self.headers())
+        self.assertEqual(future_only.data["count"], 0)
+
+    def test_incoming_payment_malformed_id_and_missing_field(self):
+        response = self.client.post(
+            f"/api/v1/finance/incoming-payments/{uuid.uuid4()}/match/",
+            {"student": str(self.student.id)}, format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 404)
+
+        ingest_response = self.client.post(
+            "/api/v1/finance/incoming-payments/",
+            self._incoming_payment_payload(external_transaction_id="bank-recon-6"),
+            format="json", **self.headers(),
+        )
+        response = self.client.post(
+            f"/api/v1/finance/incoming-payments/{ingest_response.data['id']}/ignore/",
+            {}, format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_incoming_payment_actions_require_their_own_permission(self):
+        self.role.permissions = ["finance.reconciliation.view"]
+        self.role.save(update_fields=["permissions"])
+
+        response = self.client.post(
+            "/api/v1/finance/incoming-payments/",
+            self._incoming_payment_payload(external_transaction_id="bank-recon-7"),
+            format="json", **self.headers(),
+        )
         self.assertEqual(response.status_code, 403)

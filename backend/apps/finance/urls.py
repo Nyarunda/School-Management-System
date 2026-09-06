@@ -10,6 +10,9 @@ from .api import (
     FeeStructureLineCreateView,
     FeeStructureListCreateView,
     FinanceSetupView,
+    IncomingPaymentIgnoreView,
+    IncomingPaymentListCreateView,
+    IncomingPaymentMatchView,
     InvoiceGenerateView,
     InvoiceIssueView,
     InvoiceListView,
@@ -40,5 +43,8 @@ urlpatterns = [
     path("payments/<uuid:payment_id>/reverse/", PaymentReversalView.as_view(), name="payment-reverse"),
     path("payment-allocations/<uuid:allocation_id>/reverse/", AllocationReversalView.as_view(), name="payment-allocation-reverse"),
     path("ledger-entries/", StudentLedgerListView.as_view(), name="ledger-entry-list"),
+    path("incoming-payments/", IncomingPaymentListCreateView.as_view(), name="incoming-payment-list"),
+    path("incoming-payments/<uuid:incoming_payment_id>/match/", IncomingPaymentMatchView.as_view(), name="incoming-payment-match"),
+    path("incoming-payments/<uuid:incoming_payment_id>/ignore/", IncomingPaymentIgnoreView.as_view(), name="incoming-payment-ignore"),
     path("students/<uuid:student_id>/finance/", StudentFinanceView.as_view(), name="student-finance"),
 ]

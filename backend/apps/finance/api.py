@@ -25,6 +25,7 @@ from .models import (
     FeeStructure,
     FeeStructureLine,
     FinanceSetup,
+    IncomingPayment,
     Invoice,
     InvoiceLine,
     InvoiceStatus,
@@ -46,8 +47,11 @@ from .services import (
     assign_fee_structure,
     create_fee_structure,
     generate_invoice,
+    ignore_incoming_payment,
+    ingest_incoming_payment,
     issue_credit_note,
     issue_invoice,
+    match_incoming_payment,
     record_payment,
     reverse_allocation,
     reverse_payment,
@@ -595,3 +599,86 @@ class StudentFinanceView(APIView):
             "recent_payments": PaymentSerializer(recent_payments, many=True).data,
             "recent_ledger_entries": LedgerEntrySerializer(recent_ledger_entries, many=True).data,
         })
+
+
+class IncomingPaymentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = IncomingPayment
+        fields = [
+            "id", "payment_method", "amount", "external_reference", "external_transaction_id",
+            "status", "matched_payment", "ignored_reason", "received_at", "created_at",
+        ]
+        read_only_fields = ["id", "status", "matched_payment", "ignored_reason", "created_at"]
+
+
+class IncomingPaymentCreateSerializer(serializers.Serializer):
+    payment_method = serializers.UUIDField()
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    external_reference = serializers.CharField(max_length=240, required=False, allow_blank=True, default="")
+    external_transaction_id = serializers.CharField(max_length=120)
+
+
+class IncomingPaymentMatchSerializer(serializers.Serializer):
+    student = serializers.UUIDField()
+
+
+class IncomingPaymentIgnoreSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=240)
+
+
+class IncomingPaymentListCreateView(ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = IncomingPaymentSerializer
+    pagination_class = FinancePagination
+
+    def get_queryset(self):
+        tenant = resolve_finance_tenant(self.request, "finance.reconciliation.view")
+        queryset = IncomingPayment.objects.for_tenant(tenant).select_related("payment_method").order_by("-received_at")
+        status_param = self.request.query_params.get("status")
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+        received_after = self.request.query_params.get("received_after")
+        if received_after:
+            queryset = queryset.filter(received_at__gte=received_after)
+        return queryset
+
+    def create(self, request, *args, **kwargs):
+        tenant = resolve_finance_tenant(request, "finance.reconciliation.ingest")
+        input_serializer = IncomingPaymentCreateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+        payment_method = resolve_tenant_object(PaymentMethod.objects.for_tenant(tenant), str(data["payment_method"]))
+        incoming = ingest_incoming_payment(
+            user=request.user,
+            tenant=tenant,
+            payment_method=payment_method,
+            amount=data["amount"],
+            external_reference=data["external_reference"],
+            external_transaction_id=data["external_transaction_id"],
+        )
+        return Response(self.get_serializer(incoming).data, status=status.HTTP_201_CREATED)
+
+
+class IncomingPaymentMatchView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, incoming_payment_id):
+        tenant = resolve_finance_tenant(request, "finance.reconciliation.match")
+        incoming = resolve_tenant_object(IncomingPayment.objects.for_tenant(tenant), incoming_payment_id)
+        input_serializer = IncomingPaymentMatchSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        student = resolve_tenant_object(Student.objects.for_tenant(tenant), str(input_serializer.validated_data["student"]))
+        matched = match_incoming_payment(user=request.user, tenant=tenant, incoming=incoming, student=student)
+        return Response(IncomingPaymentSerializer(matched).data)
+
+
+class IncomingPaymentIgnoreView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, incoming_payment_id):
+        tenant = resolve_finance_tenant(request, "finance.reconciliation.ignore")
+        incoming = resolve_tenant_object(IncomingPayment.objects.for_tenant(tenant), incoming_payment_id)
+        input_serializer = IncomingPaymentIgnoreSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        ignored = ignore_incoming_payment(user=request.user, tenant=tenant, incoming=incoming, reason=input_serializer.validated_data["reason"])
+        return Response(IncomingPaymentSerializer(ignored).data)

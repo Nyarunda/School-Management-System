@@ -8,7 +8,20 @@ from django.test import TestCase
 from apps.academics.models import AcademicLevel, AcademicYear
 from apps.tenancy.models import Membership, Role, Tenant, User
 
-from .models import FeeCategory, FeeItem, FinanceSetup, Invoice, NumberSeries, Payment, PaymentMethod, PaymentReversal, PaymentStatus, Receipt
+from .models import (
+    FeeCategory,
+    FeeItem,
+    FinanceSetup,
+    IncomingPayment,
+    Invoice,
+    NumberSeries,
+    Payment,
+    PaymentMethod,
+    PaymentReversal,
+    PaymentStatus,
+    ReconciliationStatus,
+    Receipt,
+)
 from .selectors import student_balance
 from .services import (
     add_fee_structure_line,
@@ -17,8 +30,11 @@ from .services import (
     assign_fee_structure,
     create_fee_structure,
     generate_invoice,
+    ignore_incoming_payment,
+    ingest_incoming_payment,
     issue_credit_note,
     issue_invoice,
+    match_incoming_payment,
     record_payment,
     reverse_allocation,
     reverse_payment,
@@ -481,3 +497,180 @@ class PaymentTests(TestCase):
 
         with self.assertRaises(ValidationError):
             reverse_payment(user=self.user, tenant=self.school_a, payment=payment, reason="Entered in error")
+
+
+class ReconciliationTests(TestCase):
+    def setUp(self):
+        self.school_a = Tenant.objects.create(name="School A", slug="school-a")
+        self.school_b = Tenant.objects.create(name="School B", slug="school-b")
+        self.user = User.objects.create_user(username="bursar", password="secret")
+        self.role = Role.objects.create(
+            tenant=self.school_a,
+            name="Bursar",
+            permissions=[
+                "finance.fee_structure.create",
+                "finance.fee_structure.edit",
+                "finance.fee_structure.approve",
+                "finance.invoice.create",
+                "finance.invoice.issue",
+                "finance.payment.record",
+                "finance.payment.allocate",
+                "finance.reconciliation.ingest",
+                "finance.reconciliation.match",
+                "finance.reconciliation.ignore",
+            ],
+        )
+        Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role)
+        year = AcademicYear.objects.create(tenant=self.school_a, name="2026", starts_on=date(2026, 1, 1), ends_on=date(2026, 12, 31))
+        level = AcademicLevel.objects.create(tenant=self.school_a, name="Grade 8", code="G8", sequence=8)
+        category = FeeCategory.objects.create(tenant=self.school_a, name="Tuition", code="TUITION")
+        item = FeeItem.objects.create(tenant=self.school_a, category=category, name="Tuition fee", code="TUITION")
+        self.student = Student.objects.create(tenant=self.school_a, admission_number="ADM-001", first_name="Amina", last_name="Otieno")
+        self.other_student = Student.objects.create(tenant=self.school_a, admission_number="ADM-002", first_name="Brian", last_name="Kiptoo")
+        # Deliberately prefix-colliding with self.student's admission number,
+        # so a reference containing "ADM-0010" matches both -- the ambiguous
+        # case the recognition heuristic must handle by staying UNMATCHED.
+        self.colliding_student = Student.objects.create(tenant=self.school_a, admission_number="ADM-0010", first_name="Cynthia", last_name="Wanjiru")
+        self.payment_method = PaymentMethod.objects.create(tenant=self.school_a, name="Bank transfer", code="BANK")
+        NumberSeries.objects.create(tenant=self.school_a, document_type="INVOICE", prefix="INV-2026-", padding=6)
+        NumberSeries.objects.create(tenant=self.school_a, document_type="RECEIPT", prefix="RCT-2026-", padding=6)
+
+        self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level)
+        add_fee_structure_line(user=self.user, tenant=self.school_a, fee_structure=self.structure, fee_item=item, amount=Decimal("50000.00"))
+        approve_fee_structure(user=self.user, tenant=self.school_a, fee_structure=self.structure)
+        assignment = assign_fee_structure(user=self.user, tenant=self.school_a, student=self.student, fee_structure=self.structure)
+        self.invoice = generate_invoice(user=self.user, tenant=self.school_a, assignment=assignment)
+        issue_invoice(user=self.user, tenant=self.school_a, invoice=self.invoice)
+
+    def _ingest(self, amount="1000.00", reference="", transaction_id="bank-001"):
+        return ingest_incoming_payment(
+            user=self.user,
+            tenant=self.school_a,
+            payment_method=self.payment_method,
+            amount=Decimal(amount),
+            external_reference=reference,
+            external_transaction_id=transaction_id,
+        )
+
+    def test_ingest_with_no_reference_stays_unmatched(self):
+        incoming = self._ingest(reference="")
+
+        self.assertEqual(incoming.status, ReconciliationStatus.UNMATCHED)
+        self.assertIsNone(incoming.matched_payment)
+
+    def test_ingest_with_reference_matching_one_student_auto_matches(self):
+        incoming = self._ingest(amount="1234.00", reference="BANK/ADM-002/JAN", transaction_id="bank-002")
+
+        self.assertEqual(incoming.status, ReconciliationStatus.MATCHED)
+        self.assertIsNotNone(incoming.matched_payment)
+        self.assertEqual(incoming.matched_payment.student_id, self.other_student.id)
+        self.assertEqual(incoming.matched_payment.idempotency_key, f"incoming-payment:{incoming.id}")
+
+    def test_ingest_with_ambiguous_reference_stays_unmatched(self):
+        # "ADM-0010" contains "ADM-001" as a substring, so both self.student
+        # and self.colliding_student match -- ambiguous, must not auto-match.
+        incoming = self._ingest(reference="BANK/ADM-0010/JAN", transaction_id="bank-003")
+
+        self.assertEqual(incoming.status, ReconciliationStatus.UNMATCHED)
+        self.assertIsNone(incoming.matched_payment)
+
+    def test_auto_match_with_single_exact_amount_invoice_auto_allocates(self):
+        incoming = self._ingest(amount="50000.00", reference="BANK/ADM-001/JAN", transaction_id="bank-004")
+
+        self.assertEqual(incoming.status, ReconciliationStatus.MATCHED)
+        self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("0.00"))
+        self.assertEqual(incoming.matched_payment.allocations.count(), 1)
+
+    def test_auto_match_with_no_exact_amount_candidate_leaves_payment_unapplied(self):
+        # A successful reconciliation outcome, not a failure: the student is
+        # identified, the Payment is created and RECEIVED, but the amount
+        # doesn't exactly match the one outstanding invoice, so it's left
+        # for a bursar to allocate manually.
+        incoming = self._ingest(amount="12345.00", reference="BANK/ADM-001/JAN", transaction_id="bank-005")
+
+        self.assertEqual(incoming.status, ReconciliationStatus.MATCHED)
+        payment = incoming.matched_payment
+        self.assertEqual(payment.status, PaymentStatus.RECEIVED)
+        self.assertEqual(payment.allocations.count(), 0)
+        self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("50000.00"))
+
+    def test_manual_match_on_unmatched_entry(self):
+        incoming = self._ingest(amount="50000.00", reference="")
+
+        matched = match_incoming_payment(user=self.user, tenant=self.school_a, incoming=incoming, student=self.student)
+
+        self.assertEqual(matched.status, ReconciliationStatus.MATCHED)
+        self.assertEqual(matched.matched_payment.student_id, self.student.id)
+
+    def test_matching_an_already_resolved_entry_is_rejected(self):
+        incoming = self._ingest(reference="")
+        match_incoming_payment(user=self.user, tenant=self.school_a, incoming=incoming, student=self.student)
+
+        with self.assertRaises(ValidationError):
+            match_incoming_payment(user=self.user, tenant=self.school_a, incoming=incoming, student=self.other_student)
+
+    def test_ignoring_an_already_resolved_entry_is_rejected(self):
+        incoming = self._ingest(reference="")
+        match_incoming_payment(user=self.user, tenant=self.school_a, incoming=incoming, student=self.student)
+
+        with self.assertRaises(ValidationError):
+            ignore_incoming_payment(user=self.user, tenant=self.school_a, incoming=incoming, reason="Too late")
+
+    def test_ignore_sets_status_and_reason(self):
+        incoming = self._ingest(reference="")
+
+        ignored = ignore_incoming_payment(user=self.user, tenant=self.school_a, incoming=incoming, reason="Bank fee, not a student payment")
+
+        self.assertEqual(ignored.status, ReconciliationStatus.IGNORED)
+        self.assertEqual(ignored.ignored_reason, "Bank fee, not a student payment")
+        self.assertIsNone(ignored.matched_payment)
+
+    def test_ingest_is_idempotent(self):
+        first = self._ingest(transaction_id="bank-dup")
+        second = self._ingest(transaction_id="bank-dup")
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(IncomingPayment.objects.filter(tenant=self.school_a).count(), 1)
+
+    def test_ingest_rejects_reused_transaction_id_with_different_amount(self):
+        self._ingest(amount="1000.00", transaction_id="bank-dup2")
+
+        with self.assertRaises(ValidationError):
+            self._ingest(amount="2000.00", transaction_id="bank-dup2")
+
+    def test_ingest_rejects_a_payment_method_from_a_different_tenant(self):
+        foreign_method = PaymentMethod.objects.create(tenant=self.school_b, name="Foreign", code="FOREIGN")
+
+        with self.assertRaises(ValidationError):
+            ingest_incoming_payment(
+                user=self.user, tenant=self.school_a, payment_method=foreign_method,
+                amount=Decimal("10.00"), external_reference="", external_transaction_id="bank-006",
+            )
+        self.assertEqual(IncomingPayment.objects.filter(tenant=self.school_a).count(), 0)
+
+    def test_reconciliation_actions_require_their_own_permission(self):
+        self.role.permissions = []
+        self.role.save(update_fields=["permissions"])
+
+        with self.assertRaises(ValidationError):
+            self._ingest()
+
+    def test_match_and_ignore_require_their_own_permission(self):
+        incoming = self._ingest(reference="")
+        self.role.permissions = []
+        self.role.save(update_fields=["permissions"])
+
+        with self.assertRaises(ValidationError):
+            match_incoming_payment(user=self.user, tenant=self.school_a, incoming=incoming, student=self.student)
+        with self.assertRaises(ValidationError):
+            ignore_incoming_payment(user=self.user, tenant=self.school_a, incoming=incoming, reason="x")
+
+    def test_provenance_round_trip_from_payment_to_incoming_payment(self):
+        incoming = self._ingest(amount="777.00", reference="", transaction_id="bank-provenance")
+        matched = match_incoming_payment(user=self.user, tenant=self.school_a, incoming=incoming, student=self.student)
+
+        payment = matched.matched_payment
+        self.assertEqual(payment.incoming_payment.external_transaction_id, "bank-provenance")
+        # The raw external id is never copied onto Payment itself -- the
+        # OneToOne relationship is the sole place provenance lives.
+        self.assertNotEqual(payment.external_reference, "bank-provenance")

@@ -18,11 +18,13 @@ from .models import (
     AllocationReversal,
     CreditNote,
     CreditNoteStatus,
+    IncomingPayment,
     NumberSeries,
     Payment,
     PaymentAllocation,
     PaymentMethod,
     PaymentStatus,
+    ReconciliationStatus,
     Receipt,
 )
 from .selectors import student_balance
@@ -33,8 +35,11 @@ from .services import (
     assign_fee_structure,
     create_fee_structure,
     generate_invoice,
+    ignore_incoming_payment,
+    ingest_incoming_payment,
     issue_credit_note,
     issue_invoice,
+    match_incoming_payment,
     record_payment,
     reverse_payment,
 )
@@ -346,3 +351,117 @@ class PaymentAllocationConcurrencyTests(TransactionTestCase):
         net_allocated = PaymentAllocation.objects.filter(payment=payment).aggregate(total=Sum("amount"))["total"] or Decimal("0")
         net_reversed = AllocationReversal.objects.filter(allocation__payment=payment).aggregate(total=Sum("amount"))["total"] or Decimal("0")
         self.assertEqual(net_allocated - net_reversed, Decimal("0.00"))
+
+
+@skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL transaction semantics")
+class ReconciliationConcurrencyTests(TransactionTestCase):
+    def setUp(self):
+        self.school_a = Tenant.objects.create(name="School A", slug="school-a")
+        self.user = User.objects.create_user(username="bursar", password="secret")
+        self.role = Role.objects.create(
+            tenant=self.school_a,
+            name="Bursar",
+            permissions=[
+                "finance.payment.record",
+                "finance.reconciliation.ingest",
+                "finance.reconciliation.match",
+                "finance.reconciliation.ignore",
+            ],
+        )
+        Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role)
+        self.payment_method = PaymentMethod.objects.create(tenant=self.school_a, name="Bank transfer", code="BANK")
+        NumberSeries.objects.create(tenant=self.school_a, document_type="RECEIPT", prefix="RCT-2026-", padding=6)
+        self.student = Student.objects.create(tenant=self.school_a, admission_number="ADM-001", first_name="Amina", last_name="Otieno")
+        self.other_student = Student.objects.create(tenant=self.school_a, admission_number="ADM-002", first_name="Brian", last_name="Kiptoo")
+
+    def _ingest(self, transaction_id):
+        return ingest_incoming_payment(
+            user=self.user, tenant=self.school_a, payment_method=self.payment_method,
+            amount=Decimal("1000.00"), external_reference="", external_transaction_id=transaction_id,
+        )
+
+    def ingest_attempt(self, transaction_id, barrier=None):
+        connections.close_all()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET statement_timeout = '8s'")
+                cursor.execute("SET lock_timeout = '6s'")
+            if barrier is not None:
+                barrier.wait(timeout=6)
+            incoming = self._ingest(transaction_id)
+            return str(incoming.id)
+        finally:
+            connections.close_all()
+
+    def match_attempt(self, incoming, student, barrier=None):
+        connections.close_all()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET statement_timeout = '8s'")
+                cursor.execute("SET lock_timeout = '6s'")
+            if barrier is not None:
+                barrier.wait(timeout=6)
+            try:
+                match_incoming_payment(user=self.user, tenant=self.school_a, incoming=incoming, student=student)
+                return "matched"
+            except ValidationError as error:
+                return " ".join(error.messages)
+        finally:
+            connections.close_all()
+
+    def ignore_attempt(self, incoming, barrier=None):
+        connections.close_all()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET statement_timeout = '8s'")
+                cursor.execute("SET lock_timeout = '6s'")
+            if barrier is not None:
+                barrier.wait(timeout=6)
+            try:
+                ignore_incoming_payment(user=self.user, tenant=self.school_a, incoming=incoming, reason="Bank fee")
+                return "ignored"
+            except ValidationError as error:
+                return " ".join(error.messages)
+        finally:
+            connections.close_all()
+
+    def test_competing_ingestion_with_the_same_transaction_id_replays_to_one(self):
+        barrier = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(self.ingest_attempt, "bank-race-1", barrier) for _ in range(2)]
+            incoming_ids = [future.result(timeout=15) for future in futures]
+
+        self.assertEqual(incoming_ids[0], incoming_ids[1])
+        self.assertEqual(IncomingPayment.objects.filter(tenant=self.school_a, external_transaction_id="bank-race-1").count(), 1)
+
+    def test_concurrent_match_and_ignore_exactly_one_wins(self):
+        incoming = self._ingest("bank-race-2")
+        barrier = Barrier(2)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            match_future = pool.submit(self.match_attempt, incoming, self.student, barrier)
+            ignore_future = pool.submit(self.ignore_attempt, incoming, barrier)
+            outcomes = [match_future.result(timeout=15), ignore_future.result(timeout=15)]
+
+        self.assertEqual(sum(1 for outcome in outcomes if outcome in ("matched", "ignored")), 1)
+        self.assertEqual(sum(1 for outcome in outcomes if outcome == "Incoming payment has already been resolved"), 1)
+        incoming.refresh_from_db()
+        if incoming.status == ReconciliationStatus.MATCHED:
+            self.assertIsNotNone(incoming.matched_payment)
+        else:
+            self.assertEqual(incoming.status, ReconciliationStatus.IGNORED)
+            self.assertIsNone(incoming.matched_payment)
+
+    def test_concurrent_manual_matches_create_at_most_one_payment(self):
+        incoming = self._ingest("bank-race-3")
+        barrier = Barrier(2)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(self.match_attempt, incoming, student, barrier)
+                for student in (self.student, self.other_student)
+            ]
+            outcomes = [future.result(timeout=15) for future in futures]
+
+        self.assertCountEqual(outcomes, ["matched", "Incoming payment has already been resolved"])
+        self.assertEqual(Payment.objects.filter(idempotency_key=f"incoming-payment:{incoming.id}").count(), 1)

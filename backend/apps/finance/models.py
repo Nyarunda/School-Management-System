@@ -244,12 +244,45 @@ class PaymentReversal(TenantOwnedModel):
         constraints = [models.UniqueConstraint(fields=["tenant", "reversal_number"], name="unique_payment_reversal_number_per_tenant")]
 
 
-class AllocationReversal(TenantOwnedModel):
-    """Undoes a specific PaymentAllocation (e.g. it was applied to the wrong invoice).
+class ReconciliationStatus(models.TextChoices):
+    UNMATCHED = "UNMATCHED", "Unmatched"
+    MATCHED = "MATCHED", "Matched"
+    IGNORED = "IGNORED", "Ignored"
 
-    Distinct from a future PaymentReversal, which will undo the cash itself
-    (a bounced cheque, a chargeback) -- that is a different operation with
-    different consequences and is deliberately not modeled yet.
+
+class IncomingPayment(TenantOwnedModel):
+    """A landing zone for money that arrived without a guaranteed link to a
+    student -- a bank statement line today, a payment gateway webhook once
+    one exists. Reference recognition (see services.py) or a bursar attaches
+    it to a student, at which point it becomes a real Payment via the
+    existing record_payment(); until then it just sits UNMATCHED.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payment_method = models.ForeignKey(PaymentMethod, on_delete=models.PROTECT, related_name="incoming_payments")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    external_reference = models.CharField(max_length=240, blank=True, default="")
+    external_transaction_id = models.CharField(max_length=120)
+    status = models.CharField(max_length=20, choices=ReconciliationStatus.choices, default=ReconciliationStatus.UNMATCHED)
+    matched_payment = models.OneToOneField(Payment, on_delete=models.PROTECT, null=True, blank=True, related_name="incoming_payment")
+    ignored_reason = models.CharField(max_length=240, blank=True, default="")
+    received_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "external_transaction_id"], name="unique_incoming_payment_transaction_per_tenant"),
+            models.CheckConstraint(condition=Q(amount__gt=0), name="incoming_payment_amount_positive"),
+        ]
+        indexes = [models.Index(fields=["tenant", "status", "received_at"])]
+
+
+class AllocationReversal(TenantOwnedModel):
+    """Undoes a specific PaymentAllocation (e.g. it was applied to the wrong
+    invoice). Distinct from PaymentReversal, which undoes the cash itself
+    (a bounced cheque, a chargeback) -- reversing a payment cascades into
+    reversing each of its allocations via this model, but the reverse is
+    not true: reversing one allocation never touches the payment's status.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

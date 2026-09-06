@@ -6,6 +6,7 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from apps.activity.services import record_activity
+from apps.students.models import Student
 from apps.tenancy.services import require_permission
 
 from .models import (
@@ -15,6 +16,7 @@ from .models import (
     FeeAssignmentStatus,
     FeeStructure,
     FeeStructureLine,
+    IncomingPayment,
     Invoice,
     InvoiceLine,
     InvoiceStatus,
@@ -24,6 +26,7 @@ from .models import (
     PaymentAllocation,
     PaymentReversal,
     PaymentStatus,
+    ReconciliationStatus,
     Receipt,
     StudentFeeAssignment,
     StudentLedgerEntry,
@@ -284,6 +287,13 @@ def record_payment(*, user, tenant, student, payment_method, amount, idempotency
     return payment
 
 
+def _invoice_outstanding_balance(*, tenant, invoice):
+    issued_credits = invoice.credit_notes.filter(status=CreditNoteStatus.ISSUED).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    allocated = invoice.payment_allocations.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    reversed_amount = AllocationReversal.objects.filter(tenant=tenant, allocation__invoice=invoice).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    return invoice.total - issued_credits - (allocated - reversed_amount)
+
+
 @transaction.atomic
 def allocate_payment(*, user, tenant, payment, invoice, amount):
     require_permission(user=user, tenant=tenant, permission="finance.payment.allocate")
@@ -310,11 +320,7 @@ def allocate_payment(*, user, tenant, payment, invoice, amount):
     if amount > locked_payment.amount - (allocated_from_payment - reversed_from_payment):
         raise ValidationError("Allocation exceeds the payment's unallocated amount")
 
-    issued_credits = locked_invoice.credit_notes.filter(status=CreditNoteStatus.ISSUED).aggregate(total=Sum("amount"))["total"] or Decimal("0")
-    allocated_to_invoice = locked_invoice.payment_allocations.aggregate(total=Sum("amount"))["total"] or Decimal("0")
-    reversed_for_invoice = AllocationReversal.objects.filter(tenant=tenant, allocation__invoice=locked_invoice).aggregate(total=Sum("amount"))["total"] or Decimal("0")
-    net_paid = allocated_to_invoice - reversed_for_invoice
-    if amount > locked_invoice.total - issued_credits - net_paid:
+    if amount > _invoice_outstanding_balance(tenant=tenant, invoice=locked_invoice):
         raise ValidationError("Allocation exceeds the invoice's outstanding balance")
 
     allocation = PaymentAllocation.objects.create(
@@ -440,3 +446,214 @@ def reverse_payment(*, user, tenant, payment, reason):
         resource_id=str(payment_reversal.id),
     )
     return payment_reversal
+
+
+def _bulk_outstanding_balances(*, tenant, invoices):
+    """Outstanding balance for many invoices in a fixed 3 queries total, not
+    one aggregate per invoice (an N+1) and not a fan-out multi-join
+    annotation (joining credit_notes + payment_allocations + reversals onto
+    one queryset multiplies rows and silently inflates every sum). Used only
+    for the auto-allocate candidate scan below; the actual allocation still
+    goes through allocate_payment's own single-invoice lock and check via
+    _invoice_outstanding_balance.
+    """
+    invoice_ids = [invoice.id for invoice in invoices]
+    credits_by_invoice = dict(
+        CreditNote.objects.filter(tenant=tenant, invoice_id__in=invoice_ids, status=CreditNoteStatus.ISSUED)
+        .values("invoice_id").annotate(total=Sum("amount")).values_list("invoice_id", "total")
+    )
+    allocated_by_invoice = dict(
+        PaymentAllocation.objects.filter(tenant=tenant, invoice_id__in=invoice_ids)
+        .values("invoice_id").annotate(total=Sum("amount")).values_list("invoice_id", "total")
+    )
+    reversed_by_invoice = dict(
+        AllocationReversal.objects.filter(tenant=tenant, allocation__invoice_id__in=invoice_ids)
+        .values("allocation__invoice_id").annotate(total=Sum("amount")).values_list("allocation__invoice_id", "total")
+    )
+    return {
+        invoice.id: invoice.total
+            - (credits_by_invoice.get(invoice.id) or Decimal("0"))
+            - ((allocated_by_invoice.get(invoice.id) or Decimal("0")) - (reversed_by_invoice.get(invoice.id) or Decimal("0")))
+        for invoice in invoices
+    }
+
+
+def _recognize_student_from_reference(*, tenant, reference):
+    """Recognition strategy v1: case-insensitive admission-number substring
+    match. A later v2 (structured reference codes, a known-payer mapping, a
+    gateway's own account-reference field) should replace or extend this
+    single function rather than growing fuzzy-matching logic elsewhere in
+    reconciliation. Short or prefix-colliding admission numbers can make two
+    students both match the same reference (e.g. ADM-123 and ADM-1234
+    against ".../ADM-1234/..."); that is handled safely by the
+    ambiguous-stays-UNMATCHED rule in callers, not by this function. O(n)
+    over the tenant's students -- fine at expected school-roster scale;
+    revisit with a DB-assisted search if a tenant's roster ever makes this a
+    hot path.
+    """
+    if not reference:
+        return None
+    normalized = reference.strip().upper()
+    candidates = [
+        student for student in Student.objects.for_tenant(tenant).only("id", "admission_number")
+        if student.admission_number and student.admission_number.upper() in normalized
+    ]
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _attempt_auto_allocate(*, user, tenant, payment, student):
+    invoices = list(Invoice.objects.for_tenant(tenant).filter(student=student, status=InvoiceStatus.ISSUED))
+    if not invoices:
+        return
+    balances = _bulk_outstanding_balances(tenant=tenant, invoices=invoices)
+    candidates = [invoice for invoice in invoices if balances[invoice.id] == payment.amount]
+    if len(candidates) != 1:
+        return
+    try:
+        allocate_payment(user=user, tenant=tenant, payment=payment, invoice=candidates[0], amount=payment.amount)
+    except ValidationError:
+        # Leave as unapplied cash -- a fully valid, successful reconciliation
+        # outcome, not a failure. allocate_payment is its own atomic()
+        # (a savepoint here), so this can't poison the outer transaction.
+        pass
+
+
+def _complete_match(*, user, tenant, incoming, student):
+    """Shared by automatic (reference-recognition) and manual (bursar-
+    confirmed) matching. `incoming` must already be locked by the caller
+    (select_for_update, tenant-scoped) -- this re-checks status itself as
+    the single choke point that creates money, but does not take the lock
+    and does not check permissions (callers own both).
+    """
+    if incoming.status != ReconciliationStatus.UNMATCHED:
+        raise ValidationError("Incoming payment has already been resolved")
+    payment = record_payment(
+        user=user,
+        tenant=tenant,
+        student=student,
+        payment_method=incoming.payment_method,
+        amount=incoming.amount,
+        idempotency_key=f"incoming-payment:{incoming.id}",
+        external_reference=incoming.external_reference,
+        received_at=incoming.received_at,
+    )
+    incoming.status = ReconciliationStatus.MATCHED
+    incoming.matched_payment = payment
+    incoming.save(update_fields=["status", "matched_payment"])
+    record_activity(
+        tenant=tenant,
+        actor=user,
+        action="incoming_payment.matched",
+        resource_type="incoming_payment",
+        resource_id=str(incoming.id),
+    )
+    _attempt_auto_allocate(user=user, tenant=tenant, payment=payment, student=student)
+    return incoming
+
+
+def _attempt_auto_match(*, user, tenant, incoming):
+    """Called from inside ingest_incoming_payment's own transaction, right
+    after `incoming` was created there -- no other transaction can see or
+    lock this row yet. It still goes through the same lock-then-transition
+    protocol as match_incoming_payment()/ignore_incoming_payment(), so
+    UNMATCHED -> {MATCHED, IGNORED} is serialized identically everywhere,
+    including once a background reconciliation job exists alongside manual
+    bursar actions.
+    """
+    student = _recognize_student_from_reference(tenant=tenant, reference=incoming.external_reference)
+    if student is None:
+        return
+    try:
+        locked_incoming = IncomingPayment.objects.select_for_update().get(tenant=tenant, pk=incoming.pk)
+        _complete_match(user=user, tenant=tenant, incoming=locked_incoming, student=student)
+    except ValidationError:
+        return  # leave UNMATCHED; a bursar resolves it manually
+    incoming.refresh_from_db()
+
+
+def _matching_incoming_replay(*, existing, payment_method, amount):
+    if existing.payment_method_id != payment_method.id or existing.amount != amount:
+        raise ValidationError("External transaction id already used with different payment details")
+    return existing
+
+
+@transaction.atomic
+def ingest_incoming_payment(*, user, tenant, payment_method, amount, external_reference, external_transaction_id, received_at=None):
+    """Mirrors record_payment()'s idempotency shape exactly: an early
+    existence check, then a nested atomic() (savepoint) around the risky
+    insert so an IntegrityError-recovery replay lookup can't itself fail on
+    an aborted PostgreSQL transaction, with the specific constraint name
+    checked so an unrelated integrity failure isn't masked as a replay.
+    """
+    require_permission(user=user, tenant=tenant, permission="finance.reconciliation.ingest")
+    if amount <= 0:
+        raise ValidationError("Incoming payment amount must be greater than zero")
+    validate_same_tenant(tenant=tenant, payment_method=payment_method)
+    existing = IncomingPayment.objects.filter(tenant=tenant, external_transaction_id=external_transaction_id).first()
+    if existing is not None:
+        return _matching_incoming_replay(existing=existing, payment_method=payment_method, amount=amount)
+    try:
+        with transaction.atomic():
+            incoming = IncomingPayment.objects.create(
+                tenant=tenant,
+                payment_method=payment_method,
+                amount=amount,
+                external_reference=external_reference,
+                external_transaction_id=external_transaction_id,
+                received_at=received_at or timezone.now(),
+            )
+    except IntegrityError as error:
+        # Only translate the transaction-id collision, not unrelated
+        # failures, into a business validation error.
+        cause = error.__cause__
+        constraint = getattr(getattr(cause, "diag", None), "constraint_name", None)
+        sqlite_duplicate = str(cause) == "UNIQUE constraint failed: finance_incomingpayment.tenant_id, finance_incomingpayment.external_transaction_id"
+        if constraint != "unique_incoming_payment_transaction_per_tenant" and not sqlite_duplicate:
+            raise
+        replay = IncomingPayment.objects.filter(tenant=tenant, external_transaction_id=external_transaction_id).first()
+        if replay is None:
+            raise ValidationError("Incoming payment ingestion conflicted with another request") from error
+        return _matching_incoming_replay(existing=replay, payment_method=payment_method, amount=amount)
+    record_activity(
+        tenant=tenant,
+        actor=user,
+        action="incoming_payment.ingested",
+        resource_type="incoming_payment",
+        resource_id=str(incoming.id),
+    )
+    _attempt_auto_match(user=user, tenant=tenant, incoming=incoming)
+    return incoming
+
+
+@transaction.atomic
+def match_incoming_payment(*, user, tenant, incoming, student):
+    require_permission(user=user, tenant=tenant, permission="finance.reconciliation.match")
+    validate_same_tenant(tenant=tenant, incoming=incoming, student=student)
+    try:
+        locked_incoming = IncomingPayment.objects.select_for_update().get(tenant=tenant, pk=incoming.pk)
+    except IncomingPayment.DoesNotExist as error:
+        raise ValidationError("Incoming payment is not available in this tenant") from error
+    return _complete_match(user=user, tenant=tenant, incoming=locked_incoming, student=student)
+
+
+@transaction.atomic
+def ignore_incoming_payment(*, user, tenant, incoming, reason):
+    require_permission(user=user, tenant=tenant, permission="finance.reconciliation.ignore")
+    validate_same_tenant(tenant=tenant, incoming=incoming)
+    try:
+        locked_incoming = IncomingPayment.objects.select_for_update().get(tenant=tenant, pk=incoming.pk)
+    except IncomingPayment.DoesNotExist as error:
+        raise ValidationError("Incoming payment is not available in this tenant") from error
+    if locked_incoming.status != ReconciliationStatus.UNMATCHED:
+        raise ValidationError("Incoming payment has already been resolved")
+    locked_incoming.status = ReconciliationStatus.IGNORED
+    locked_incoming.ignored_reason = reason
+    locked_incoming.save(update_fields=["status", "ignored_reason"])
+    record_activity(
+        tenant=tenant,
+        actor=user,
+        action="incoming_payment.ignored",
+        resource_type="incoming_payment",
+        resource_id=str(locked_incoming.id),
+    )
+    return locked_incoming
