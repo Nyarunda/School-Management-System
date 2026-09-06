@@ -5,6 +5,7 @@ db.sqlite3
 .env
 node_modules/
 dist/
+*.tsbuildinfo
 .pytest_cache/
 .vscode/
 .test-postgres/
