@@ -27,7 +27,8 @@ h2, h3, p { margin-top: 0; }
 .tabs { display: flex; gap: 1.2rem; margin: 2rem 0 1.5rem; border-bottom: 1px solid #d8d2c6; overflow-x: auto; }
 .tabs button { padding: 0 0 .75rem; border: 0; border-bottom: 2px solid transparent; color: #68736d; background: transparent; cursor: pointer; white-space: nowrap; }
 .tabs button.active { border-color: #a14f32; color: #20302a; }
-.overview, .finance-summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+.overview { display: grid; grid-template-columns: repeat(3, 1fr); gap: 1rem; }
+.finance-summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1rem; }
 .overview div, .finance-summary div { padding: 1rem; background: #e8e3d7; }
 .overview small, .overview strong, .finance-summary small, .finance-summary strong { display: block; }
 .overview strong, .finance-summary strong { margin-top: .6rem; font-size: 1.8rem; font-weight: 500; }
