@@ -23,6 +23,14 @@ from .api import (
     StudentFinanceView,
     StudentLedgerListView,
 )
+from .mpesa_api import (
+    MpesaC2BConfirmationView,
+    MpesaC2BValidationView,
+    MpesaCallbackTokenRotateView,
+    MpesaConfigurationView,
+    MpesaStkCallbackView,
+    StkPushInitiateView,
+)
 
 
 urlpatterns = [
@@ -47,4 +55,10 @@ urlpatterns = [
     path("incoming-payments/<uuid:incoming_payment_id>/match/", IncomingPaymentMatchView.as_view(), name="incoming-payment-match"),
     path("incoming-payments/<uuid:incoming_payment_id>/ignore/", IncomingPaymentIgnoreView.as_view(), name="incoming-payment-ignore"),
     path("students/<uuid:student_id>/finance/", StudentFinanceView.as_view(), name="student-finance"),
+    path("mpesa-config/", MpesaConfigurationView.as_view(), name="mpesa-config"),
+    path("mpesa-config/rotate-callback-token/", MpesaCallbackTokenRotateView.as_view(), name="mpesa-config-rotate-token"),
+    path("mpesa/stk-push/", StkPushInitiateView.as_view(), name="mpesa-stk-push-initiate"),
+    path("mpesa/<str:callback_token>/c2b/validation/", MpesaC2BValidationView.as_view(), name="mpesa-c2b-validation"),
+    path("mpesa/<str:callback_token>/c2b/confirmation/", MpesaC2BConfirmationView.as_view(), name="mpesa-c2b-confirmation"),
+    path("mpesa/<str:callback_token>/stk/callback/", MpesaStkCallbackView.as_view(), name="mpesa-stk-callback"),
 ]

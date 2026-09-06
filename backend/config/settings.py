@@ -73,3 +73,12 @@ AUTH_USER_MODEL = "tenancy.User"
 REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "config.exceptions.exception_handler",
 }
+
+# Dev-only Fernet key (generated once for this repo's development default).
+# Production MUST override via the environment; changing this key makes
+# every previously-encrypted value (M-Pesa credentials) undecryptable.
+FIELD_ENCRYPTION_KEY = os.getenv("FIELD_ENCRYPTION_KEY", "tcgm_bXMcNCa925qDWCcoGJCg_UHxRh0N50KsbHtbic=")
+
+# Externally-reachable base URL used to build webhook callback URLs
+# (e.g. M-Pesa's CallBackURL) registered with third-party providers.
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")

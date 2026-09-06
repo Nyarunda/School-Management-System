@@ -6,7 +6,9 @@ from django.db.models import Q
 from django.utils import timezone
 
 from apps.academics.models import AcademicLevel, AcademicYear
-from apps.tenancy.models import TenantOwnedModel
+from apps.tenancy.models import Tenant, TenantOwnedModel, User
+
+from .fields import EncryptedCharField
 
 
 class FinanceSetup(TenantOwnedModel):
@@ -329,3 +331,78 @@ class StudentLedgerEntry(TenantOwnedModel):
 def validate_same_tenant(*, tenant, **objects):
     if any(value.tenant_id != tenant.id for value in objects.values()):
         raise ValidationError("Finance setup records must belong to the same tenant")
+
+
+class MpesaEnvironment(models.TextChoices):
+    SANDBOX = "SANDBOX", "Sandbox"
+    PRODUCTION = "PRODUCTION", "Production"
+
+
+class TenantMpesaConfiguration(TenantOwnedModel):
+    environment = models.CharField(max_length=20, choices=MpesaEnvironment.choices, default=MpesaEnvironment.SANDBOX)
+    shortcode = models.CharField(max_length=20)  # Paybill number -- not secret
+    consumer_key = EncryptedCharField(max_length=500)
+    consumer_secret = EncryptedCharField(max_length=500)
+    passkey = EncryptedCharField(max_length=500)
+    callback_token = models.CharField(max_length=64, unique=True)
+    payment_method = models.ForeignKey(PaymentMethod, on_delete=models.PROTECT, related_name="+")
+    system_user = models.ForeignKey(User, on_delete=models.PROTECT, related_name="+")
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant"], name="unique_mpesa_configuration_per_tenant")]
+
+
+class MpesaCallbackType(models.TextChoices):
+    C2B_VALIDATION = "C2B_VALIDATION", "C2B validation"
+    C2B_CONFIRMATION = "C2B_CONFIRMATION", "C2B confirmation"
+    STK_CALLBACK = "STK_CALLBACK", "STK callback"
+
+
+class MpesaCallbackLog(models.Model):
+    """Raw audit trail of every inbound webhook call, written before any
+    processing and in its own implicit transaction (never inside the same
+    atomic block as processing -- see mpesa_services.py). Deliberately not
+    a TenantOwnedModel: tenant may be unresolvable on a bad/stale token,
+    and that's still worth logging. Audit-only in this slice -- no REST
+    API surface, and deliberately not relied on as retry/recovery
+    infrastructure (that belongs to a durable queue in a future milestone).
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(Tenant, on_delete=models.SET_NULL, null=True, blank=True, related_name="mpesa_callback_logs")
+    callback_type = models.CharField(max_length=20, choices=MpesaCallbackType.choices)
+    provider_transaction_id = models.CharField(max_length=100, blank=True, default="")
+    raw_payload = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+
+class MpesaStkPushStatus(models.TextChoices):
+    PENDING = "PENDING", "Pending"
+    COMPLETED = "COMPLETED", "Completed"
+    FAILED = "FAILED", "Failed"
+
+
+class MpesaStkPushRequest(TenantOwnedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    student = models.ForeignKey("students.Student", on_delete=models.PROTECT, related_name="mpesa_stk_requests")
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, null=True, blank=True, related_name="mpesa_stk_requests")
+    phone_number = models.CharField(max_length=15)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    account_reference = models.CharField(max_length=40)
+    merchant_request_id = models.CharField(max_length=60)
+    checkout_request_id = models.CharField(max_length=60)
+    status = models.CharField(max_length=20, choices=MpesaStkPushStatus.choices, default=MpesaStkPushStatus.PENDING)
+    result_code = models.CharField(max_length=10, blank=True, default="")
+    result_description = models.CharField(max_length=240, blank=True, default="")
+    incoming_payment = models.ForeignKey(IncomingPayment, on_delete=models.PROTECT, null=True, blank=True, related_name="mpesa_stk_requests")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "checkout_request_id"], name="unique_stk_checkout_request_per_tenant"),
+            models.CheckConstraint(condition=Q(amount__gt=0), name="mpesa_stk_amount_positive"),
+        ]
+        indexes = [models.Index(fields=["tenant", "status"])]
