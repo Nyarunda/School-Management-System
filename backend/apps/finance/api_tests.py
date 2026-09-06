@@ -12,6 +12,19 @@ from .models import FeeCategory, FeeItem, FinanceSetup, NumberSeries
 
 
 class FinanceApiTests(TestCase):
+    def test_domain_validation_uses_shared_handler(self):
+        from .models import FeeStructure
+        structure = FeeStructure.objects.create(
+            tenant=self.school_a, name="Empty", academic_year=self.year, academic_level=self.level,
+        )
+        response = self.client.post(
+            f"/api/v1/finance/fee-structures/{structure.id}/approve/", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data, {"detail": ["A fee structure must have at least one line before approval"]})
+        structure.refresh_from_db()
+        self.assertFalse(structure.is_approved)
+
     def setUp(self):
         self.client = APIClient()
         self.school_a = Tenant.objects.create(name="School A", slug="school-a")
