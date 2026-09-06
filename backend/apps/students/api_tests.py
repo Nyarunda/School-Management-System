@@ -7,6 +7,23 @@ from .models import Student
 
 
 class StudentApiTests(TestCase):
+    def test_superuser_requires_membership_but_can_bypass_role_permission(self):
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_superuser"])
+        self.role.permissions = []
+        self.role.save(update_fields=["permissions"])
+        self.assertEqual(self.client.get("/api/v1/students/", HTTP_X_TENANT_SLUG="school-a").status_code, 200)
+        self.assertEqual(self.client.get("/api/v1/students/", HTTP_X_TENANT_SLUG="school-b").status_code, 403)
+
+    def test_disabled_tenant_and_missing_permission_are_denied(self):
+        self.role.permissions = []
+        self.role.save(update_fields=["permissions"])
+        self.assertEqual(self.client.get("/api/v1/students/", HTTP_X_TENANT_SLUG="school-a").status_code, 403)
+        self.role.permissions = ["students.view"]
+        self.role.save(update_fields=["permissions"])
+        Tenant.objects.filter(pk=self.school_a.pk).update(is_active=False)
+        self.assertEqual(self.client.get("/api/v1/students/", HTTP_X_TENANT_SLUG="school-a").status_code, 403)
+
     def setUp(self):
         self.client = APIClient()
         self.school_a = Tenant.objects.create(name="School A", slug="school-a")

@@ -7,6 +7,28 @@ from .services import require_membership, require_permission, require_same_tenan
 
 
 class TenantIsolationTests(TestCase):
+    def test_superuser_still_requires_active_tenant_membership(self):
+        self.user.is_superuser = True
+        self.user.save(update_fields=["is_superuser"])
+        with self.assertRaises(ValidationError):
+            require_permission(user=self.user, tenant=self.school_a, permission="students.view")
+        Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role_a)
+        require_permission(user=self.user, tenant=self.school_a, permission="students.view")
+        Tenant.objects.filter(pk=self.school_a.pk).update(is_active=False)
+        with self.assertRaises(ValidationError):
+            require_permission(user=self.user, tenant=self.school_a, permission="students.view")
+
+    def test_inactive_user_and_foreign_role_are_rejected(self):
+        membership = Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role_a)
+        User.objects.filter(pk=self.user.pk).update(is_active=False)
+        with self.assertRaises(ValidationError):
+            require_membership(user=self.user, tenant=self.school_a)
+        User.objects.filter(pk=self.user.pk).update(is_active=True)
+        foreign_role = Role.objects.create(tenant=self.school_b, name="Foreign", permissions=["students.view"])
+        Membership.objects.filter(pk=membership.pk).update(role=foreign_role)
+        with self.assertRaises(ValidationError):
+            require_permission(user=self.user, tenant=self.school_a, permission="students.view")
+
     def setUp(self):
         self.school_a = Tenant.objects.create(name="School A", slug="school-a")
         self.school_b = Tenant.objects.create(name="School B", slug="school-b")

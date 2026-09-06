@@ -11,6 +11,51 @@ from .services import enroll_student
 
 
 class AcademicFoundationTests(TestCase):
+    def enroll(self, **overrides):
+        values = dict(user=self.user, tenant=self.school_a, student=self.student,
+                      academic_year=self.year_a, academic_level=self.level_a,
+                      class_group=self.class_a, campus=self.campus_a, term=self.term_a)
+        values.update(overrides)
+        return enroll_student(**values)
+
+    def test_same_tenant_relationship_mismatches_are_rejected(self):
+        other_year = AcademicYear.objects.create(tenant=self.school_a, name="2027",
+            starts_on=date(2027, 1, 1), ends_on=date(2027, 12, 31))
+        other_level = AcademicLevel.objects.create(tenant=self.school_a, name="Other", code="OTHER", sequence=9)
+        other_campus = Campus.objects.create(tenant=self.school_a, name="Other", code="OTHER")
+        for override in ({"academic_year": other_year}, {"academic_level": other_level}, {"campus": other_campus}):
+            with self.subTest(override=override), self.assertRaises(ValidationError):
+                self.enroll(**override)
+        self.assertEqual(StudentEnrollment.objects.count(), 0)
+
+    def test_stale_class_instance_is_reloaded_before_validation(self):
+        other_campus = Campus.objects.create(tenant=self.school_a, name="Other", code="OTHER")
+        ClassGroup.objects.filter(pk=self.class_a.pk).update(campus=other_campus)
+        with self.assertRaisesMessage(ValidationError, "campus"):
+            self.enroll()
+
+    def test_duplicate_enrollment_has_one_activity_event(self):
+        from apps.activity.models import ActivityEvent
+        self.enroll()
+        with self.assertRaisesMessage(ValidationError, "already has an enrollment"):
+            self.enroll()
+        self.assertEqual(StudentEnrollment.objects.count(), 1)
+        self.assertEqual(ActivityEvent.objects.count(), 1)
+
+    def test_activity_failure_rolls_back_enrollment(self):
+        from unittest.mock import patch
+        with patch("apps.academics.services.record_activity", side_effect=RuntimeError("unavailable")):
+            with self.assertRaises(RuntimeError):
+                self.enroll()
+        self.assertEqual(StudentEnrollment.objects.count(), 0)
+
+    def test_unrelated_integrity_error_is_not_reported_as_duplicate(self):
+        from unittest.mock import patch
+        from django.db import IntegrityError
+        with patch.object(StudentEnrollment, "save", side_effect=IntegrityError("other constraint")):
+            with self.assertRaises(IntegrityError):
+                self.enroll()
+
     def setUp(self):
         self.school_a = Tenant.objects.create(name="School A", slug="school-a")
         self.school_b = Tenant.objects.create(name="School B", slug="school-b")
