@@ -1,6 +1,7 @@
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.exceptions import NotFound, PermissionDenied
@@ -57,6 +58,21 @@ def resolve_finance_tenant(request, permission):
 
 def api_validation_error(error):
     return Response({"detail": error.messages}, status=status.HTTP_400_BAD_REQUEST)
+
+
+def resolve_tenant_object(queryset, pk):
+    """Fetch a tenant-scoped object by primary key.
+
+    A malformed identifier (e.g. a non-UUID string) makes Django's ORM raise
+    a bare ValidationError while resolving the lookup, which DRF's default
+    exception handler does not translate into a response. Treat a malformed
+    identifier the same as a missing one (404) instead of letting it surface
+    as an unhandled 500.
+    """
+    try:
+        return get_object_or_404(queryset, pk=pk)
+    except ValidationError as error:
+        raise NotFound("No matching record for the given identifier") from error
 
 
 class FinanceSetupSerializer(serializers.ModelSerializer):
@@ -120,7 +136,7 @@ class FeeItemListCreateView(ListCreateAPIView):
 
     def perform_create(self, serializer):
         tenant = resolve_finance_tenant(self.request, "finance.setup.manage")
-        category = get_object_or_404(FeeCategory.objects.for_tenant(tenant), pk=self.request.data.get("category"))
+        category = resolve_tenant_object(FeeCategory.objects.for_tenant(tenant), self.request.data.get("category"))
         serializer.save(tenant=tenant, category=category)
 
 
@@ -163,7 +179,7 @@ class FeeStructureListCreateView(ListCreateAPIView):
                 academic_year=academic_year,
                 academic_level=academic_level,
             )
-        except (KeyError, ValidationError) as error:
+        except (KeyError, ValidationError, IntegrityError) as error:
             return api_validation_error(error if isinstance(error, ValidationError) else ValidationError(str(error)))
         return Response(self.get_serializer(structure).data, status=status.HTTP_201_CREATED)
 
@@ -174,7 +190,7 @@ class FeeStructureLineCreateView(APIView):
     def post(self, request, structure_id):
         tenant = resolve_finance_tenant(request, "finance.fee_structure.edit")
         structure = get_object_or_404(FeeStructure.objects.for_tenant(tenant), pk=structure_id)
-        fee_item = get_object_or_404(FeeItem.objects.for_tenant(tenant), pk=request.data.get("fee_item"))
+        fee_item = resolve_tenant_object(FeeItem.objects.for_tenant(tenant), request.data.get("fee_item"))
         try:
             line = add_fee_structure_line(
                 user=request.user,
@@ -184,7 +200,7 @@ class FeeStructureLineCreateView(APIView):
                 amount=Decimal(str(request.data["amount"])),
                 is_required=request.data.get("is_required", True),
             )
-        except (KeyError, ValidationError, ValueError) as error:
+        except (KeyError, ValidationError, ValueError, InvalidOperation, IntegrityError) as error:
             return api_validation_error(error if isinstance(error, ValidationError) else ValidationError(str(error)))
         return Response(FeeStructureLineSerializer(line).data, status=status.HTTP_201_CREATED)
 
@@ -195,10 +211,7 @@ class FeeStructureApproveView(APIView):
     def post(self, request, structure_id):
         tenant = resolve_finance_tenant(request, "finance.fee_structure.approve")
         structure = get_object_or_404(FeeStructure.objects.for_tenant(tenant), pk=structure_id)
-        try:
-            approve_fee_structure(user=request.user, tenant=tenant, fee_structure=structure)
-        except ValidationError as error:
-            return api_validation_error(error)
+        approve_fee_structure(user=request.user, tenant=tenant, fee_structure=structure)
         return Response(FeeStructureSerializer(structure).data)
 
 
@@ -223,12 +236,9 @@ class AssignmentListCreateView(ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         tenant = resolve_finance_tenant(request, "finance.invoice.create")
-        student = get_object_or_404(Student.objects.for_tenant(tenant), pk=request.data.get("student"))
-        structure = get_object_or_404(FeeStructure.objects.for_tenant(tenant), pk=request.data.get("fee_structure"))
-        try:
-            assignment = assign_fee_structure(user=request.user, tenant=tenant, student=student, fee_structure=structure)
-        except ValidationError as error:
-            return api_validation_error(error)
+        student = resolve_tenant_object(Student.objects.for_tenant(tenant), request.data.get("student"))
+        structure = resolve_tenant_object(FeeStructure.objects.for_tenant(tenant), request.data.get("fee_structure"))
+        assignment = assign_fee_structure(user=request.user, tenant=tenant, student=student, fee_structure=structure)
         return Response(self.get_serializer(assignment).data, status=status.HTTP_201_CREATED)
 
 
@@ -259,7 +269,12 @@ class InvoiceListView(ListAPIView):
         tenant = resolve_finance_tenant(self.request, "finance.invoice.view")
         queryset = Invoice.objects.for_tenant(tenant).select_related("student", "assignment").prefetch_related("lines").order_by("-created_at")
         student_id = self.request.query_params.get("student")
-        return queryset.filter(student_id=student_id) if student_id else queryset
+        if not student_id:
+            return queryset
+        try:
+            return queryset.filter(student_id=student_id)
+        except ValidationError as error:
+            raise NotFound("No matching record for the given identifier") from error
 
 
 class InvoiceGenerateView(APIView):
@@ -268,10 +283,7 @@ class InvoiceGenerateView(APIView):
     def post(self, request, assignment_id):
         tenant = resolve_finance_tenant(request, "finance.invoice.create")
         assignment = get_object_or_404(StudentFeeAssignment.objects.for_tenant(tenant), pk=assignment_id)
-        try:
-            invoice = generate_invoice(user=request.user, tenant=tenant, assignment=assignment)
-        except ValidationError as error:
-            return api_validation_error(error)
+        invoice = generate_invoice(user=request.user, tenant=tenant, assignment=assignment)
         return Response(InvoiceSerializer(invoice).data, status=status.HTTP_201_CREATED)
 
 
@@ -281,10 +293,7 @@ class InvoiceIssueView(APIView):
     def post(self, request, invoice_id):
         tenant = resolve_finance_tenant(request, "finance.invoice.issue")
         invoice = get_object_or_404(Invoice.objects.for_tenant(tenant), pk=invoice_id)
-        try:
-            invoice = issue_invoice(user=request.user, tenant=tenant, invoice=invoice)
-        except ValidationError as error:
-            return api_validation_error(error)
+        invoice = issue_invoice(user=request.user, tenant=tenant, invoice=invoice)
         return Response(InvoiceSerializer(invoice).data)
 
 
@@ -306,9 +315,9 @@ class CreditNoteListCreateView(ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         tenant = resolve_finance_tenant(request, "finance.credit_note.create")
-        student = get_object_or_404(Student.objects.for_tenant(tenant), pk=request.data.get("student"))
+        student = resolve_tenant_object(Student.objects.for_tenant(tenant), request.data.get("student"))
         invoice_id = request.data.get("invoice")
-        invoice = get_object_or_404(Invoice.objects.for_tenant(tenant), pk=invoice_id) if invoice_id else None
+        invoice = resolve_tenant_object(Invoice.objects.for_tenant(tenant), invoice_id) if invoice_id else None
         try:
             credit_note = issue_credit_note(
                 user=request.user,
@@ -318,7 +327,7 @@ class CreditNoteListCreateView(ListCreateAPIView):
                 amount=Decimal(str(request.data["amount"])),
                 reason=request.data["reason"],
             )
-        except (KeyError, ValidationError, ValueError) as error:
+        except (KeyError, ValidationError, ValueError, InvalidOperation) as error:
             return api_validation_error(error if isinstance(error, ValidationError) else ValidationError(str(error)))
         return Response(self.get_serializer(credit_note).data, status=status.HTTP_201_CREATED)
 

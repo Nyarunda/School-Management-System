@@ -1,3 +1,5 @@
+from django.core.exceptions import ValidationError
+from rest_framework.exceptions import PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -18,7 +20,10 @@ class SessionView(APIView):
         requested_slug = request.headers.get("X-Tenant-Slug")
         active = None
         if requested_slug:
-            active = require_membership(user=request.user, tenant_slug=requested_slug)
+            try:
+                active = require_membership(user=request.user, tenant_slug=requested_slug)
+            except ValidationError as error:
+                raise PermissionDenied(error.messages) from error
         elif memberships:
             active = memberships[0]
         return Response({
