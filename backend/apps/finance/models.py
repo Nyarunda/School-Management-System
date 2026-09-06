@@ -341,9 +341,9 @@ class MpesaEnvironment(models.TextChoices):
 class TenantMpesaConfiguration(TenantOwnedModel):
     environment = models.CharField(max_length=20, choices=MpesaEnvironment.choices, default=MpesaEnvironment.SANDBOX)
     shortcode = models.CharField(max_length=20)  # Paybill number -- not secret
-    consumer_key = EncryptedCharField(max_length=500)
-    consumer_secret = EncryptedCharField(max_length=500)
-    passkey = EncryptedCharField(max_length=500)
+    consumer_key = EncryptedCharField(max_length=1024)
+    consumer_secret = EncryptedCharField(max_length=1024)
+    passkey = EncryptedCharField(max_length=1024)
     callback_token = models.CharField(max_length=64, unique=True)
     payment_method = models.ForeignKey(PaymentMethod, on_delete=models.PROTECT, related_name="+")
     system_user = models.ForeignKey(User, on_delete=models.PROTECT, related_name="+")
@@ -359,6 +359,13 @@ class MpesaCallbackType(models.TextChoices):
     C2B_VALIDATION = "C2B_VALIDATION", "C2B validation"
     C2B_CONFIRMATION = "C2B_CONFIRMATION", "C2B confirmation"
     STK_CALLBACK = "STK_CALLBACK", "STK callback"
+
+
+class MpesaCallbackStatus(models.TextChoices):
+    RECEIVED = "RECEIVED", "Awaiting verification"
+    PROCESSED = "PROCESSED", "Processed"
+    FAILED = "FAILED", "Processing failed"
+    REJECTED = "REJECTED", "Rejected"
 
 
 class MpesaCallbackLog(models.Model):
@@ -377,9 +384,22 @@ class MpesaCallbackLog(models.Model):
     provider_transaction_id = models.CharField(max_length=100, blank=True, default="")
     raw_payload = models.JSONField()
     created_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=20, choices=MpesaCallbackStatus.choices, default=MpesaCallbackStatus.RECEIVED, db_default=MpesaCallbackStatus.RECEIVED)
+    request_id = models.UUIDField(null=True, blank=True)
+    verified_by = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="verified_mpesa_callbacks")
+    verified_at = models.DateTimeField(null=True, blank=True)
+    verification_reference = models.CharField(max_length=240, blank=True, db_default="")
+    processed_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveIntegerField(default=0, db_default=0)
+    last_error = models.CharField(max_length=240, blank=True, db_default="")
+
+    class Meta:
+        indexes = [models.Index(fields=["tenant", "status", "created_at"])]
 
 
 class MpesaStkPushStatus(models.TextChoices):
+    INITIATING = "INITIATING", "Initiating"
+    UNKNOWN = "UNKNOWN", "Provider outcome unknown"
     PENDING = "PENDING", "Pending"
     COMPLETED = "COMPLETED", "Completed"
     FAILED = "FAILED", "Failed"
@@ -392,8 +412,12 @@ class MpesaStkPushRequest(TenantOwnedModel):
     phone_number = models.CharField(max_length=15)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     account_reference = models.CharField(max_length=40)
-    merchant_request_id = models.CharField(max_length=60)
-    checkout_request_id = models.CharField(max_length=60)
+    merchant_request_id = models.CharField(max_length=60, blank=True)
+    checkout_request_id = models.CharField(max_length=60, null=True, blank=True)
+    idempotency_key = models.CharField(max_length=120, null=True, blank=True)
+    confirmed_receipt = models.CharField(max_length=120, null=True, blank=True)
+    provider_query = models.JSONField(default=dict, db_default={})
+    queried_at = models.DateTimeField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=MpesaStkPushStatus.choices, default=MpesaStkPushStatus.PENDING)
     result_code = models.CharField(max_length=10, blank=True, default="")
     result_description = models.CharField(max_length=240, blank=True, default="")
@@ -403,6 +427,8 @@ class MpesaStkPushRequest(TenantOwnedModel):
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["tenant", "checkout_request_id"], name="unique_stk_checkout_request_per_tenant"),
+            models.UniqueConstraint(fields=["tenant", "idempotency_key"], name="unique_stk_idempotency_per_tenant"),
+            models.UniqueConstraint(fields=["tenant", "confirmed_receipt"], name="unique_stk_receipt_per_tenant"),
             models.CheckConstraint(condition=Q(amount__gt=0), name="mpesa_stk_amount_positive"),
         ]
         indexes = [models.Index(fields=["tenant", "status"])]

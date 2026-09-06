@@ -31,6 +31,9 @@ class MpesaApiTests(TestCase):
             name="Finance administrator",
             permissions=[
                 "finance.mpesa.configure",
+                "finance.mpesa.callback.view",
+                "finance.mpesa.callback.verify",
+                "finance.mpesa.callback.process",
                 "finance.mpesa.stk_push.initiate",
                 "finance.fee_structure.create",
                 "finance.fee_structure.edit",
@@ -93,7 +96,7 @@ class MpesaApiTests(TestCase):
 
         response = self.client.post(
             "/api/v1/finance/mpesa/stk-push/",
-            {"student": str(self.student.id), "phone_number": "0712345678", "amount": "1000.00"},
+            {"student": str(self.student.id), "phone_number": "0712345678", "idempotency_key": "test-request", "amount": "1000.00"},
             format="json", **self.headers(),
         )
         self.assertEqual(response.status_code, 403)
@@ -121,7 +124,7 @@ class MpesaApiTests(TestCase):
 
         initiate_response = self.client.post(
             "/api/v1/finance/mpesa/stk-push/",
-            {"student": str(self.student.id), "phone_number": "0712345678", "amount": "50000.00"},
+            {"student": str(self.student.id), "phone_number": "0712345678", "idempotency_key": "test-request", "amount": "50000.00"},
             format="json", **self.headers(),
         )
         self.assertEqual(initiate_response.status_code, 201)
@@ -136,6 +139,14 @@ class MpesaApiTests(TestCase):
         )
         self.assertEqual(callback_response.status_code, 200)
 
+        callback = MpesaCallbackLog.objects.order_by("-created_at").first()
+        before = self.client.get(f"/api/v1/finance/students/{self.student.id}/finance/", **self.headers())
+        self.assertEqual(before.data["summary"]["outstanding_balance"], Decimal("50000.00"))
+        verify = self.client.post(f"/api/v1/finance/mpesa/callbacks/{callback.id}/verify/",
+            {"evidence": "Verified against provider statement TEST-001"}, format="json", **self.headers())
+        self.assertEqual(verify.status_code, 200)
+        process = self.client.post(f"/api/v1/finance/mpesa/callbacks/{callback.id}/process/", {}, format="json", **self.headers())
+        self.assertEqual(process.status_code, 200, process.data)
         summary_response = self.client.get(f"/api/v1/finance/students/{self.student.id}/finance/", **self.headers())
         self.assertEqual(summary_response.data["summary"]["outstanding_balance"], Decimal("0.00"))
 
@@ -158,6 +169,14 @@ class MpesaApiTests(TestCase):
         )
         self.assertEqual(confirmation_response.status_code, 200)
 
+        callback = MpesaCallbackLog.objects.order_by("-created_at").first()
+        before = self.client.get(f"/api/v1/finance/students/{self.student.id}/finance/", **self.headers())
+        self.assertEqual(before.data["summary"]["outstanding_balance"], Decimal("50000.00"))
+        verify = self.client.post(f"/api/v1/finance/mpesa/callbacks/{callback.id}/verify/",
+            {"evidence": "Verified against provider statement TEST-001"}, format="json", **self.headers())
+        self.assertEqual(verify.status_code, 200)
+        process = self.client.post(f"/api/v1/finance/mpesa/callbacks/{callback.id}/process/", {}, format="json", **self.headers())
+        self.assertEqual(process.status_code, 200, process.data)
         summary_response = self.client.get(f"/api/v1/finance/students/{self.student.id}/finance/", **self.headers())
         self.assertEqual(summary_response.data["summary"]["outstanding_balance"], Decimal("0.00"))
 
@@ -167,39 +186,26 @@ class MpesaApiTests(TestCase):
             response = self.client.post(f"/api/v1/finance/mpesa/{bogus_token}/{path}/", {}, format="json")
             self.assertEqual(response.status_code, 404, path)
 
-    def test_c2b_confirmation_failure_does_not_ack_success_but_still_logs(self):
+    def test_callback_acknowledgement_requires_durable_storage(self):
         config = self._configure()
-        # Django's test client re-raises unhandled view exceptions by
-        # default (since DEBUG=True) rather than returning a 500 response --
-        # exactly the "let it propagate, don't fake success" behavior we
-        # want to prove, so assert on the raised exception, not a status
-        # code, and confirm the log survives despite it.
-        with patch("apps.finance.mpesa_api.handle_c2b_confirmation", side_effect=RuntimeError("boom")):
-            with self.assertRaises(RuntimeError):
-                self.client.post(
-                    f"/api/v1/finance/mpesa/{config['callback_token']}/c2b/confirmation/",
-                    {"TransID": "QGH002", "TransAmount": "1000", "BillRefNumber": ""},
-                    format="json",
-                )
+        for path in ("c2b/confirmation", "stk/callback"):
+            with self.subTest(path=path), patch("apps.finance.mpesa_api.log_mpesa_callback", side_effect=RuntimeError("storage down")):
+                with self.assertRaises(RuntimeError):
+                    self.client.post(f"/api/v1/finance/mpesa/{config['callback_token']}/{path}/", {}, format="json")
 
-        self.assertTrue(MpesaCallbackLog.objects.filter(provider_transaction_id="QGH002").exists())
-
-    def test_stk_callback_failure_does_not_ack_success_but_still_logs(self):
+    def test_malformed_callbacks_are_retained_without_processing(self):
         config = self._configure()
-        payload = {"Body": {"stkCallback": {"ResultCode": 0, "CheckoutRequestID": "checkout-err"}}}
-
-        with patch("apps.finance.mpesa_api.handle_stk_callback", side_effect=RuntimeError("boom")):
-            with self.assertRaises(RuntimeError):
-                self.client.post(f"/api/v1/finance/mpesa/{config['callback_token']}/stk/callback/", payload, format="json")
-
-        self.assertTrue(MpesaCallbackLog.objects.filter(provider_transaction_id="checkout-err").exists())
+        for path in ("c2b/confirmation", "stk/callback"):
+            response = self.client.post(f"/api/v1/finance/mpesa/{config['callback_token']}/{path}/", [], format="json")
+            self.assertEqual(response.status_code, 200)
+        self.assertEqual(MpesaCallbackLog.objects.filter(status="RECEIVED").count(), 2)
 
     def test_stk_push_malformed_student_id_is_a_400_not_a_500(self):
         self._configure()
 
         response = self.client.post(
             "/api/v1/finance/mpesa/stk-push/",
-            {"student": "not-a-uuid", "phone_number": "0712345678", "amount": "1000.00"},
+            {"student": "not-a-uuid", "phone_number": "0712345678", "idempotency_key": "test-request", "amount": "1000.00"},
             format="json", **self.headers(),
         )
         self.assertEqual(response.status_code, 400)
@@ -209,7 +215,7 @@ class MpesaApiTests(TestCase):
 
         response = self.client.post(
             "/api/v1/finance/mpesa/stk-push/",
-            {"student": str(uuid.uuid4()), "phone_number": "0712345678", "amount": "1000.00"},
+            {"student": str(uuid.uuid4()), "phone_number": "0712345678", "idempotency_key": "test-request", "amount": "1000.00"},
             format="json", **self.headers(),
         )
         self.assertEqual(response.status_code, 404)

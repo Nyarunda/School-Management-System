@@ -1,10 +1,13 @@
 import os
 from pathlib import Path
+from urllib.parse import urlparse
+from django.core.exceptions import ImproperlyConfigured
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-SECRET_KEY = "development-only-change-me"
-DEBUG = True
-ALLOWED_HOSTS = []
+PRODUCTION = os.getenv("DJANGO_ENV", "development").lower() == "production"
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "development-only-change-me")
+DEBUG = not PRODUCTION
+ALLOWED_HOSTS = [host.strip() for host in os.getenv("DJANGO_ALLOWED_HOSTS", "").split(",") if host.strip()]
 
 INSTALLED_APPS = [
     "django.contrib.auth",
@@ -82,3 +85,24 @@ FIELD_ENCRYPTION_KEY = os.getenv("FIELD_ENCRYPTION_KEY", "tcgm_bXMcNCa925qDWCcoG
 # Externally-reachable base URL used to build webhook callback URLs
 # (e.g. M-Pesa's CallBackURL) registered with third-party providers.
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
+
+if PRODUCTION:
+    required = ("DJANGO_SECRET_KEY", "FIELD_ENCRYPTION_KEY", "PUBLIC_BASE_URL", "DJANGO_ALLOWED_HOSTS")
+    if any(not os.getenv(name) for name in required):
+        raise ImproperlyConfigured("Production requires explicit secret, encryption key, public URL, and allowed hosts")
+    if SECRET_KEY == "development-only-change-me" or len(SECRET_KEY) < 32:
+        raise ImproperlyConfigured("Production requires a non-default secret key of at least 32 characters")
+    if FIELD_ENCRYPTION_KEY == "tcgm_bXMcNCa925qDWCcoGJCg_UHxRh0N50KsbHtbic=":
+        raise ImproperlyConfigured("Production cannot use the development field encryption key")
+    parsed_public_url = urlparse(PUBLIC_BASE_URL)
+    if parsed_public_url.scheme != "https" or not parsed_public_url.hostname or parsed_public_url.hostname in ("localhost", "127.0.0.1", "::1") or parsed_public_url.query or parsed_public_url.fragment or parsed_public_url.username:
+        raise ImproperlyConfigured("Production PUBLIC_BASE_URL must be an external HTTPS URL")
+    if "*" in ALLOWED_HOSTS or DATABASES["default"]["ENGINE"] != "django.db.backends.postgresql":
+        raise ImproperlyConfigured("Production requires explicit allowed hosts and PostgreSQL")
+    from cryptography.fernet import Fernet
+    try:
+        Fernet(FIELD_ENCRYPTION_KEY)
+    except (ValueError, TypeError):
+        raise ImproperlyConfigured("FIELD_ENCRYPTION_KEY must be a valid Fernet key") from None
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True

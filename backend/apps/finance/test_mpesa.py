@@ -146,13 +146,12 @@ class StkPushTests(TestCase):
         self.assertEqual(call_kwargs["account_reference"], "ADM-001")
 
     @patch("apps.finance.mpesa_services.MpesaClient")
-    def test_initiate_stk_push_api_error_creates_no_request(self, mock_client_cls):
+    def test_initiate_stk_push_api_error_preserves_unknown_request(self, mock_client_cls):
         mock_client_cls.return_value.stk_push.side_effect = MpesaApiError("network down")
 
-        with self.assertRaises(ValidationError):
-            initiate_stk_push(user=self.user, tenant=self.tenant, student=self.student, phone_number="0712345678", amount=Decimal("1000.00"))
-
-        self.assertEqual(MpesaStkPushRequest.objects.count(), 0)
+        request = initiate_stk_push(user=self.user, tenant=self.tenant, student=self.student, phone_number="0712345678", amount=Decimal("1000.00"))
+        self.assertEqual(request.status, MpesaStkPushStatus.UNKNOWN)
+        self.assertEqual(MpesaStkPushRequest.objects.count(), 1)
 
     def test_initiate_stk_push_without_configuration_is_rejected(self):
         other_tenant = Tenant.objects.create(name="School B", slug="school-b")
@@ -259,7 +258,8 @@ class MpesaCallbackHandlingTests(TestCase):
         self.assertEqual(Payment.objects.count(), 0)
 
     def test_stk_callback_unknown_checkout_id_is_a_noop(self):
-        handle_stk_callback(tenant=self.tenant, config=self.config, payload=self._stk_callback_payload("does-not-exist"))
+        with self.assertRaisesMessage(ValidationError, "Unknown checkout"):
+            handle_stk_callback(tenant=self.tenant, config=self.config, payload=self._stk_callback_payload("does-not-exist"))
         self.assertEqual(Payment.objects.count(), 0)
 
     def test_stk_callback_replay_after_completion_is_a_noop(self):
@@ -285,16 +285,14 @@ class MpesaCallbackHandlingTests(TestCase):
         stk_request.refresh_from_db()
         self.assertEqual(stk_request.status, MpesaStkPushStatus.PENDING)
 
-    def test_stk_callback_amount_mismatch_still_completes_but_records_activity(self):
-        stk_request = self._stk_request(amount="50000.00")
-        payload = self._stk_callback_payload(stk_request.checkout_request_id, amount="1000")  # confirmed amount differs from requested
-
-        handle_stk_callback(tenant=self.tenant, config=self.config, payload=payload)
-
-        stk_request.refresh_from_db()
-        self.assertEqual(stk_request.status, MpesaStkPushStatus.COMPLETED)
-        self.assertTrue(ActivityEvent.objects.filter(tenant=self.tenant, action="mpesa.stk_amount_mismatch").exists())
-        self.assertEqual(stk_request.incoming_payment.amount, Decimal("1000.00"))
+    def test_stk_callback_amount_mismatch_requires_reconciliation(self):
+        request = self._stk_request()
+        with self.assertRaisesMessage(ValidationError, "Confirmed amount differs"):
+            handle_stk_callback(tenant=self.tenant, config=self.config,
+                                payload=self._stk_callback_payload(request.checkout_request_id, amount="1000"))
+        request.refresh_from_db()
+        self.assertEqual(request.status, MpesaStkPushStatus.PENDING)
+        self.assertEqual(Payment.objects.count(), 0)
 
     # --- log_mpesa_callback ---
 

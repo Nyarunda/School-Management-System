@@ -24,6 +24,8 @@ from .api import (
     StudentLedgerListView,
 )
 from .mpesa_api import (
+    StkRequestListView, StkRequestDetailView, StkRequestQueryView, StkRequestIdentifyView,
+    CallbackListView, CallbackDetailView, CallbackVerifyView, CallbackProcessView, CallbackRejectView,
     MpesaC2BConfirmationView,
     MpesaC2BValidationView,
     MpesaCallbackTokenRotateView,
@@ -34,6 +36,16 @@ from .mpesa_api import (
 
 
 urlpatterns = [
+    path("mpesa/stk-requests/", StkRequestListView.as_view(), name="mpesa-stk-request-list"),
+    path("mpesa/stk-requests/<uuid:request_id>/", StkRequestDetailView.as_view(), name="mpesa-stk-request-detail"),
+    path("mpesa/stk-requests/<uuid:request_id>/query/", StkRequestQueryView.as_view(), name="mpesa-stk-request-query"),
+    path("mpesa/stk-requests/<uuid:request_id>/identify/", StkRequestIdentifyView.as_view(), name="mpesa-stk-request-identify"),
+    path("mpesa/callbacks/", CallbackListView.as_view(), name="mpesa-callback-list"),
+    path("mpesa/callbacks/<uuid:callback_id>/", CallbackDetailView.as_view(), name="mpesa-callback-detail"),
+    path("mpesa/callbacks/<uuid:callback_id>/verify/", CallbackVerifyView.as_view(), name="mpesa-callback-verify"),
+    path("mpesa/callbacks/<uuid:callback_id>/process/", CallbackProcessView.as_view(), name="mpesa-callback-process"),
+    path("mpesa/callbacks/<uuid:callback_id>/reject/", CallbackRejectView.as_view(), name="mpesa-callback-reject"),
+    path("mpesa/<str:callback_token>/stk/callback/<uuid:request_id>/", MpesaStkCallbackView.as_view(), name="mpesa-stk-correlated-callback"),
     path("setup/", FinanceSetupView.as_view(), name="finance-setup"),
     path("fee-categories/", FeeCategoryListCreateView.as_view(), name="fee-category-list"),
     path("fee-items/", FeeItemListCreateView.as_view(), name="fee-item-list"),
