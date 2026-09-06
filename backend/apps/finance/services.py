@@ -9,6 +9,7 @@ from apps.activity.services import record_activity
 from apps.tenancy.services import require_permission
 
 from .models import (
+    AllocationReversal,
     CreditNote,
     CreditNoteStatus,
     FeeAssignmentStatus,
@@ -19,6 +20,9 @@ from .models import (
     InvoiceStatus,
     LedgerEntryType,
     NumberSeries,
+    Payment,
+    PaymentAllocation,
+    Receipt,
     StudentFeeAssignment,
     StudentLedgerEntry,
     validate_same_tenant,
@@ -180,6 +184,15 @@ def issue_credit_note(*, user, tenant, student, amount, reason, invoice=None):
     validate_same_tenant(tenant=tenant, student=student)
     if invoice is not None:
         validate_same_tenant(tenant=tenant, invoice=invoice)
+        # Any operation deciding whether more value can be applied against an
+        # invoice must hold that invoice's row lock while making and recording
+        # the decision -- otherwise two concurrent credit notes (or a credit
+        # note racing a payment allocation) can each read a stale balance and
+        # together exceed it. allocate_payment() follows the same protocol.
+        try:
+            invoice = Invoice.objects.select_for_update().get(tenant=tenant, pk=invoice.pk)
+        except Invoice.DoesNotExist as error:
+            raise ValidationError("Invoice is not available in this tenant") from error
         if invoice.student_id != student.id:
             raise ValidationError("Credit note invoice must belong to the student")
         issued_credits = invoice.credit_notes.filter(status=CreditNoteStatus.ISSUED).aggregate(total=Sum("amount"))["total"] or Decimal("0")
@@ -210,3 +223,154 @@ def issue_credit_note(*, user, tenant, student, amount, reason, invoice=None):
         resource_id=str(credit_note.id),
     )
     return credit_note
+
+
+def _matching_replay(*, existing, student, payment_method, amount):
+    if existing.student_id != student.id or existing.amount != amount or existing.payment_method_id != payment_method.id:
+        raise ValidationError("Idempotency key already used with different payment details")
+    return existing
+
+
+@transaction.atomic
+def record_payment(*, user, tenant, student, payment_method, amount, idempotency_key, external_reference="", received_at=None):
+    require_permission(user=user, tenant=tenant, permission="finance.payment.record")
+    if amount <= 0:
+        raise ValidationError("Payment amount must be greater than zero")
+    validate_same_tenant(tenant=tenant, student=student, payment_method=payment_method)
+    existing = Payment.objects.filter(tenant=tenant, idempotency_key=idempotency_key).first()
+    if existing is not None:
+        return _matching_replay(existing=existing, student=student, payment_method=payment_method, amount=amount)
+    try:
+        # A nested atomic() creates a savepoint: on IntegrityError, Django rolls
+        # back only to it, leaving the outer transaction usable for the replay
+        # lookup below. Without this, PostgreSQL marks the whole transaction
+        # aborted and that lookup would itself fail.
+        with transaction.atomic():
+            payment = Payment.objects.create(
+                tenant=tenant,
+                student=student,
+                payment_method=payment_method,
+                amount=amount,
+                idempotency_key=idempotency_key,
+                external_reference=external_reference,
+                received_at=received_at or timezone.now(),
+            )
+            Receipt.objects.create(
+                tenant=tenant,
+                payment=payment,
+                receipt_number=_next_number(tenant=tenant, document_type="RECEIPT"),
+            )
+    except IntegrityError as error:
+        # Only translate the idempotency-key collision, not unrelated failures
+        # (e.g. a genuine receipt-numbering bug) into a business validation error.
+        cause = error.__cause__
+        constraint = getattr(getattr(cause, "diag", None), "constraint_name", None)
+        sqlite_duplicate = str(cause) == "UNIQUE constraint failed: finance_payment.tenant_id, finance_payment.idempotency_key"
+        if constraint != "unique_payment_idempotency_per_tenant" and not sqlite_duplicate:
+            raise
+        replay = Payment.objects.filter(tenant=tenant, idempotency_key=idempotency_key).first()
+        if replay is None:
+            raise ValidationError("Payment recording conflicted with another request") from error
+        return _matching_replay(existing=replay, student=student, payment_method=payment_method, amount=amount)
+    record_activity(
+        tenant=tenant,
+        actor=user,
+        action="payment.recorded",
+        resource_type="payment",
+        resource_id=str(payment.id),
+    )
+    return payment
+
+
+@transaction.atomic
+def allocate_payment(*, user, tenant, payment, invoice, amount):
+    require_permission(user=user, tenant=tenant, permission="finance.payment.allocate")
+    if amount <= 0:
+        raise ValidationError("Allocation amount must be greater than zero")
+    validate_same_tenant(tenant=tenant, payment=payment, invoice=invoice)
+    try:
+        locked_payment = Payment.objects.select_for_update().get(tenant=tenant, pk=payment.pk)
+        locked_invoice = Invoice.objects.select_for_update().get(tenant=tenant, pk=invoice.pk)
+    except (Payment.DoesNotExist, Invoice.DoesNotExist) as error:
+        raise ValidationError("Payment or invoice is not available in this tenant") from error
+    if locked_invoice.student_id != locked_payment.student_id:
+        raise ValidationError("Payment and invoice must belong to the same student")
+    if locked_invoice.status != InvoiceStatus.ISSUED:
+        raise ValidationError("Only issued invoices can receive payment allocations")
+
+    # Net of reversals: reversing an allocation must free that cash for
+    # reallocation (e.g. correcting a payment applied to the wrong invoice),
+    # so a reversed allocation cannot keep counting against the payment.
+    allocated_from_payment = locked_payment.allocations.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    reversed_from_payment = AllocationReversal.objects.filter(tenant=tenant, allocation__payment=locked_payment).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    if amount > locked_payment.amount - (allocated_from_payment - reversed_from_payment):
+        raise ValidationError("Allocation exceeds the payment's unallocated amount")
+
+    issued_credits = locked_invoice.credit_notes.filter(status=CreditNoteStatus.ISSUED).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    allocated_to_invoice = locked_invoice.payment_allocations.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    reversed_for_invoice = AllocationReversal.objects.filter(tenant=tenant, allocation__invoice=locked_invoice).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    net_paid = allocated_to_invoice - reversed_for_invoice
+    if amount > locked_invoice.total - issued_credits - net_paid:
+        raise ValidationError("Allocation exceeds the invoice's outstanding balance")
+
+    allocation = PaymentAllocation.objects.create(
+        tenant=tenant,
+        payment=locked_payment,
+        invoice=locked_invoice,
+        amount=amount,
+    )
+    StudentLedgerEntry.objects.create(
+        tenant=tenant,
+        student=locked_payment.student,
+        payment_allocation=allocation,
+        entry_type=LedgerEntryType.CREDIT,
+        amount=amount,
+    )
+    record_activity(
+        tenant=tenant,
+        actor=user,
+        action="payment.allocated",
+        resource_type="payment_allocation",
+        resource_id=str(allocation.id),
+    )
+    return allocation
+
+
+@transaction.atomic
+def reverse_allocation(*, user, tenant, allocation, amount, reason):
+    require_permission(user=user, tenant=tenant, permission="finance.allocation.reverse")
+    if amount <= 0:
+        raise ValidationError("Reversal amount must be greater than zero")
+    validate_same_tenant(tenant=tenant, allocation=allocation)
+    try:
+        locked_payment = Payment.objects.select_for_update().get(tenant=tenant, pk=allocation.payment_id)
+        locked_invoice = Invoice.objects.select_for_update().get(tenant=tenant, pk=allocation.invoice_id)
+        locked_allocation = PaymentAllocation.objects.select_for_update().get(tenant=tenant, pk=allocation.pk)
+    except (Payment.DoesNotExist, Invoice.DoesNotExist, PaymentAllocation.DoesNotExist) as error:
+        raise ValidationError("Allocation is not available in this tenant") from error
+
+    reversed_total = locked_allocation.reversals.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+    if amount > locked_allocation.amount - reversed_total:
+        raise ValidationError("Reversal exceeds the allocation's remaining amount")
+
+    reversal = AllocationReversal.objects.create(
+        tenant=tenant,
+        allocation=locked_allocation,
+        amount=amount,
+        reason=reason,
+    )
+    StudentLedgerEntry.objects.create(
+        tenant=tenant,
+        student=locked_payment.student,
+        allocation_reversal=reversal,
+        entry_type=LedgerEntryType.DEBIT,
+        amount=amount,
+    )
+    record_activity(
+        tenant=tenant,
+        actor=user,
+        action="payment.allocation_reversed",
+        resource_type="allocation_reversal",
+        resource_id=str(reversal.id),
+    )
+    return reversal
