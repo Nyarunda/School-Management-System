@@ -23,6 +23,7 @@ INSTALLED_APPS = [
     "apps.activity",
     "apps.academics",
     "apps.finance",
+    "apps.notifications",
 ]
 
 MIDDLEWARE = [
@@ -85,6 +86,29 @@ FIELD_ENCRYPTION_KEY = os.getenv("FIELD_ENCRYPTION_KEY", "tcgm_bXMcNCa925qDWCcoG
 # Externally-reachable base URL used to build webhook callback URLs
 # (e.g. M-Pesa's CallBackURL) registered with third-party providers.
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
+
+# Redis/Celery are transport for async operational work only -- PostgreSQL
+# owns durable state. Nothing in the web request path calls .delay(); every
+# consumer polls PostgreSQL for due work on a Beat schedule, so a Redis
+# outage delays work instead of losing or blocking it.
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_TASK_IGNORE_RESULT = True  # nothing calls .get()/AsyncResult on any task; no result backend needed
+CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "true").lower() == "true"
+CELERY_TASK_EAGER_PROPAGATES = True
+CELERY_BEAT_SCHEDULE = {
+    "finance-resweep-unmatched-incoming-payments": {
+        "task": "apps.finance.tasks.resweep_unmatched_incoming_payments",
+        "schedule": 3600.0,
+    },
+    "notifications-dispatch-pending": {
+        "task": "apps.notifications.tasks.dispatch_pending_notifications",
+        "schedule": 30.0,
+    },
+    "notifications-reap-stale": {
+        "task": "apps.notifications.tasks.reap_stale_notifications",
+        "schedule": 300.0,
+    },
+}
 
 if PRODUCTION:
     required = ("DJANGO_SECRET_KEY", "FIELD_ENCRYPTION_KEY", "PUBLIC_BASE_URL", "DJANGO_ALLOWED_HOSTS")

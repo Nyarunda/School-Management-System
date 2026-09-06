@@ -25,6 +25,46 @@ services:
     depends_on:
       - backend
 
+  celery-worker:
+    build: ./backend
+    command: celery -A config worker --loglevel=info
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DB_ENGINE: postgres
+      POSTGRES_DB: school_management
+      POSTGRES_USER: school_management
+      POSTGRES_PASSWORD: school_management_dev
+      POSTGRES_HOST: postgres
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_TASK_ALWAYS_EAGER: "false"
+    depends_on:
+      - postgres
+      - redis
+
+  # Exactly one replica: Celery Beat is not distributed-safe, and running
+  # two would double-fire every periodic task.
+  celery-beat:
+    build: ./backend
+    command: celery -A config beat --loglevel=info
+    working_dir: /app
+    volumes:
+      - ./backend:/app
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings
+      DB_ENGINE: postgres
+      POSTGRES_DB: school_management
+      POSTGRES_USER: school_management
+      POSTGRES_PASSWORD: school_management_dev
+      POSTGRES_HOST: postgres
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_TASK_ALWAYS_EAGER: "false"
+    depends_on:
+      - postgres
+      - redis
+
   postgres:
     image: postgres:17-alpine
     environment:
