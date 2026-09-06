@@ -1,0 +1,30 @@
+# Override for Milestone 5E load-test runs -- NOT used for normal dev.
+# Run with:
+#   docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up --build
+#
+# Swaps the dev server for a real WSGI server (gunicorn) and gives the
+# Celery worker an explicit, reproducible concurrency, since the default
+# docker-compose.yml's `manage.py runserver` is meaningless for a capacity
+# number. See docs/architecture/load-testing.md for the full runbook.
+services:
+  backend:
+    build: ./backend
+    command: sh -c "pip install -r requirements/loadtest.txt && gunicorn config.wsgi:application --workers 4 --threads 2 --bind 0.0.0.0:8000"
+    environment:
+      MPESA_SANDBOX_BASE_URL: "http://fake-daraja:9999"
+
+  celery-worker:
+    command: sh -c "pip install -r requirements/loadtest.txt && celery -A config worker --loglevel=info --concurrency=4"
+    environment:
+      MPESA_SANDBOX_BASE_URL: "http://fake-daraja:9999"
+
+  celery-beat:
+    environment:
+      MPESA_SANDBOX_BASE_URL: "http://fake-daraja:9999"
+
+  fake-daraja:
+    build: ./backend
+    command: python -m loadtest.fake_daraja
+    working_dir: /app
+    ports:
+      - "9999:9999"

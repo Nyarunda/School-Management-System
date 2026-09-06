@@ -1,4 +1,5 @@
 import base64
+import os
 from decimal import Decimal, InvalidOperation
 
 import requests
@@ -6,7 +7,10 @@ from django.utils import timezone
 
 from .models import MpesaEnvironment
 
-SANDBOX_BASE_URL = "https://sandbox.safaricom.co.ke"
+# Overridable only for SANDBOX -- lets a local load-testing run point this at
+# a fake Daraja stub instead of the real internet (see backend/loadtest/).
+# PRODUCTION_BASE_URL is never overridable, deliberately.
+SANDBOX_BASE_URL = os.getenv("MPESA_SANDBOX_BASE_URL", "https://sandbox.safaricom.co.ke")
 PRODUCTION_BASE_URL = "https://api.safaricom.co.ke"
 REQUEST_TIMEOUT_SECONDS = 10
 
