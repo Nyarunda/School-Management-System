@@ -6,7 +6,7 @@ from django.db.models import Sum
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.exceptions import NotFound, PermissionDenied
-from rest_framework.generics import ListAPIView, ListCreateAPIView, RetrieveUpdateAPIView
+from rest_framework.generics import ListAPIView, ListCreateAPIView, RetrieveAPIView, RetrieveUpdateAPIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -32,6 +32,8 @@ from .models import (
     Payment,
     PaymentAllocation,
     PaymentMethod,
+    PaymentReversal,
+    PaymentStatus,
     Receipt,
     StudentFeeAssignment,
     StudentLedgerEntry,
@@ -48,6 +50,7 @@ from .services import (
     issue_invoice,
     record_payment,
     reverse_allocation,
+    reverse_payment,
 )
 
 
@@ -387,9 +390,21 @@ class AllocationReversalCreateSerializer(serializers.Serializer):
     reason = serializers.CharField(max_length=240)
 
 
+class PaymentReversalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PaymentReversal
+        fields = ["id", "reversal_number", "reason", "reversed_at"]
+        read_only_fields = fields
+
+
+class PaymentReversalCreateSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=240)
+
+
 class PaymentSerializer(serializers.ModelSerializer):
     receipt = ReceiptSerializer(read_only=True)
     allocations = PaymentAllocationSerializer(many=True, read_only=True)
+    reversal = PaymentReversalSerializer(read_only=True)
     allocated_amount = serializers.SerializerMethodField()
     unallocated_amount = serializers.SerializerMethodField()
 
@@ -397,10 +412,10 @@ class PaymentSerializer(serializers.ModelSerializer):
         model = Payment
         fields = [
             "id", "student", "payment_method", "amount", "external_reference",
-            "idempotency_key", "received_at", "created_at",
-            "receipt", "allocations", "allocated_amount", "unallocated_amount",
+            "idempotency_key", "status", "received_at", "created_at",
+            "receipt", "allocations", "reversal", "allocated_amount", "unallocated_amount",
         ]
-        read_only_fields = ["id", "received_at", "created_at", "receipt", "allocations", "allocated_amount", "unallocated_amount"]
+        read_only_fields = ["id", "status", "received_at", "created_at", "receipt", "allocations", "reversal", "allocated_amount", "unallocated_amount"]
 
     def get_allocated_amount(self, payment):
         # Net of reversals: a reversed allocation frees that cash again.
@@ -411,6 +426,8 @@ class PaymentSerializer(serializers.ModelSerializer):
         return total
 
     def get_unallocated_amount(self, payment):
+        if payment.status == PaymentStatus.REVERSED:
+            return Decimal("0")
         return payment.amount - self.get_allocated_amount(payment)
 
 
@@ -424,7 +441,7 @@ class PaymentListCreateView(ListCreateAPIView):
         queryset = (
             Payment.objects.for_tenant(tenant)
             .select_related("student", "payment_method")
-            .prefetch_related("allocations__reversals", "receipt")
+            .prefetch_related("allocations__reversals", "receipt", "reversal")
             .order_by("-received_at")
         )
         student_id = self.request.query_params.get("student")
@@ -452,6 +469,32 @@ class PaymentListCreateView(ListCreateAPIView):
             external_reference=data["external_reference"],
         )
         return Response(self.get_serializer(payment).data, status=status.HTTP_201_CREATED)
+
+
+class PaymentDetailView(RetrieveAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = PaymentSerializer
+
+    def get_object(self):
+        tenant = resolve_finance_tenant(self.request, "finance.payment.view")
+        queryset = (
+            Payment.objects.for_tenant(tenant)
+            .select_related("student", "payment_method")
+            .prefetch_related("allocations__reversals", "receipt", "reversal")
+        )
+        return resolve_tenant_object(queryset, self.kwargs["payment_id"])
+
+
+class PaymentReversalView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, payment_id):
+        tenant = resolve_finance_tenant(request, "finance.payment.reverse")
+        payment = resolve_tenant_object(Payment.objects.for_tenant(tenant), payment_id)
+        input_serializer = PaymentReversalCreateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        reversal = reverse_payment(user=request.user, tenant=tenant, payment=payment, reason=input_serializer.validated_data["reason"])
+        return Response(PaymentReversalSerializer(reversal).data, status=status.HTTP_201_CREATED)
 
 
 class PaymentAllocateView(APIView):
@@ -534,7 +577,7 @@ class StudentFinanceView(APIView):
         recent_invoices = invoices.prefetch_related("lines").order_by("-created_at")[: self.RECENT_LIMIT]
         recent_payments = (
             payments.select_related("payment_method")
-            .prefetch_related("allocations__reversals", "receipt")
+            .prefetch_related("allocations__reversals", "receipt", "reversal")
             .order_by("-received_at")[: self.RECENT_LIMIT]
         )
         recent_ledger_entries = StudentLedgerEntry.objects.for_tenant(tenant).filter(student=student).order_by("-posted_at")[: self.RECENT_LIMIT]

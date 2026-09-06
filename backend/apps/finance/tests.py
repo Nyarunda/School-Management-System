@@ -8,7 +8,7 @@ from django.test import TestCase
 from apps.academics.models import AcademicLevel, AcademicYear
 from apps.tenancy.models import Membership, Role, Tenant, User
 
-from .models import FeeCategory, FeeItem, FinanceSetup, Invoice, NumberSeries, Payment, PaymentMethod, Receipt
+from .models import FeeCategory, FeeItem, FinanceSetup, Invoice, NumberSeries, Payment, PaymentMethod, PaymentReversal, PaymentStatus, Receipt
 from .selectors import student_balance
 from .services import (
     add_fee_structure_line,
@@ -21,6 +21,7 @@ from .services import (
     issue_invoice,
     record_payment,
     reverse_allocation,
+    reverse_payment,
 )
 from apps.students.models import Student
 
@@ -246,6 +247,7 @@ class PaymentTests(TestCase):
                 "finance.credit_note.create",
                 "finance.payment.record",
                 "finance.payment.allocate",
+                "finance.payment.reverse",
                 "finance.allocation.reverse",
             ],
         )
@@ -261,6 +263,7 @@ class PaymentTests(TestCase):
         NumberSeries.objects.create(tenant=self.school_a, document_type="INVOICE", prefix="INV-2026-", padding=6)
         NumberSeries.objects.create(tenant=self.school_a, document_type="CREDIT_NOTE", prefix="CRN-2026-", padding=6)
         NumberSeries.objects.create(tenant=self.school_a, document_type="RECEIPT", prefix="RCT-2026-", padding=6)
+        NumberSeries.objects.create(tenant=self.school_a, document_type="PAYMENT_REVERSAL", prefix="PRV-2026-", padding=6)
 
         self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level)
         add_fee_structure_line(user=self.user, tenant=self.school_a, fee_structure=self.structure, fee_item=item, amount=Decimal("50000.00"))
@@ -354,15 +357,22 @@ class PaymentTests(TestCase):
         self.assertIsNotNone(correct_allocation.id)
         self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("50000.00"))
 
-    def _new_structure(self):
+    def _new_structure(self, name="Transport"):
         year = self.structure.academic_year
         level = self.structure.academic_level
-        category = FeeCategory.objects.create(tenant=self.school_a, name="Transport", code="TRANSPORT")
-        item = FeeItem.objects.create(tenant=self.school_a, category=category, name="Transport fee", code="TRANSPORT")
-        structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Transport 2026", academic_year=year, academic_level=level)
+        code = name.upper().replace(" ", "_")
+        category = FeeCategory.objects.create(tenant=self.school_a, name=name, code=code)
+        item = FeeItem.objects.create(tenant=self.school_a, category=category, name=f"{name} fee", code=code)
+        structure = create_fee_structure(user=self.user, tenant=self.school_a, name=f"{name} 2026", academic_year=year, academic_level=level)
         add_fee_structure_line(user=self.user, tenant=self.school_a, fee_structure=structure, fee_item=item, amount=Decimal("50000.00"))
         approve_fee_structure(user=self.user, tenant=self.school_a, fee_structure=structure)
         return structure
+
+    def _issued_invoice_for_new_structure(self, name, student=None):
+        assignment = assign_fee_structure(user=self.user, tenant=self.school_a, student=student or self.student, fee_structure=self._new_structure(name))
+        invoice = generate_invoice(user=self.user, tenant=self.school_a, assignment=assignment)
+        issue_invoice(user=self.user, tenant=self.school_a, invoice=invoice)
+        return invoice
 
     def test_allocation_cannot_exceed_payment_amount(self):
         payment = self._record_payment(amount="10000.00")
@@ -408,3 +418,66 @@ class PaymentTests(TestCase):
 
         with self.assertRaises(ValidationError):
             self._record_payment()
+
+    def test_reverse_payment_with_no_allocations_only_flips_status(self):
+        payment = self._record_payment()
+
+        reversal = reverse_payment(user=self.user, tenant=self.school_a, payment=payment, reason="Entered in error")
+
+        self.assertEqual(reversal.reversal_number, "PRV-2026-000001")
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, PaymentStatus.REVERSED)
+        # Unaffected: nothing was ever allocated, so nothing was ever on the
+        # ledger; the balance is just the unrelated invoice from setUp.
+        self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("50000.00"))
+
+    def test_reverse_payment_cascades_across_multiple_allocations(self):
+        other_invoice = self._issued_invoice_for_new_structure("Transport")
+        payment = self._record_payment(amount="100000.00")
+        allocate_payment(user=self.user, tenant=self.school_a, payment=payment, invoice=self.invoice, amount=Decimal("50000.00"))
+        allocate_payment(user=self.user, tenant=self.school_a, payment=payment, invoice=other_invoice, amount=Decimal("50000.00"))
+        self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("0.00"))
+
+        reverse_payment(user=self.user, tenant=self.school_a, payment=payment, reason="Bounced cheque")
+
+        self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("100000.00"))
+        self.assertEqual(PaymentReversal.objects.filter(tenant=self.school_a, payment=payment).count(), 1)
+
+    def test_reverse_payment_cascades_over_an_already_reversed_allocation(self):
+        # Distinguishes reverse_payment from reverse_allocation: a payment
+        # can still be whole-payment-reversed even if one of its allocations
+        # was already individually corrected first -- the cascade simply
+        # has nothing left to do for that one and reverses the rest.
+        other_invoice = self._issued_invoice_for_new_structure("Transport")
+        payment = self._record_payment(amount="100000.00")
+        first_allocation = allocate_payment(user=self.user, tenant=self.school_a, payment=payment, invoice=self.invoice, amount=Decimal("50000.00"))
+        allocate_payment(user=self.user, tenant=self.school_a, payment=payment, invoice=other_invoice, amount=Decimal("50000.00"))
+        reverse_allocation(user=self.user, tenant=self.school_a, allocation=first_allocation, amount=Decimal("50000.00"), reason="Wrong invoice")
+
+        reverse_payment(user=self.user, tenant=self.school_a, payment=payment, reason="Bounced cheque")
+
+        self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("100000.00"))
+
+    def test_reverse_payment_twice_is_rejected(self):
+        payment = self._record_payment()
+        reverse_payment(user=self.user, tenant=self.school_a, payment=payment, reason="Entered in error")
+
+        with self.assertRaises(ValidationError):
+            reverse_payment(user=self.user, tenant=self.school_a, payment=payment, reason="Again")
+
+    def test_cannot_allocate_a_reversed_payment(self):
+        payment = self._record_payment()
+        reverse_payment(user=self.user, tenant=self.school_a, payment=payment, reason="Entered in error")
+
+        with self.assertRaises(ValidationError):
+            allocate_payment(user=self.user, tenant=self.school_a, payment=payment, invoice=self.invoice, amount=Decimal("100.00"))
+
+    def test_payment_reversal_requires_its_own_permission(self):
+        self.role.permissions = ["finance.payment.record"]
+        self.role.save(update_fields=["permissions"])
+        payment = self._record_payment()
+        self.role.permissions = []
+        self.role.save(update_fields=["permissions"])
+
+        with self.assertRaises(ValidationError):
+            reverse_payment(user=self.user, tenant=self.school_a, payment=payment, reason="Entered in error")

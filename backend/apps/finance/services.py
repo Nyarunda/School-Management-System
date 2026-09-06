@@ -22,6 +22,8 @@ from .models import (
     NumberSeries,
     Payment,
     PaymentAllocation,
+    PaymentReversal,
+    PaymentStatus,
     Receipt,
     StudentFeeAssignment,
     StudentLedgerEntry,
@@ -297,6 +299,8 @@ def allocate_payment(*, user, tenant, payment, invoice, amount):
         raise ValidationError("Payment and invoice must belong to the same student")
     if locked_invoice.status != InvoiceStatus.ISSUED:
         raise ValidationError("Only issued invoices can receive payment allocations")
+    if locked_payment.status == PaymentStatus.REVERSED:
+        raise ValidationError("Cannot allocate a reversed payment")
 
     # Net of reversals: reversing an allocation must free that cash for
     # reallocation (e.g. correcting a payment applied to the wrong invoice),
@@ -336,6 +340,23 @@ def allocate_payment(*, user, tenant, payment, invoice, amount):
     return allocation
 
 
+def _post_allocation_reversal(*, tenant, allocation, amount, reason, student):
+    reversal = AllocationReversal.objects.create(
+        tenant=tenant,
+        allocation=allocation,
+        amount=amount,
+        reason=reason,
+    )
+    StudentLedgerEntry.objects.create(
+        tenant=tenant,
+        student=student,
+        allocation_reversal=reversal,
+        entry_type=LedgerEntryType.DEBIT,
+        amount=amount,
+    )
+    return reversal
+
+
 @transaction.atomic
 def reverse_allocation(*, user, tenant, allocation, amount, reason):
     require_permission(user=user, tenant=tenant, permission="finance.allocation.reverse")
@@ -353,19 +374,7 @@ def reverse_allocation(*, user, tenant, allocation, amount, reason):
     if amount > locked_allocation.amount - reversed_total:
         raise ValidationError("Reversal exceeds the allocation's remaining amount")
 
-    reversal = AllocationReversal.objects.create(
-        tenant=tenant,
-        allocation=locked_allocation,
-        amount=amount,
-        reason=reason,
-    )
-    StudentLedgerEntry.objects.create(
-        tenant=tenant,
-        student=locked_payment.student,
-        allocation_reversal=reversal,
-        entry_type=LedgerEntryType.DEBIT,
-        amount=amount,
-    )
+    reversal = _post_allocation_reversal(tenant=tenant, allocation=locked_allocation, amount=amount, reason=reason, student=locked_payment.student)
     record_activity(
         tenant=tenant,
         actor=user,
@@ -374,3 +383,60 @@ def reverse_allocation(*, user, tenant, allocation, amount, reason):
         resource_id=str(reversal.id),
     )
     return reversal
+
+
+@transaction.atomic
+def reverse_payment(*, user, tenant, payment, reason):
+    """Invalidate the payment itself, cascading to reverse every currently
+    active allocation on it in one action (see AllocationReversal for the
+    narrower, single-allocation correction this reuses).
+    """
+    require_permission(user=user, tenant=tenant, permission="finance.payment.reverse")
+    validate_same_tenant(tenant=tenant, payment=payment)
+    try:
+        locked_payment = Payment.objects.select_for_update().get(tenant=tenant, pk=payment.pk)
+    except Payment.DoesNotExist as error:
+        raise ValidationError("Payment is not available in this tenant") from error
+    if locked_payment.status == PaymentStatus.REVERSED:
+        raise ValidationError("Payment has already been reversed")
+
+    # Lock every affected invoice in a fixed ascending order before touching
+    # any of them: this is the first path that may lock more than one
+    # invoice in a single transaction, so a deterministic order is required
+    # to stay deadlock-free against another concurrent reverse_payment()
+    # whose allocations overlap the same invoices.
+    allocations = list(
+        PaymentAllocation.objects.filter(tenant=tenant, payment=locked_payment).select_for_update().order_by("invoice_id")
+    )
+    for allocation in allocations:
+        Invoice.objects.select_for_update().get(tenant=tenant, pk=allocation.invoice_id)
+
+    for allocation in allocations:
+        reversed_total = allocation.reversals.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        remaining = allocation.amount - reversed_total
+        if remaining > 0:
+            reversal = _post_allocation_reversal(tenant=tenant, allocation=allocation, amount=remaining, reason=reason, student=locked_payment.student)
+            record_activity(
+                tenant=tenant,
+                actor=user,
+                action="payment.allocation_reversed",
+                resource_type="allocation_reversal",
+                resource_id=str(reversal.id),
+            )
+
+    payment_reversal = PaymentReversal.objects.create(
+        tenant=tenant,
+        payment=locked_payment,
+        reversal_number=_next_number(tenant=tenant, document_type="PAYMENT_REVERSAL"),
+        reason=reason,
+    )
+    locked_payment.status = PaymentStatus.REVERSED
+    locked_payment.save(update_fields=["status"])
+    record_activity(
+        tenant=tenant,
+        actor=user,
+        action="payment.reversed",
+        resource_type="payment_reversal",
+        resource_id=str(payment_reversal.id),
+    )
+    return payment_reversal

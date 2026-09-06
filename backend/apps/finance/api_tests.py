@@ -49,6 +49,7 @@ class FinanceApiTests(TestCase):
                 "finance.payment.record",
                 "finance.payment.view",
                 "finance.payment.allocate",
+                "finance.payment.reverse",
                 "finance.allocation.reverse",
             ],
         )
@@ -82,6 +83,7 @@ class FinanceApiTests(TestCase):
         NumberSeries.objects.create(tenant=self.school_a, document_type="INVOICE", prefix="INV-2026-")
         NumberSeries.objects.create(tenant=self.school_a, document_type="CREDIT_NOTE", prefix="CRN-2026-")
         NumberSeries.objects.create(tenant=self.school_a, document_type="RECEIPT", prefix="RCT-2026-")
+        NumberSeries.objects.create(tenant=self.school_a, document_type="PAYMENT_REVERSAL", prefix="PRV-2026-")
         self.payment_method = PaymentMethod.objects.create(tenant=self.school_a, name="Bank transfer", code="BANK")
         self.client.force_authenticate(self.user)
 
@@ -160,10 +162,10 @@ class FinanceApiTests(TestCase):
         self.assertEqual(summary_response.data["summary"]["total_invoiced"], Decimal("50000.00"))
         self.assertEqual(len(summary_response.data["recent_invoices"]), 1)
 
-    def _issued_invoice(self):
+    def _issued_invoice(self, structure_name="Grade 8 2026"):
         structure_response = self.client.post(
             "/api/v1/finance/fee-structures/",
-            {"name": "Grade 8 2026", "academic_year": str(self.year.id), "academic_level": str(self.level.id)},
+            {"name": structure_name, "academic_year": str(self.year.id), "academic_level": str(self.level.id)},
             format="json",
             **self.headers(),
         )
@@ -265,6 +267,86 @@ class FinanceApiTests(TestCase):
         ledger_response = self.client.get(f"/api/v1/finance/ledger-entries/?student={self.student.id}", **self.headers())
         self.assertEqual(ledger_response.status_code, 200)
         self.assertEqual(ledger_response.data["count"], 3)  # invoice debit, allocation credit, reversal debit
+
+    def test_payment_detail_and_whole_payment_reversal_flow(self):
+        invoice_a_id = self._issued_invoice("Grade 8 2026 A")
+        invoice_b_id = self._issued_invoice("Grade 8 2026 B")
+
+        payment_response = self.client.post(
+            "/api/v1/finance/payments/",
+            {"student": str(self.student.id), "payment_method": str(self.payment_method.id), "amount": "100000.00", "idempotency_key": "receipt-002"},
+            format="json", **self.headers(),
+        )
+        payment_id = payment_response.data["id"]
+        self.assertIsNone(payment_response.data["reversal"])
+        self.assertEqual(payment_response.data["status"], "RECEIVED")
+
+        for invoice_id in (invoice_a_id, invoice_b_id):
+            response = self.client.post(
+                f"/api/v1/finance/payments/{payment_id}/allocate/", {"invoice": invoice_id, "amount": "50000.00"},
+                format="json", **self.headers(),
+            )
+            self.assertEqual(response.status_code, 201)
+
+        detail_response = self.client.get(f"/api/v1/finance/payments/{payment_id}/", **self.headers())
+        self.assertEqual(detail_response.status_code, 200)
+        self.assertEqual(len(detail_response.data["allocations"]), 2)
+        self.assertEqual(detail_response.data["unallocated_amount"], Decimal("0.00"))
+
+        reverse_response = self.client.post(
+            f"/api/v1/finance/payments/{payment_id}/reverse/", {"reason": "Bounced cheque"},
+            format="json", **self.headers(),
+        )
+        self.assertEqual(reverse_response.status_code, 201)
+        self.assertTrue(reverse_response.data["reversal_number"])
+
+        detail_response = self.client.get(f"/api/v1/finance/payments/{payment_id}/", **self.headers())
+        self.assertEqual(detail_response.data["status"], "REVERSED")
+        self.assertIsNotNone(detail_response.data["reversal"])
+        self.assertEqual(detail_response.data["unallocated_amount"], Decimal("0.00"))
+
+        summary_response = self.client.get(f"/api/v1/finance/students/{self.student.id}/finance/", **self.headers())
+        self.assertEqual(summary_response.data["summary"]["outstanding_balance"], Decimal("100000.00"))
+
+        # A reversed payment cannot be reversed again, nor allocated further.
+        self.assertEqual(
+            self.client.post(f"/api/v1/finance/payments/{payment_id}/reverse/", {"reason": "Again"}, format="json", **self.headers()).status_code,
+            400,
+        )
+        self.assertEqual(
+            self.client.post(f"/api/v1/finance/payments/{payment_id}/allocate/", {"invoice": invoice_a_id, "amount": "1.00"}, format="json", **self.headers()).status_code,
+            400,
+        )
+
+    def test_payment_reversal_malformed_id_and_missing_reason(self):
+        response = self.client.get(f"/api/v1/finance/payments/{uuid.uuid4()}/", **self.headers())
+        self.assertEqual(response.status_code, 404)
+
+        response = self.client.get("/api/v1/finance/payments/not-a-uuid/", **self.headers())
+        self.assertEqual(response.status_code, 404)
+
+        payment_response = self.client.post(
+            "/api/v1/finance/payments/",
+            {"student": str(self.student.id), "payment_method": str(self.payment_method.id), "amount": "10.00", "idempotency_key": "receipt-003"},
+            format="json", **self.headers(),
+        )
+        payment_id = payment_response.data["id"]
+
+        response = self.client.post(f"/api/v1/finance/payments/{payment_id}/reverse/", {}, format="json", **self.headers())
+        self.assertEqual(response.status_code, 400)
+
+    def test_payment_reversal_requires_its_own_permission(self):
+        payment_response = self.client.post(
+            "/api/v1/finance/payments/",
+            {"student": str(self.student.id), "payment_method": str(self.payment_method.id), "amount": "10.00", "idempotency_key": "receipt-004"},
+            format="json", **self.headers(),
+        )
+        payment_id = payment_response.data["id"]
+        self.role.permissions = [p for p in self.role.permissions if p != "finance.payment.reverse"]
+        self.role.save(update_fields=["permissions"])
+
+        response = self.client.post(f"/api/v1/finance/payments/{payment_id}/reverse/", {"reason": "Entered in error"}, format="json", **self.headers())
+        self.assertEqual(response.status_code, 403)
 
     def _payment_payload(self, **overrides):
         payload = {

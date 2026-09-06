@@ -7,13 +7,24 @@ from unittest import skipUnless
 
 from django.core.exceptions import ValidationError
 from django.db import connection, connections, transaction
+from django.db.models import Sum
 from django.test import TransactionTestCase
 
 from apps.academics.models import AcademicLevel, AcademicYear
 from apps.students.models import Student
 from apps.tenancy.models import Membership, Role, Tenant, User
 
-from .models import CreditNote, CreditNoteStatus, NumberSeries, Payment, PaymentAllocation, PaymentMethod, Receipt
+from .models import (
+    AllocationReversal,
+    CreditNote,
+    CreditNoteStatus,
+    NumberSeries,
+    Payment,
+    PaymentAllocation,
+    PaymentMethod,
+    PaymentStatus,
+    Receipt,
+)
 from .selectors import student_balance
 from .services import (
     add_fee_structure_line,
@@ -25,6 +36,7 @@ from .services import (
     issue_credit_note,
     issue_invoice,
     record_payment,
+    reverse_payment,
 )
 
 
@@ -46,6 +58,7 @@ class PaymentAllocationConcurrencyTests(TransactionTestCase):
                 "finance.credit_note.create",
                 "finance.payment.record",
                 "finance.payment.allocate",
+                "finance.payment.reverse",
             ],
         )
         Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role)
@@ -55,6 +68,7 @@ class PaymentAllocationConcurrencyTests(TransactionTestCase):
         NumberSeries.objects.create(tenant=self.school_a, document_type="INVOICE", prefix="INV-2026-", padding=6)
         NumberSeries.objects.create(tenant=self.school_a, document_type="RECEIPT", prefix="RCT-2026-", padding=6)
         NumberSeries.objects.create(tenant=self.school_a, document_type="CREDIT_NOTE", prefix="CRN-2026-", padding=6)
+        NumberSeries.objects.create(tenant=self.school_a, document_type="PAYMENT_REVERSAL", prefix="PRV-2026-", padding=6)
         self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level)
 
         from .models import FeeCategory, FeeItem
@@ -261,3 +275,74 @@ class PaymentAllocationConcurrencyTests(TransactionTestCase):
             self.assertEqual(allocate_outcome, "Allocation exceeds the invoice's outstanding balance")
             self.assertEqual(PaymentAllocation.objects.filter(invoice=invoice).count(), 0)
             self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("0.00"))
+
+    def reverse_payment_attempt(self, payment, barrier=None):
+        connections.close_all()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET statement_timeout = '8s'")
+                cursor.execute("SET lock_timeout = '6s'")
+            if barrier is not None:
+                barrier.wait(timeout=6)
+            try:
+                reverse_payment(user=self.user, tenant=self.school_a, payment=payment, reason="Bounced cheque")
+                return "reversed"
+            except ValidationError as error:
+                return " ".join(error.messages)
+        finally:
+            connections.close_all()
+
+    def test_concurrent_whole_payment_reversals_sharing_invoices_do_not_deadlock(self):
+        # reverse_payment() is the first path that locks more than one
+        # invoice in a single transaction, so this is the one scenario where
+        # a lock-ordering deadlock is actually possible: two concurrent
+        # reversals whose allocations touch the same two invoices, in
+        # opposite natural order. The ascending-invoice_id lock order in
+        # reverse_payment() must prevent that regardless of thread timing.
+        invoice_x = self._issued_invoice(self.student, self.structure)
+        invoice_y = self._issued_invoice(self.student, self._new_structure("Transport"))
+        payment_1 = record_payment(
+            user=self.user, tenant=self.school_a, student=self.student, payment_method=self.payment_method,
+            amount=Decimal("50000.00"), idempotency_key="pay-multi-1",
+        )
+        payment_2 = record_payment(
+            user=self.user, tenant=self.school_a, student=self.student, payment_method=self.payment_method,
+            amount=Decimal("50000.00"), idempotency_key="pay-multi-2",
+        )
+        allocate_payment(user=self.user, tenant=self.school_a, payment=payment_1, invoice=invoice_x, amount=Decimal("25000.00"))
+        allocate_payment(user=self.user, tenant=self.school_a, payment=payment_1, invoice=invoice_y, amount=Decimal("25000.00"))
+        allocate_payment(user=self.user, tenant=self.school_a, payment=payment_2, invoice=invoice_x, amount=Decimal("25000.00"))
+        allocate_payment(user=self.user, tenant=self.school_a, payment=payment_2, invoice=invoice_y, amount=Decimal("25000.00"))
+        self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("0.00"))
+        barrier = Barrier(2)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(self.reverse_payment_attempt, payment, barrier) for payment in (payment_1, payment_2)]
+            outcomes = [future.result(timeout=15) for future in futures]
+
+        self.assertEqual(outcomes, ["reversed", "reversed"])
+        self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("100000.00"))
+
+    def test_concurrent_reverse_payment_and_allocate_leave_no_active_allocation(self):
+        invoice = self._issued_invoice(self.student)
+        payment = record_payment(
+            user=self.user, tenant=self.school_a, student=self.student, payment_method=self.payment_method,
+            amount=Decimal("50000.00"), idempotency_key="pay-race-reverse",
+        )
+        barrier = Barrier(2)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            reverse_future = pool.submit(self.reverse_payment_attempt, payment, barrier)
+            allocate_future = pool.submit(self.attempt, payment, invoice, barrier)
+            reverse_outcome, allocate_outcome = reverse_future.result(timeout=15), allocate_future.result(timeout=15)
+
+        self.assertEqual(reverse_outcome, "reversed")
+        payment.refresh_from_db()
+        self.assertEqual(payment.status, PaymentStatus.REVERSED)
+        self.assertIn(allocate_outcome, ("created", "Cannot allocate a reversed payment"))
+        # Whether allocate_payment lost the race outright, or briefly won
+        # before being caught by the reversal's own cascade, no allocation
+        # survives active (unreversed) once the dust settles.
+        net_allocated = PaymentAllocation.objects.filter(payment=payment).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        net_reversed = AllocationReversal.objects.filter(allocation__payment=payment).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        self.assertEqual(net_allocated - net_reversed, Decimal("0.00"))

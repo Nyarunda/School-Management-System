@@ -180,6 +180,11 @@ class CreditNote(TenantOwnedModel):
         constraints = [models.UniqueConstraint(fields=["tenant", "credit_note_number"], name="unique_credit_note_number_per_tenant")]
 
 
+class PaymentStatus(models.TextChoices):
+    RECEIVED = "RECEIVED", "Received"
+    REVERSED = "REVERSED", "Reversed"
+
+
 class Payment(TenantOwnedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     student = models.ForeignKey("students.Student", on_delete=models.PROTECT, related_name="payments")
@@ -187,6 +192,7 @@ class Payment(TenantOwnedModel):
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     external_reference = models.CharField(max_length=120, blank=True, default="")
     idempotency_key = models.CharField(max_length=120)
+    status = models.CharField(max_length=20, choices=PaymentStatus.choices, default=PaymentStatus.RECEIVED)
     received_at = models.DateTimeField(default=timezone.now)
     created_at = models.DateTimeField(auto_now_add=True)
 
@@ -218,6 +224,24 @@ class Receipt(TenantOwnedModel):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant", "receipt_number"], name="unique_receipt_number_per_tenant")]
+
+
+class PaymentReversal(TenantOwnedModel):
+    """Invalidates the payment itself (a bounced cheque, a reversed bank
+    transfer, a chargeback) -- distinct from AllocationReversal, which only
+    undoes one allocation. Reversing a payment cascades: every active
+    allocation on it is reversed via AllocationReversal first, then this
+    record marks the payment as no longer available for future allocation.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payment = models.OneToOneField(Payment, on_delete=models.PROTECT, related_name="reversal")
+    reversal_number = models.CharField(max_length=60)
+    reason = models.CharField(max_length=240)
+    reversed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "reversal_number"], name="unique_payment_reversal_number_per_tenant")]
 
 
 class AllocationReversal(TenantOwnedModel):
