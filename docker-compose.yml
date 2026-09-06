@@ -9,6 +9,11 @@ services:
       - "8000:8000"
     environment:
       DJANGO_SETTINGS_MODULE: config.settings
+      DB_ENGINE: postgres
+      POSTGRES_DB: school_management
+      POSTGRES_USER: school_management
+      POSTGRES_PASSWORD: school_management_dev
+      POSTGRES_HOST: postgres
     depends_on:
       - postgres
       - redis

@@ -95,6 +95,18 @@ class StudentEnrollment(TenantOwnedModel):
     campus = models.ForeignKey(Campus, on_delete=models.PROTECT)
     status = models.CharField(max_length=20, choices=EnrollmentStatus.choices, default=EnrollmentStatus.ACTIVE)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "student", "academic_year"],
+                name="unique_student_enrollment_per_year",
+            )
+        ]
+        indexes = [
+            models.Index(fields=["tenant", "student", "academic_year"]),
+            models.Index(fields=["tenant", "class_group", "status"]),
+        ]
+
     def clean(self):
         related = [self.student, self.academic_year, self.academic_level, self.class_group, self.campus]
         if self.term is not None:

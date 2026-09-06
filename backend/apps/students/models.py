@@ -30,6 +30,10 @@ class Student(TenantOwnedModel):
                 name="unique_admission_number_per_tenant",
             )
         ]
+        indexes = [
+            models.Index(fields=["tenant", "status"]),
+            models.Index(fields=["tenant", "campus", "status"]),
+        ]
 
     @property
     def full_name(self):
