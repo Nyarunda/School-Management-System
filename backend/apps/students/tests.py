@@ -1,0 +1,34 @@
+from django.core.exceptions import ValidationError
+from django.test import TestCase
+
+from apps.tenancy.models import Campus, Tenant
+
+from .models import Student, StudentStatus
+from .services import change_student_status, place_student
+
+
+class StudentLifecycleTests(TestCase):
+    def setUp(self):
+        self.school_a = Tenant.objects.create(name="School A", slug="school-a")
+        self.school_b = Tenant.objects.create(name="School B", slug="school-b")
+        self.campus_a = Campus.objects.create(tenant=self.school_a, name="Main", code="MAIN")
+        self.campus_b = Campus.objects.create(tenant=self.school_b, name="Main", code="MAIN")
+        self.student = Student.objects.create(
+            tenant=self.school_a,
+            admission_number="ADM-001",
+            first_name="Amina",
+            last_name="Otieno",
+        )
+
+    def test_terminal_student_states_cannot_be_reopened(self):
+        change_student_status(student=self.student, status=StudentStatus.GRADUATED)
+
+        with self.assertRaises(ValidationError):
+            change_student_status(student=self.student, status=StudentStatus.ACTIVE)
+
+    def test_student_cannot_be_placed_on_another_tenants_campus(self):
+        with self.assertRaises(ValidationError):
+            place_student(student=self.student, campus=self.campus_b)
+
+        self.student.refresh_from_db()
+        self.assertIsNone(self.student.campus)
