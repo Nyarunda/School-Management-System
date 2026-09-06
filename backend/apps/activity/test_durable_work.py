@@ -103,3 +103,31 @@ class DurableWorkLifecycleTests(TestCase):
 
         expired.refresh_from_db()
         self.assertEqual(expired.last_error, "custom failure")
+
+    def test_reap_stale_is_bounded_by_limit(self):
+        expired_rows = [
+            make_outbox(self.tenant, status=DurableWorkStatus.PROCESSING, lease_expires_at=timezone.now() - timedelta(seconds=1))
+            for _ in range(3)
+        ]
+
+        reclaimed = reap_stale(NotificationOutbox.objects.filter(tenant=self.tenant), limit=2)
+
+        self.assertEqual(reclaimed, 2)
+        statuses = [row.status for row in NotificationOutbox.objects.filter(pk__in=[row.pk for row in expired_rows])]
+        self.assertEqual(statuses.count(DurableWorkStatus.PENDING), 2)
+        self.assertEqual(statuses.count(DurableWorkStatus.PROCESSING), 1)
+
+    def test_claim_due_returns_rows_with_attempts_already_incremented(self):
+        row = make_outbox(self.tenant)
+
+        claimed = claim_due(NotificationOutbox.objects.filter(tenant=self.tenant))
+
+        self.assertEqual(len(claimed), 1)
+        claimed_row = claimed[0]
+        self.assertEqual(claimed_row.attempts, 1)
+        # A caller's subsequent mark_failed() must compute backoff from this
+        # already-incremented value, not double-count the increment.
+        before = timezone.now()
+        claimed_row.mark_failed("boom")
+        claimed_row.refresh_from_db()
+        self.assertAlmostEqual((claimed_row.available_at - before).total_seconds(), BACKOFF_BASE_SECONDS, delta=5)

@@ -1,5 +1,6 @@
 from datetime import timedelta
 
+from django.core.exceptions import ValidationError
 from django.test import TestCase
 from django.utils import timezone
 
@@ -14,6 +15,18 @@ from .tasks import dispatch_pending_notifications, reap_stale_notifications
 class EnqueueNotificationTests(TestCase):
     def setUp(self):
         self.tenant = Tenant.objects.create(name="Test School", slug="test-school")
+
+    def test_enqueue_replay_with_a_different_payload_is_rejected(self):
+        enqueue_notification(
+            tenant=self.tenant, channel=NotificationChannel.SMS, recipient="0711111111",
+            message_type="invoice_issued", idempotency_key="invoice-issued:1:1",
+        )
+        with self.assertRaises(ValidationError):
+            enqueue_notification(
+                tenant=self.tenant, channel=NotificationChannel.SMS, recipient="0722222222",
+                message_type="invoice_issued", idempotency_key="invoice-issued:1:1",
+            )
+        self.assertEqual(NotificationOutbox.objects.count(), 1)
 
     def test_enqueue_is_idempotent_on_the_same_key(self):
         first = enqueue_notification(

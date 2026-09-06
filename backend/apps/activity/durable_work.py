@@ -1,6 +1,7 @@
 import datetime
 
 from django.db import models, transaction
+from django.db.models import F
 from django.utils import timezone
 
 MAX_ATTEMPTS = 5
@@ -70,32 +71,56 @@ def claim_due(queryset, *, limit=100, lease_seconds=DEFAULT_LEASE_SECONDS):
     same row. skip_locked is PostgreSQL-only; SQLite (dev/test default)
     silently ignores select_for_update() entirely, which is fine there
     since automated tests call task bodies directly/single-threaded.
+
+    Claims via one bulk UPDATE rather than a save() per row -- a claim of
+    200 rows previously issued roughly 200 UPDATE statements while holding
+    the claim transaction, which is unnecessary and works against the
+    point of this primitive (draining backlogs efficiently). The returned
+    objects are re-fetched after the update so their `attempts` reflects
+    the increment, matching what a caller's later mark_failed() needs.
     """
+    now = timezone.now()
+    lease_expires_at = now + datetime.timedelta(seconds=lease_seconds)
     with transaction.atomic():
-        rows = list(
-            queryset.filter(status=DurableWorkStatus.PENDING, available_at__lte=timezone.now())
+        ids = list(
+            queryset.filter(status=DurableWorkStatus.PENDING, available_at__lte=now)
             .select_for_update(skip_locked=True)
-            .order_by("available_at", "pk")[:limit]
+            .order_by("available_at", "pk")
+            .values_list("pk", flat=True)[:limit]
         )
-        for row in rows:
-            row.mark_processing(lease_seconds=lease_seconds)
-    return rows
+        if not ids:
+            return []
+        queryset.model.objects.filter(pk__in=ids).update(
+            status=DurableWorkStatus.PROCESSING, attempts=F("attempts") + 1, lease_expires_at=lease_expires_at,
+        )
+        return list(queryset.model.objects.filter(pk__in=ids))
 
 
-def reap_stale(queryset):
+def reap_stale(queryset, *, limit=100):
     """Reclaim PROCESSING rows whose lease expired (a crashed/killed worker
     never finished) back to PENDING. Locked the same way as claim_due so a
     worker that's genuinely mid-save can't have its row yanked back out
-    from under it mid-flight.
+    from under it mid-flight. Bounded by `limit` (matching claim_due) so a
+    prolonged outage that leaves many leases expired can't turn a single
+    reap into one transaction touching an unbounded number of rows.
     """
-    reclaimed = 0
+    now = timezone.now()
     with transaction.atomic():
-        for row in queryset.filter(status=DurableWorkStatus.PROCESSING, lease_expires_at__lt=timezone.now()).select_for_update(skip_locked=True):
-            row.status = DurableWorkStatus.PENDING
-            row.available_at = timezone.now()
-            row.lease_expires_at = None
-            if not row.last_error:
-                row.last_error = "Processing lease expired before completion"
-            row.save(update_fields=["status", "available_at", "lease_expires_at", "last_error"])
-            reclaimed += 1
-    return reclaimed
+        ids = list(
+            queryset.filter(status=DurableWorkStatus.PROCESSING, lease_expires_at__lt=now)
+            .select_for_update(skip_locked=True)
+            .order_by("lease_expires_at", "pk")
+            .values_list("pk", flat=True)[:limit]
+        )
+        if not ids:
+            return 0
+        base = queryset.model.objects.filter(pk__in=ids)
+        # Only stamp the default message onto rows that don't already have
+        # their own failure reason -- two bulk updates instead of a save()
+        # per row, but still preserving that distinction.
+        base.filter(last_error="").update(
+            status=DurableWorkStatus.PENDING, available_at=now, lease_expires_at=None,
+            last_error="Processing lease expired before completion",
+        )
+        base.exclude(last_error="").update(status=DurableWorkStatus.PENDING, available_at=now, lease_expires_at=None)
+    return len(ids)
