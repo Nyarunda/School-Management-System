@@ -3,6 +3,7 @@ import uuid
 from django.core.exceptions import ValidationError
 from django.db import models
 from django.db.models import Q
+from django.utils import timezone
 
 from apps.academics.models import AcademicLevel, AcademicYear
 from apps.tenancy.models import TenantOwnedModel
@@ -179,6 +180,65 @@ class CreditNote(TenantOwnedModel):
         constraints = [models.UniqueConstraint(fields=["tenant", "credit_note_number"], name="unique_credit_note_number_per_tenant")]
 
 
+class Payment(TenantOwnedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    student = models.ForeignKey("students.Student", on_delete=models.PROTECT, related_name="payments")
+    payment_method = models.ForeignKey(PaymentMethod, on_delete=models.PROTECT, related_name="payments")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    external_reference = models.CharField(max_length=120, blank=True, default="")
+    idempotency_key = models.CharField(max_length=120)
+    received_at = models.DateTimeField(default=timezone.now)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "idempotency_key"], name="unique_payment_idempotency_per_tenant"),
+            models.CheckConstraint(condition=Q(amount__gt=0), name="payment_amount_positive"),
+        ]
+        indexes = [models.Index(fields=["tenant", "student", "received_at"])]
+
+
+class PaymentAllocation(TenantOwnedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payment = models.ForeignKey(Payment, on_delete=models.PROTECT, related_name="allocations")
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name="payment_allocations")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    allocated_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=Q(amount__gt=0), name="payment_allocation_amount_positive")]
+        indexes = [models.Index(fields=["tenant", "payment"]), models.Index(fields=["tenant", "invoice"])]
+
+
+class Receipt(TenantOwnedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    payment = models.OneToOneField(Payment, on_delete=models.PROTECT, related_name="receipt")
+    receipt_number = models.CharField(max_length=60)
+    issued_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "receipt_number"], name="unique_receipt_number_per_tenant")]
+
+
+class AllocationReversal(TenantOwnedModel):
+    """Undoes a specific PaymentAllocation (e.g. it was applied to the wrong invoice).
+
+    Distinct from a future PaymentReversal, which will undo the cash itself
+    (a bounced cheque, a chargeback) -- that is a different operation with
+    different consequences and is deliberately not modeled yet.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    allocation = models.ForeignKey(PaymentAllocation, on_delete=models.PROTECT, related_name="reversals")
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    reason = models.CharField(max_length=240)
+    reversed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [models.CheckConstraint(condition=Q(amount__gt=0), name="allocation_reversal_amount_positive")]
+        indexes = [models.Index(fields=["tenant", "allocation"])]
+
+
 class LedgerEntryType(models.TextChoices):
     DEBIT = "DEBIT", "Debit"
     CREDIT = "CREDIT", "Credit"
@@ -189,6 +249,8 @@ class StudentLedgerEntry(TenantOwnedModel):
     student = models.ForeignKey("students.Student", on_delete=models.PROTECT, related_name="ledger_entries")
     invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, null=True, blank=True, related_name="ledger_entries")
     credit_note = models.ForeignKey(CreditNote, on_delete=models.PROTECT, null=True, blank=True, related_name="ledger_entries")
+    payment_allocation = models.ForeignKey(PaymentAllocation, on_delete=models.PROTECT, null=True, blank=True, related_name="ledger_entries")
+    allocation_reversal = models.ForeignKey(AllocationReversal, on_delete=models.PROTECT, null=True, blank=True, related_name="ledger_entries")
     entry_type = models.CharField(max_length=10, choices=LedgerEntryType.choices)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     posted_at = models.DateTimeField(auto_now_add=True)
@@ -197,7 +259,12 @@ class StudentLedgerEntry(TenantOwnedModel):
         constraints = [
             models.UniqueConstraint(fields=["tenant", "invoice"], condition=Q(invoice__isnull=False), name="unique_invoice_ledger_entry"),
             models.UniqueConstraint(fields=["tenant", "credit_note"], condition=Q(credit_note__isnull=False), name="unique_credit_note_ledger_entry"),
-            models.CheckConstraint(condition=Q(invoice__isnull=False) | Q(credit_note__isnull=False), name="ledger_entry_has_source"),
+            models.UniqueConstraint(fields=["tenant", "payment_allocation"], condition=Q(payment_allocation__isnull=False), name="unique_payment_allocation_ledger_entry"),
+            models.UniqueConstraint(fields=["tenant", "allocation_reversal"], condition=Q(allocation_reversal__isnull=False), name="unique_allocation_reversal_ledger_entry"),
+            models.CheckConstraint(
+                condition=Q(invoice__isnull=False) | Q(credit_note__isnull=False) | Q(payment_allocation__isnull=False) | Q(allocation_reversal__isnull=False),
+                name="ledger_entry_has_source",
+            ),
         ]
         indexes = [models.Index(fields=["tenant", "student", "posted_at"])]
 
