@@ -2,6 +2,7 @@ import uuid
 
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 
 from apps.academics.models import AcademicLevel, AcademicYear
 from apps.tenancy.models import TenantOwnedModel
@@ -96,6 +97,109 @@ class NumberSeries(TenantOwnedModel):
 
     def preview(self):
         return f"{self.prefix}{self.next_value:0{self.padding}d}"
+
+
+class FeeAssignmentStatus(models.TextChoices):
+    ACTIVE = "ACTIVE", "Active"
+    CANCELLED = "CANCELLED", "Cancelled"
+
+
+class StudentFeeAssignment(TenantOwnedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    student = models.ForeignKey("students.Student", on_delete=models.PROTECT, related_name="fee_assignments")
+    fee_structure = models.ForeignKey(FeeStructure, on_delete=models.PROTECT, related_name="student_assignments")
+    status = models.CharField(max_length=20, choices=FeeAssignmentStatus.choices, default=FeeAssignmentStatus.ACTIVE)
+    assigned_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "student", "fee_structure"],
+                name="unique_student_fee_assignment",
+            )
+        ]
+
+
+class InvoiceStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    ISSUED = "ISSUED", "Issued"
+    VOID = "VOID", "Void"
+
+
+class Invoice(TenantOwnedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    invoice_number = models.CharField(max_length=60)
+    idempotency_key = models.CharField(max_length=120)
+    student = models.ForeignKey("students.Student", on_delete=models.PROTECT, related_name="invoices")
+    assignment = models.OneToOneField(StudentFeeAssignment, on_delete=models.PROTECT, related_name="invoice")
+    status = models.CharField(max_length=20, choices=InvoiceStatus.choices, default=InvoiceStatus.DRAFT)
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    discount_total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    issued_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "invoice_number"], name="unique_invoice_number_per_tenant"),
+            models.UniqueConstraint(fields=["tenant", "idempotency_key"], name="unique_invoice_idempotency_per_tenant"),
+        ]
+        indexes = [models.Index(fields=["tenant", "student", "status"])]
+
+
+class InvoiceLine(TenantOwnedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    invoice = models.ForeignKey(Invoice, on_delete=models.CASCADE, related_name="lines")
+    fee_item = models.ForeignKey(FeeItem, on_delete=models.PROTECT)
+    source_fee_structure_line = models.ForeignKey(FeeStructureLine, on_delete=models.PROTECT, null=True, blank=True)
+    description = models.CharField(max_length=200)
+    quantity = models.DecimalField(max_digits=10, decimal_places=2, default=1)
+    unit_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    discount_amount = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    net_amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+
+class CreditNoteStatus(models.TextChoices):
+    DRAFT = "DRAFT", "Draft"
+    ISSUED = "ISSUED", "Issued"
+    VOID = "VOID", "Void"
+
+
+class CreditNote(TenantOwnedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    credit_note_number = models.CharField(max_length=60)
+    student = models.ForeignKey("students.Student", on_delete=models.PROTECT, related_name="credit_notes")
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, related_name="credit_notes", null=True, blank=True)
+    reason = models.CharField(max_length=240)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    status = models.CharField(max_length=20, choices=CreditNoteStatus.choices, default=CreditNoteStatus.DRAFT)
+    issued_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [models.UniqueConstraint(fields=["tenant", "credit_note_number"], name="unique_credit_note_number_per_tenant")]
+
+
+class LedgerEntryType(models.TextChoices):
+    DEBIT = "DEBIT", "Debit"
+    CREDIT = "CREDIT", "Credit"
+
+
+class StudentLedgerEntry(TenantOwnedModel):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    student = models.ForeignKey("students.Student", on_delete=models.PROTECT, related_name="ledger_entries")
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, null=True, blank=True, related_name="ledger_entries")
+    credit_note = models.ForeignKey(CreditNote, on_delete=models.PROTECT, null=True, blank=True, related_name="ledger_entries")
+    entry_type = models.CharField(max_length=10, choices=LedgerEntryType.choices)
+    amount = models.DecimalField(max_digits=12, decimal_places=2)
+    posted_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "invoice"], condition=Q(invoice__isnull=False), name="unique_invoice_ledger_entry"),
+            models.UniqueConstraint(fields=["tenant", "credit_note"], condition=Q(credit_note__isnull=False), name="unique_credit_note_ledger_entry"),
+            models.CheckConstraint(condition=Q(invoice__isnull=False) | Q(credit_note__isnull=False), name="ledger_entry_has_source"),
+        ]
+        indexes = [models.Index(fields=["tenant", "student", "posted_at"])]
 
 
 def validate_same_tenant(*, tenant, **objects):
