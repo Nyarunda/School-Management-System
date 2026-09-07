@@ -158,6 +158,21 @@ class AssessmentApiTests(TestCase):
         )
         self.assertEqual(band_response.status_code, 201)
 
+    def test_a_second_active_grading_scheme_for_the_same_level_is_a_clean_400(self):
+        first_response = self.client.post(
+            "/api/v1/assessments/grading-schemes/",
+            {"name": "Standard", "academic_level": str(self.level.id)},
+            format="json", **self.headers(),
+        )
+        self.assertEqual(first_response.status_code, 201)
+
+        second_response = self.client.post(
+            "/api/v1/assessments/grading-schemes/",
+            {"name": "Alternate", "academic_level": str(self.level.id)},
+            format="json", **self.headers(),
+        )
+        self.assertEqual(second_response.status_code, 400)
+
     def test_assessment_list_is_paginated_and_filterable(self):
         self.open_assessment(name="CAT 1")
         self.open_assessment(name="CAT 2")

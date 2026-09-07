@@ -3,6 +3,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 from django.test import TestCase
 
 from apps.academics.models import (
@@ -146,11 +147,25 @@ class RosterAndGradingSnapshotTests(AssessmentFoundationTests):
         result = AssessmentResult.objects.get(assessment=assessment, student=self.student)
         self.assertEqual(result.grade, "")
 
-    def test_ambiguous_active_scheme_is_rejected(self):
-        GradingScheme.objects.create(tenant=self.school_a, name="Scheme A", academic_level=self.level)
-        GradingScheme.objects.create(tenant=self.school_a, name="Scheme B", academic_level=self.level)
-        with self.assertRaisesMessage(ValidationError, "Multiple active grading schemes"):
-            self.open_assessment()
+    def test_a_second_active_scheme_for_the_same_level_is_rejected_at_the_db_level(self):
+        GradingScheme.objects.create(tenant=self.school_a, name="Scheme A", academic_level=self.level, is_active=True)
+        # A nested atomic() creates a savepoint so the expected IntegrityError
+        # doesn't abort the whole test-wrapping transaction on PostgreSQL.
+        with self.assertRaises(IntegrityError):
+            with transaction.atomic():
+                GradingScheme.objects.create(tenant=self.school_a, name="Scheme B", academic_level=self.level, is_active=True)
+
+    def test_an_inactive_second_scheme_for_the_same_level_is_allowed(self):
+        GradingScheme.objects.create(tenant=self.school_a, name="Scheme A", academic_level=self.level, is_active=True)
+        inactive = GradingScheme.objects.create(tenant=self.school_a, name="Scheme B", academic_level=self.level, is_active=False)
+        self.assertIsNotNone(inactive.pk)
+
+    def test_deactivating_then_creating_a_new_active_scheme_is_allowed(self):
+        first = GradingScheme.objects.create(tenant=self.school_a, name="Scheme A", academic_level=self.level, is_active=True)
+        first.is_active = False
+        first.save(update_fields=["is_active"])
+        second = GradingScheme.objects.create(tenant=self.school_a, name="Scheme B", academic_level=self.level, is_active=True)
+        self.assertIsNotNone(second.pk)
 
     def test_overlapping_grading_band_is_rejected(self):
         scheme = GradingScheme.objects.create(tenant=self.school_a, name="Standard", academic_level=self.level)

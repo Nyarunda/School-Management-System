@@ -111,9 +111,24 @@ class GradingSchemeListCreateView(ListCreateAPIView):
         tenant = resolve_assessment_tenant(self.request, "assessment.setup.view")
         return GradingScheme.objects.for_tenant(tenant).select_related("academic_level").prefetch_related("bands").order_by("name")
 
-    def perform_create(self, serializer):
-        tenant = resolve_assessment_tenant(self.request, "assessment.setup.manage")
-        serializer.save(tenant=tenant)
+    def create(self, request, *args, **kwargs):
+        tenant = resolve_assessment_tenant(request, "assessment.setup.manage")
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            serializer.save(tenant=tenant)
+        except IntegrityError as error:
+            cause = error.__cause__
+            constraint = getattr(getattr(cause, "diag", None), "constraint_name", None)
+            sqlite_duplicate = str(cause) == (
+                "UNIQUE constraint failed: assessments_gradingscheme.tenant_id, assessments_gradingscheme.academic_level_id"
+            )
+            if constraint != "unique_active_grading_scheme_per_level" and not sqlite_duplicate:
+                raise
+            return api_validation_error(DjangoValidationError(
+                "An active grading scheme already exists for this academic level; deactivate it first",
+            ))
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 
 class GradingBandCreateView(APIView):

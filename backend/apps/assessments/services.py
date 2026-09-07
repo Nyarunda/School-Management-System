@@ -46,12 +46,15 @@ def _require_subject_class_authorization(*, user, tenant, membership, class_grou
 
 
 def _resolve_active_grading_scheme(*, tenant, academic_level):
-    schemes = list(GradingScheme.objects.filter(tenant=tenant, academic_level=academic_level, is_active=True))
-    if not schemes:
+    """unique_active_grading_scheme_per_level (a conditional unique
+    constraint on GradingScheme) guarantees at most one row can ever match,
+    so a plain get()/DoesNotExist is sufficient -- no ambiguity to detect
+    here, unlike the .first()-over-a-list approach this replaced.
+    """
+    try:
+        return GradingScheme.objects.get(tenant=tenant, academic_level=academic_level, is_active=True)
+    except GradingScheme.DoesNotExist:
         return None
-    if len(schemes) > 1:
-        raise ValidationError("Multiple active grading schemes exist for this academic level; deactivate the extras")
-    return schemes[0]
 
 
 def _resolve_grade(*, score, max_marks, grading_bands):

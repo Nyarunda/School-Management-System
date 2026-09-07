@@ -24,7 +24,18 @@ class GradingScheme(TenantOwnedModel):
     is_active = models.BooleanField(default=True)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["tenant", "name", "academic_level"], name="unique_grading_scheme_per_level")]
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "name", "academic_level"], name="unique_grading_scheme_per_level"),
+            # Application-level resolution (_resolve_active_grading_scheme)
+            # already refuses to guess between ambiguous active schemes, but
+            # this constraint stops the ambiguous state from ever being
+            # created in the first place, rather than only detecting it
+            # later at assessment-creation time.
+            models.UniqueConstraint(
+                fields=["tenant", "academic_level"], condition=models.Q(is_active=True),
+                name="unique_active_grading_scheme_per_level",
+            ),
+        ]
 
 
 class GradingBand(TenantOwnedModel):
