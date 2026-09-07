@@ -2,6 +2,7 @@ import uuid
 
 from django.db import models
 
+from apps.documents.models import Document
 from apps.tenancy.models import Campus, TenantOwnedModel, User
 
 
@@ -54,11 +55,16 @@ class Employee(TenantOwnedModel):
 
 
 class EmployeeDocument(TenantOwnedModel):
+    """document_type is Staff's own domain categorization (e.g. "ID_COPY");
+    storage metadata (filename, size, checksum, uploader, upload time)
+    lives on the referenced Document row -- a single source of truth
+    shared with Students/Admissions rather than duplicated per domain.
+    """
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     employee = models.ForeignKey(Employee, on_delete=models.CASCADE, related_name="documents")
     document_type = models.CharField(max_length=80)
-    file_name = models.CharField(max_length=255)
-    uploaded_at = models.DateTimeField(auto_now_add=True)
+    document = models.ForeignKey(Document, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
 
 
 class EmployeeQualification(TenantOwnedModel):

@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     "apps.timetable",
     "apps.staff",
     "apps.leave",
+    "apps.documents",
 ]
 
 MIDDLEWARE = [
@@ -121,7 +122,18 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.notifications.tasks.reap_stale_notifications",
         "schedule": 300.0,
     },
+    "documents-purge-expired": {
+        "task": "apps.documents.tasks.purge_expired_documents_task",
+        "schedule": 3600.0,
+    },
 }
+
+# Pluggable document storage -- local filesystem now (apps.documents.storage.local),
+# swappable for a cloud backend later purely via this setting. Root defaults to a
+# repo-local directory outside version control; production MUST override to durable
+# storage outside the container filesystem.
+DOCUMENT_STORAGE_ROOT = os.getenv("DOCUMENT_STORAGE_ROOT", str(BASE_DIR / "document_storage"))
+DOCUMENT_STORAGE_BACKEND = os.getenv("DOCUMENT_STORAGE_BACKEND", "apps.documents.storage.local.LocalFilesystemBackend")
 
 if PRODUCTION:
     required = ("DJANGO_SECRET_KEY", "FIELD_ENCRYPTION_KEY", "PUBLIC_BASE_URL", "DJANGO_ALLOWED_HOSTS")

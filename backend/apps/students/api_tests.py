@@ -1,6 +1,7 @@
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from apps.documents.testing import TemporaryDocumentStorageMixin, make_upload
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
 from .models import Student
@@ -66,3 +67,60 @@ class StudentApiTests(TestCase):
             response = self.client.get("/api/v1/students/", HTTP_X_TENANT_SLUG="school-a")
 
         self.assertEqual(response.status_code, 200)
+
+
+class StudentDocumentApiTests(TemporaryDocumentStorageMixin, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.client = APIClient()
+        self.school_a = Tenant.objects.create(name="School A", slug="school-a")
+        self.admin = User.objects.create_user(username="admin", password="secret")
+        self.role = Role.objects.create(
+            tenant=self.school_a, name="Registrar", permissions=["students.document.view", "students.document.manage"],
+        )
+        Membership.objects.create(tenant=self.school_a, user=self.admin, role=self.role)
+        self.student = Student.objects.create(tenant=self.school_a, admission_number="ADM-001", first_name="Amina", last_name="Otieno")
+        self.client.force_authenticate(self.admin)
+
+    def headers(self):
+        return {"HTTP_X_TENANT_SLUG": "school-a"}
+
+    def test_document_upload_download_and_delete_flow(self):
+        upload_response = self.client.post(
+            f"/api/v1/students/{self.student.id}/documents/",
+            {"document_type": "Birth certificate", "file": make_upload(name="birth.pdf")},
+            format="multipart", **self.headers(),
+        )
+        self.assertEqual(upload_response.status_code, 201)
+        document_id = upload_response.data["id"]
+
+        list_response = self.client.get(f"/api/v1/students/{self.student.id}/documents/", **self.headers())
+        self.assertEqual(list_response.status_code, 200)
+        self.assertEqual(list_response.data["count"], 1)
+
+        download_response = self.client.get(
+            f"/api/v1/students/{self.student.id}/documents/{document_id}/download/", **self.headers(),
+        )
+        self.assertEqual(download_response.status_code, 200)
+        self.assertEqual(b"".join(download_response.streaming_content), b"%PDF-1.4 test content")
+
+        delete_response = self.client.delete(
+            f"/api/v1/students/{self.student.id}/documents/{document_id}/", **self.headers(),
+        )
+        self.assertEqual(delete_response.status_code, 204)
+        list_after_delete = self.client.get(f"/api/v1/students/{self.student.id}/documents/", **self.headers())
+        self.assertEqual(list_after_delete.data["count"], 0)
+
+    def test_viewer_only_role_cannot_upload(self):
+        viewer = User.objects.create_user(username="viewer", password="secret")
+        Membership.objects.create(
+            tenant=self.school_a, user=viewer,
+            role=Role.objects.create(tenant=self.school_a, name="Viewer", permissions=["students.document.view"]),
+        )
+        self.client.force_authenticate(viewer)
+        response = self.client.post(
+            f"/api/v1/students/{self.student.id}/documents/",
+            {"document_type": "Birth certificate", "file": make_upload()},
+            format="multipart", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 403)

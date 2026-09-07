@@ -1,10 +1,11 @@
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from apps.documents.testing import TemporaryDocumentStorageMixin, make_upload
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
 
-class StaffApiTests(TestCase):
+class StaffApiTests(TemporaryDocumentStorageMixin, TestCase):
     def setUp(self):
         self.client = APIClient()
         self.school_a = Tenant.objects.create(name="School A", slug="school-a")
@@ -108,14 +109,30 @@ class StaffApiTests(TestCase):
         employee_id = create_response.data["id"]
 
         document_response = self.client.post(
-            f"/api/v1/staff/employees/{employee_id}/documents/", {"document_type": "ID_COPY", "file_name": "id.pdf"},
-            format="json", **self.headers(),
+            f"/api/v1/staff/employees/{employee_id}/documents/",
+            {"document_type": "ID_COPY", "file": make_upload(name="id.pdf")},
+            format="multipart", **self.headers(),
         )
         self.assertEqual(document_response.status_code, 201)
+        self.assertEqual(document_response.data["original_filename"], "id.pdf")
+        document_id = document_response.data["id"]
 
         list_response = self.client.get(f"/api/v1/staff/employees/{employee_id}/documents/", **self.headers())
         self.assertEqual(list_response.status_code, 200)
         self.assertEqual(list_response.data["count"], 1)
+
+        download_response = self.client.get(
+            f"/api/v1/staff/employees/{employee_id}/documents/{document_id}/download/", **self.headers(),
+        )
+        self.assertEqual(download_response.status_code, 200)
+        self.assertEqual(b"".join(download_response.streaming_content), b"%PDF-1.4 test content")
+
+        delete_response = self.client.delete(
+            f"/api/v1/staff/employees/{employee_id}/documents/{document_id}/", **self.headers(),
+        )
+        self.assertEqual(delete_response.status_code, 204)
+        list_after_delete = self.client.get(f"/api/v1/staff/employees/{employee_id}/documents/", **self.headers())
+        self.assertEqual(list_after_delete.data["count"], 0)
 
         qualification_response = self.client.post(
             f"/api/v1/staff/employees/{employee_id}/qualifications/",
@@ -123,6 +140,19 @@ class StaffApiTests(TestCase):
             format="json", **self.headers(),
         )
         self.assertEqual(qualification_response.status_code, 201)
+
+    def test_document_upload_rejects_a_json_body(self):
+        # The old stub accepted a JSON {"file_name": "..."} body and created
+        # a fake row with no real file behind it. The multipart-only upload
+        # endpoint must reject that shape cleanly rather than silently
+        # reviving the old stub behavior.
+        create_response = self.create_employee()
+        employee_id = create_response.data["id"]
+        response = self.client.post(
+            f"/api/v1/staff/employees/{employee_id}/documents/", {"document_type": "ID_COPY", "file_name": "id.pdf"},
+            format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 415)
 
     def test_user_link_and_unlink_flow(self):
         create_response = self.create_employee()

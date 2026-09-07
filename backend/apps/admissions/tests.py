@@ -3,15 +3,17 @@ from datetime import date
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 
+from apps.documents.testing import TemporaryDocumentStorageMixin, make_upload
 from apps.students.models import Student
-from apps.tenancy.models import Campus, Tenant, User
+from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
 from .models import Application, ApplicationStatus
-from .services import enroll_application, transition_application
+from .services import add_application_document, delete_application_document, enroll_application, transition_application
 
 
-class AdmissionLifecycleTests(TestCase):
+class AdmissionLifecycleTests(TemporaryDocumentStorageMixin, TestCase):
     def setUp(self):
+        super().setUp()
         self.school_a = Tenant.objects.create(name="School A", slug="school-a")
         self.school_b = Tenant.objects.create(name="School B", slug="school-b")
         self.campus_a = Campus.objects.create(tenant=self.school_a, name="Main", code="MAIN")
@@ -25,6 +27,9 @@ class AdmissionLifecycleTests(TestCase):
             date_of_birth=date(2014, 5, 10),
             campus=self.campus_a,
         )
+        self.admin = User.objects.create_user(username="admin", password="secret")
+        role = Role.objects.create(tenant=self.school_a, name="Admissions Officer", permissions=["admissions.document.manage"])
+        Membership.objects.create(tenant=self.school_a, user=self.admin, role=role)
 
     def test_application_requires_ordered_status_transitions(self):
         transition_application(application=self.application, status=ApplicationStatus.SUBMITTED)
@@ -74,3 +79,39 @@ class AdmissionLifecycleTests(TestCase):
 
         with self.assertRaises(ValidationError):
             enroll_application(application=self.application, admission_number="ADM-005")
+
+
+class ApplicationDocumentTests(TemporaryDocumentStorageMixin, TestCase):
+    def setUp(self):
+        super().setUp()
+        self.school_a = Tenant.objects.create(name="School A", slug="school-a")
+        self.application = Application.objects.create(
+            tenant=self.school_a, application_number="APP-001", first_name="Amina", last_name="Otieno",
+        )
+        self.admin = User.objects.create_user(username="admin", password="secret")
+        role = Role.objects.create(tenant=self.school_a, name="Admissions Officer", permissions=["admissions.document.manage"])
+        Membership.objects.create(tenant=self.school_a, user=self.admin, role=role)
+
+    def test_add_and_delete_application_document(self):
+        document = add_application_document(
+            user=self.admin, tenant=self.school_a, application=self.application, document_type="Birth certificate",
+            file_obj=make_upload(name="birth.pdf"), original_filename="birth.pdf", content_type="application/pdf",
+        )
+        self.assertEqual(document.application_id, self.application.id)
+        self.assertEqual(document.document.original_filename, "birth.pdf")
+        self.assertEqual(self.application.documents.count(), 1)
+
+        delete_application_document(user=self.admin, tenant=self.school_a, application_document=document)
+        self.assertEqual(self.application.documents.count(), 0)
+
+    def test_add_document_requires_permission(self):
+        outsider = User.objects.create_user(username="outsider", password="secret")
+        Membership.objects.create(
+            tenant=self.school_a, user=outsider,
+            role=Role.objects.create(tenant=self.school_a, name="No Access", permissions=[]),
+        )
+        with self.assertRaises(ValidationError):
+            add_application_document(
+                user=outsider, tenant=self.school_a, application=self.application, document_type="Birth certificate",
+                file_obj=make_upload(), original_filename="birth.pdf", content_type="application/pdf",
+            )

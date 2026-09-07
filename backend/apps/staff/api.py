@@ -1,13 +1,16 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.generics import ListAPIView, ListCreateAPIView
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.parsers import MultiPartParser
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.documents.services import open_document_stream
 from apps.tenancy.models import Campus, User
 from apps.tenancy.services import require_permission
 
@@ -17,6 +20,7 @@ from .services import (
     add_employee_qualification,
     change_employment_status,
     create_employee,
+    delete_employee_document,
     link_user_account,
     unlink_user_account,
     update_employee_details,
@@ -177,16 +181,27 @@ class EmployeeStatusView(APIView):
 
 
 class EmployeeDocumentSerializer(serializers.ModelSerializer):
+    original_filename = serializers.CharField(source="document.original_filename", read_only=True, default=None)
+    content_type = serializers.CharField(source="document.content_type", read_only=True, default=None)
+    size_bytes = serializers.IntegerField(source="document.size_bytes", read_only=True, default=None)
+    uploaded_at = serializers.DateTimeField(source="document.created_at", read_only=True, default=None)
+
     class Meta:
         model = EmployeeDocument
-        fields = ["id", "document_type", "file_name", "uploaded_at"]
-        read_only_fields = ["id", "uploaded_at"]
+        fields = ["id", "document_type", "original_filename", "content_type", "size_bytes", "uploaded_at"]
+        read_only_fields = fields
+
+
+class EmployeeDocumentUploadSerializer(serializers.Serializer):
+    document_type = serializers.CharField(max_length=80)
+    file = serializers.FileField()
 
 
 class EmployeeDocumentListCreateView(ListCreateAPIView):
     permission_classes = [IsAuthenticated]
     serializer_class = EmployeeDocumentSerializer
     pagination_class = StaffPagination
+    parser_classes = [MultiPartParser]
 
     def get_employee(self):
         tenant = resolve_staff_tenant(self.request, "staff.view")
@@ -194,18 +209,53 @@ class EmployeeDocumentListCreateView(ListCreateAPIView):
 
     def get_queryset(self):
         _, employee = self.get_employee()
-        return EmployeeDocument.objects.filter(employee=employee).order_by("-uploaded_at")
+        return EmployeeDocument.objects.filter(employee=employee).order_by("-document__created_at")
 
     def create(self, request, *args, **kwargs):
         tenant = resolve_staff_tenant(request, "staff.manage")
         employee = resolve_tenant_object(Employee.objects.filter(tenant=tenant), self.kwargs["employee_id"])
-        serializer = self.get_serializer(data=request.data)
+        serializer = EmployeeDocumentUploadSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
+        uploaded_file = serializer.validated_data["file"]
         try:
-            document = add_employee_document(user=request.user, tenant=tenant, employee=employee, **serializer.validated_data)
+            document = add_employee_document(
+                user=request.user, tenant=tenant, employee=employee,
+                document_type=serializer.validated_data["document_type"], file_obj=uploaded_file,
+                original_filename=uploaded_file.name, content_type=uploaded_file.content_type,
+            )
         except DjangoValidationError as error:
             return api_validation_error(error)
         return Response(EmployeeDocumentSerializer(document).data, status=status.HTTP_201_CREATED)
+
+
+class EmployeeDocumentDownloadView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, employee_id, document_id):
+        tenant = resolve_staff_tenant(request, "staff.view")
+        employee = resolve_tenant_object(Employee.objects.filter(tenant=tenant), employee_id)
+        employee_document = resolve_tenant_object(EmployeeDocument.objects.filter(employee=employee), document_id)
+        if employee_document.document is None:
+            raise NotFound("This document's file is no longer available")
+        stream = open_document_stream(document=employee_document.document)
+        response = FileResponse(stream, content_type=employee_document.document.content_type)
+        safe_name = employee_document.document.original_filename.replace('"', "")
+        response["Content-Disposition"] = f'attachment; filename="{safe_name}"'
+        return response
+
+
+class EmployeeDocumentDeleteView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, employee_id, document_id):
+        tenant = resolve_staff_tenant(request, "staff.manage")
+        employee = resolve_tenant_object(Employee.objects.filter(tenant=tenant), employee_id)
+        employee_document = resolve_tenant_object(EmployeeDocument.objects.filter(employee=employee), document_id)
+        try:
+            delete_employee_document(user=request.user, tenant=tenant, employee_document=employee_document)
+        except DjangoValidationError as error:
+            return api_validation_error(error)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class EmployeeQualificationSerializer(serializers.ModelSerializer):

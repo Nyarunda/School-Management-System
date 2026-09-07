@@ -11,6 +11,7 @@ dist/
 .test-postgres/
 .test-deps/
 .test-postgres.log
+backend/document_storage/
 
 # Milestone 5E load-test run output -- disposable, regenerated per run
 backend/loadtest/manifest.json

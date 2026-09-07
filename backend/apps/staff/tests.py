@@ -4,6 +4,7 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from apps.activity.models import ActivityEvent
+from apps.documents.testing import TemporaryDocumentStorageMixin, make_upload
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
 from .models import Employee, EmploymentStatus
@@ -12,6 +13,7 @@ from .services import (
     add_employee_qualification,
     change_employment_status,
     create_employee,
+    delete_employee_document,
     link_user_account,
     unlink_user_account,
     update_employee_details,
@@ -199,12 +201,27 @@ class ChangeEmploymentStatusTests(StaffFoundationTests):
             change_employment_status(user=self.scoped_admin, tenant=self.school_a, employee=employee, status=EmploymentStatus.SUSPENDED)
 
 
-class DocumentAndQualificationTests(StaffFoundationTests):
+class DocumentAndQualificationTests(TemporaryDocumentStorageMixin, StaffFoundationTests):
     def test_add_document(self):
         employee = self.make_employee()
-        document = add_employee_document(user=self.admin, tenant=self.school_a, employee=employee, document_type="ID_COPY", file_name="id.pdf")
+        document = add_employee_document(
+            user=self.admin, tenant=self.school_a, employee=employee, document_type="ID_COPY",
+            file_obj=make_upload(name="id.pdf"), original_filename="id.pdf", content_type="application/pdf",
+        )
         self.assertEqual(document.employee_id, employee.id)
+        self.assertIsNotNone(document.document)
+        self.assertEqual(document.document.original_filename, "id.pdf")
         self.assertTrue(ActivityEvent.objects.filter(action="staff.document_added").exists())
+
+    def test_delete_document(self):
+        employee = self.make_employee()
+        document = add_employee_document(
+            user=self.admin, tenant=self.school_a, employee=employee, document_type="ID_COPY",
+            file_obj=make_upload(), original_filename="id.pdf", content_type="application/pdf",
+        )
+        delete_employee_document(user=self.admin, tenant=self.school_a, employee_document=document)
+        self.assertFalse(employee.documents.filter(id=document.id).exists())
+        self.assertTrue(ActivityEvent.objects.filter(action="staff.document_deleted").exists())
 
     def test_add_qualification(self):
         employee = self.make_employee()
@@ -223,7 +240,10 @@ class DocumentAndQualificationTests(StaffFoundationTests):
     def test_campus_scoped_actor_cannot_add_document_for_a_different_campus_employee(self):
         employee = self.make_employee(campus=self.other_campus)
         with self.assertRaises(ValidationError):
-            add_employee_document(user=self.scoped_admin, tenant=self.school_a, employee=employee, document_type="ID_COPY", file_name="id.pdf")
+            add_employee_document(
+                user=self.scoped_admin, tenant=self.school_a, employee=employee, document_type="ID_COPY",
+                file_obj=make_upload(), original_filename="id.pdf", content_type="application/pdf",
+            )
 
     def test_campus_scoped_actor_cannot_add_qualification_for_a_different_campus_employee(self):
         employee = self.make_employee(campus=self.other_campus)

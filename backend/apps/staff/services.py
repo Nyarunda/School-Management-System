@@ -3,6 +3,7 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.activity.services import record_activity
+from apps.documents.services import delete_document, upload_document
 from apps.tenancy.models import Membership
 from apps.tenancy.services import require_permission, require_same_tenant
 
@@ -166,13 +167,17 @@ def change_employment_status(*, user, tenant, employee, status, reason="", actor
     return locked_employee
 
 
-def add_employee_document(*, user, tenant, employee, document_type, file_name, actor=None):
+def add_employee_document(*, user, tenant, employee, document_type, file_obj, original_filename, content_type, actor=None):
     membership = require_permission(user=user, tenant=tenant, permission="staff.manage")
     require_same_tenant(tenant=tenant, employee=employee)
     _require_campus_scope(membership=membership, campus_id=employee.campus_id)
 
+    stored = upload_document(
+        tenant=tenant, uploaded_by=actor or user, file_obj=file_obj,
+        original_filename=original_filename, content_type=content_type,
+    )
     document = EmployeeDocument.objects.create(
-        tenant=tenant, employee=employee, document_type=document_type, file_name=file_name,
+        tenant=tenant, employee=employee, document_type=document_type, document=stored,
     )
     record_activity(
         tenant=tenant, actor=actor or user, action="staff.document_added",
@@ -180,6 +185,23 @@ def add_employee_document(*, user, tenant, employee, document_type, file_name, a
         metadata={"document_id": str(document.id)},
     )
     return document
+
+
+def delete_employee_document(*, user, tenant, employee_document, actor=None):
+    membership = require_permission(user=user, tenant=tenant, permission="staff.manage")
+    require_same_tenant(tenant=tenant, employee=employee_document.employee)
+    _require_campus_scope(membership=membership, campus_id=employee_document.employee.campus_id)
+
+    if employee_document.document is not None:
+        delete_document(document=employee_document.document)
+    employee_id = employee_document.employee_id
+    document_id = employee_document.id
+    employee_document.delete()
+    record_activity(
+        tenant=tenant, actor=actor or user, action="staff.document_deleted",
+        resource_type="employee", resource_id=str(employee_id),
+        metadata={"document_id": str(document_id)},
+    )
 
 
 def add_employee_qualification(*, user, tenant, employee, title, institution="", year_obtained=None, actor=None):
