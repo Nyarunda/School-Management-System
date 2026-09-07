@@ -35,7 +35,11 @@ class StaffFoundationTests(TestCase):
         Membership.objects.create(tenant=self.school_a, user=self.viewer, role=self.viewer_role)
 
         self.campus = Campus.objects.create(tenant=self.school_a, name="Main", code="MAIN")
+        self.other_campus = Campus.objects.create(tenant=self.school_a, name="Annex", code="ANNEX")
         self.other_campus_school_b = Campus.objects.create(tenant=self.school_b, name="Other", code="OTHER")
+
+        self.scoped_admin = User.objects.create_user(username="scoped-admin", password="secret")
+        Membership.objects.create(tenant=self.school_a, user=self.scoped_admin, role=self.admin_role, campus=self.campus)
 
     def make_employee(self, **overrides):
         values = dict(
@@ -81,6 +85,31 @@ class CreateEmployeeTests(StaffFoundationTests):
         )
         self.assertIsNotNone(employee.pk)
 
+    def test_employee_number_is_normalized_and_collides_regardless_of_case_or_whitespace(self):
+        self.make_employee(employee_number="EMP001")
+        with self.assertRaisesMessage(ValidationError, "already in use"):
+            self.make_employee(employee_number=" emp001 ", first_name="Other")
+
+    def test_blank_after_normalization_employee_number_is_rejected(self):
+        with self.assertRaisesMessage(ValidationError, "cannot be blank"):
+            self.make_employee(employee_number="   ")
+
+    def test_date_of_birth_after_hire_date_is_rejected(self):
+        with self.assertRaisesMessage(ValidationError, "before the hire date"):
+            self.make_employee(date_of_birth=date(2024, 6, 1), hire_date=date(2024, 1, 1))
+
+    def test_campus_scoped_actor_can_create_within_own_campus(self):
+        employee = self.make_employee(user=self.scoped_admin, campus=self.campus)
+        self.assertEqual(employee.campus_id, self.campus.id)
+
+    def test_campus_scoped_actor_cannot_create_at_a_different_campus(self):
+        with self.assertRaises(ValidationError):
+            self.make_employee(user=self.scoped_admin, campus=self.other_campus)
+
+    def test_campus_scoped_actor_cannot_create_an_unscoped_employee(self):
+        with self.assertRaises(ValidationError):
+            self.make_employee(user=self.scoped_admin)
+
 
 class UpdateEmployeeDetailsTests(StaffFoundationTests):
     def test_updates_changed_fields_and_audits(self):
@@ -107,6 +136,40 @@ class UpdateEmployeeDetailsTests(StaffFoundationTests):
         with self.assertRaisesMessage(ValidationError, "Unsupported field"):
             update_employee_details(user=self.admin, tenant=self.school_a, employee=employee, employee_number="EMP-999")
 
+    def test_date_of_birth_after_hire_date_is_rejected_on_update(self):
+        employee = self.make_employee(date_of_birth=date(1990, 1, 1))
+        with self.assertRaisesMessage(ValidationError, "before the hire date"):
+            update_employee_details(user=self.admin, tenant=self.school_a, employee=employee, hire_date=date(1985, 1, 1))
+
+    def test_campus_scoped_actor_cannot_update_a_different_campus_employee(self):
+        employee = self.make_employee(campus=self.other_campus)
+        with self.assertRaises(ValidationError):
+            update_employee_details(user=self.scoped_admin, tenant=self.school_a, employee=employee, job_title="X")
+
+    def test_campus_scoped_actor_can_update_own_campus_employee(self):
+        employee = self.make_employee(campus=self.campus)
+        updated = update_employee_details(user=self.scoped_admin, tenant=self.school_a, employee=employee, job_title="X")
+        self.assertEqual(updated.job_title, "X")
+
+    def test_changing_campus_rejects_when_linked_account_becomes_incompatible(self):
+        employee = self.make_employee(campus=self.campus)
+        scoped_teacher = User.objects.create_user(username="scoped-teacher", password="secret")
+        teacher_role = Role.objects.create(tenant=self.school_a, name="Teacher", permissions=[])
+        Membership.objects.create(tenant=self.school_a, user=scoped_teacher, role=teacher_role, campus=self.campus)
+        link_user_account(user=self.admin, tenant=self.school_a, employee=employee, user_account=scoped_teacher)
+
+        with self.assertRaises(ValidationError):
+            update_employee_details(user=self.admin, tenant=self.school_a, employee=employee, campus=self.other_campus)
+
+        membership = Membership.objects.get(tenant=self.school_a, user=scoped_teacher)
+        self.assertEqual(membership.campus_id, self.campus.id)
+
+    def test_changing_campus_is_allowed_when_linked_account_is_tenant_wide(self):
+        employee = self.make_employee(campus=self.campus)
+        link_user_account(user=self.admin, tenant=self.school_a, employee=employee, user_account=self.viewer)
+        updated = update_employee_details(user=self.admin, tenant=self.school_a, employee=employee, campus=self.other_campus)
+        self.assertEqual(updated.campus_id, self.other_campus.id)
+
 
 class ChangeEmploymentStatusTests(StaffFoundationTests):
     def test_active_to_suspended_and_back(self):
@@ -130,6 +193,11 @@ class ChangeEmploymentStatusTests(StaffFoundationTests):
         terminated = change_employment_status(user=self.admin, tenant=self.school_a, employee=employee, status=EmploymentStatus.TERMINATED)
         self.assertEqual(terminated.status, EmploymentStatus.TERMINATED)
 
+    def test_campus_scoped_actor_cannot_change_status_of_a_different_campus_employee(self):
+        employee = self.make_employee(campus=self.other_campus)
+        with self.assertRaises(ValidationError):
+            change_employment_status(user=self.scoped_admin, tenant=self.school_a, employee=employee, status=EmploymentStatus.SUSPENDED)
+
 
 class DocumentAndQualificationTests(StaffFoundationTests):
     def test_add_document(self):
@@ -146,6 +214,21 @@ class DocumentAndQualificationTests(StaffFoundationTests):
         )
         self.assertEqual(qualification.employee_id, employee.id)
         self.assertTrue(ActivityEvent.objects.filter(action="staff.qualification_added").exists())
+
+    def test_qualification_year_out_of_range_is_rejected(self):
+        employee = self.make_employee()
+        with self.assertRaisesMessage(ValidationError, "year_obtained"):
+            add_employee_qualification(user=self.admin, tenant=self.school_a, employee=employee, title="X", year_obtained=1800)
+
+    def test_campus_scoped_actor_cannot_add_document_for_a_different_campus_employee(self):
+        employee = self.make_employee(campus=self.other_campus)
+        with self.assertRaises(ValidationError):
+            add_employee_document(user=self.scoped_admin, tenant=self.school_a, employee=employee, document_type="ID_COPY", file_name="id.pdf")
+
+    def test_campus_scoped_actor_cannot_add_qualification_for_a_different_campus_employee(self):
+        employee = self.make_employee(campus=self.other_campus)
+        with self.assertRaises(ValidationError):
+            add_employee_qualification(user=self.scoped_admin, tenant=self.school_a, employee=employee, title="X")
 
 
 class UserLinkTests(StaffFoundationTests):
@@ -198,3 +281,34 @@ class UserLinkTests(StaffFoundationTests):
         count_before = ActivityEvent.objects.count()
         unlink_user_account(user=self.admin, tenant=self.school_a, employee=employee)
         self.assertEqual(ActivityEvent.objects.count(), count_before)
+
+    def test_same_campus_membership_can_be_linked(self):
+        employee = self.make_employee(campus=self.campus)
+        scoped_teacher = User.objects.create_user(username="scoped-teacher", password="secret")
+        Membership.objects.create(tenant=self.school_a, user=scoped_teacher, role=self.teacher_role, campus=self.campus)
+        linked = link_user_account(user=self.admin, tenant=self.school_a, employee=employee, user_account=scoped_teacher)
+        self.assertEqual(linked.user_account_id, scoped_teacher.id)
+
+    def test_different_campus_membership_cannot_be_linked(self):
+        employee = self.make_employee(campus=self.campus)
+        scoped_teacher = User.objects.create_user(username="scoped-teacher", password="secret")
+        Membership.objects.create(tenant=self.school_a, user=scoped_teacher, role=self.teacher_role, campus=self.other_campus)
+        with self.assertRaises(ValidationError):
+            link_user_account(user=self.admin, tenant=self.school_a, employee=employee, user_account=scoped_teacher)
+
+    def test_tenant_wide_membership_can_be_linked_to_any_campus_employee(self):
+        employee = self.make_employee(campus=self.campus)
+        linked = link_user_account(user=self.admin, tenant=self.school_a, employee=employee, user_account=self.teacher_user)
+        self.assertEqual(linked.user_account_id, self.teacher_user.id)
+
+    def test_campus_scoped_membership_cannot_be_linked_to_an_unscoped_employee(self):
+        employee = self.make_employee()
+        scoped_teacher = User.objects.create_user(username="scoped-teacher", password="secret")
+        Membership.objects.create(tenant=self.school_a, user=scoped_teacher, role=self.teacher_role, campus=self.campus)
+        with self.assertRaises(ValidationError):
+            link_user_account(user=self.admin, tenant=self.school_a, employee=employee, user_account=scoped_teacher)
+
+    def test_campus_scoped_actor_cannot_link_a_different_campus_employee(self):
+        employee = self.make_employee(campus=self.other_campus)
+        with self.assertRaises(ValidationError):
+            link_user_account(user=self.scoped_admin, tenant=self.school_a, employee=employee, user_account=self.teacher_user)

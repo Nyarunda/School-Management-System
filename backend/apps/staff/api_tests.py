@@ -18,10 +18,14 @@ class StaffApiTests(TestCase):
         self.client.force_authenticate(self.admin)
 
         self.campus = Campus.objects.create(tenant=self.school_a, name="Main", code="MAIN")
+        self.other_campus = Campus.objects.create(tenant=self.school_a, name="Annex", code="ANNEX")
 
         self.teacher_user = User.objects.create_user(username="teacher", password="secret")
         self.teacher_role = Role.objects.create(tenant=self.school_a, name="Teacher", permissions=[])
         Membership.objects.create(tenant=self.school_a, user=self.teacher_user, role=self.teacher_role)
+
+        self.scoped_admin = User.objects.create_user(username="scoped-admin", password="secret")
+        Membership.objects.create(tenant=self.school_a, user=self.scoped_admin, role=self.role, campus=self.campus)
 
     def headers(self):
         return {"HTTP_X_TENANT_SLUG": "school-a"}
@@ -57,6 +61,21 @@ class StaffApiTests(TestCase):
         self.create_employee()
         response = self.create_employee(first_name="Other")
         self.assertEqual(response.status_code, 400)
+
+    def test_employee_number_is_normalized_and_collides_case_insensitively(self):
+        self.create_employee(employee_number="EMP001")
+        response = self.create_employee(employee_number=" emp001 ", first_name="Other")
+        self.assertEqual(response.status_code, 400)
+
+    def test_campus_scoped_actor_cannot_create_at_a_different_campus(self):
+        self.client.force_authenticate(self.scoped_admin)
+        response = self.create_employee(campus=str(self.other_campus.id))
+        self.assertEqual(response.status_code, 400)
+
+    def test_campus_scoped_actor_can_create_within_own_campus(self):
+        self.client.force_authenticate(self.scoped_admin)
+        response = self.create_employee(campus=str(self.campus.id))
+        self.assertEqual(response.status_code, 201)
 
     def test_employee_list_is_paginated_and_filterable(self):
         self.create_employee()
