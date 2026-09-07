@@ -6,6 +6,9 @@ from django.db import IntegrityError
 from django.test import TestCase
 
 from apps.academics.models import AcademicLevel, AcademicYear
+from apps.guardians.models import Guardian, StudentGuardian
+from apps.notifications.models import NotificationChannel, NotificationOutbox, NotificationRecipientType
+from apps.notifications.services import create_notification_rule, create_notification_template, set_channel_enabled
 from apps.tenancy.models import Membership, Role, Tenant, User
 
 from .models import (
@@ -265,6 +268,9 @@ class PaymentTests(TestCase):
                 "finance.payment.allocate",
                 "finance.payment.reverse",
                 "finance.allocation.reverse",
+                "notifications.setup.manage",
+                "notifications.templates.manage",
+                "notifications.rules.manage",
             ],
         )
         Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role)
@@ -303,6 +309,31 @@ class PaymentTests(TestCase):
 
         self.assertEqual(payment.receipt.receipt_number, "RCT-2026-000001")
         self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("50000.00"))
+
+    def test_record_payment_notifies_the_students_primary_guardian_when_configured(self):
+        guardian = Guardian.objects.create(tenant=self.school_a, first_name="Ann", last_name="Otieno", phone_number="0700000001")
+        StudentGuardian.objects.create(tenant=self.school_a, student=self.student, guardian=guardian, relationship="Mother", is_primary=True)
+        set_channel_enabled(user=self.user, tenant=self.school_a, channel=NotificationChannel.SMS, enabled=True)
+        template = create_notification_template(
+            user=self.user, tenant=self.school_a, code="PAYMENT_SMS", name="Payment", channel=NotificationChannel.SMS,
+            body="Dear {{ guardian_name }}, payment of {{ amount }} received. Receipt {{ receipt_number }}.",
+        )
+        create_notification_rule(
+            user=self.user, tenant=self.school_a, event_code="finance.payment.received",
+            recipient_type=NotificationRecipientType.GUARDIAN, channel=NotificationChannel.SMS, template=template,
+        )
+
+        payment = self._record_payment()
+
+        outbox = NotificationOutbox.objects.get(tenant=self.school_a)
+        self.assertEqual(outbox.recipient, "0700000001")
+        self.assertIn(payment.receipt.receipt_number, outbox.context["body"])
+
+    def test_record_payment_without_notification_setup_does_not_raise(self):
+        # No CommunicationChannel/rule configured at all -- publish_notification_event
+        # must no-op silently rather than blocking the payment.
+        self._record_payment()
+        self.assertEqual(NotificationOutbox.objects.filter(tenant=self.school_a).count(), 0)
 
     def test_record_payment_is_idempotent(self):
         first = self._record_payment()

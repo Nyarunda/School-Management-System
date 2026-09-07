@@ -4,6 +4,8 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from apps.activity.models import ActivityEvent
+from apps.notifications.models import NotificationChannel, NotificationOutbox, NotificationRecipientType
+from apps.notifications.services import create_notification_rule, create_notification_template, set_channel_enabled
 from apps.staff.services import create_employee
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
@@ -44,6 +46,7 @@ class LeaveFoundationTests(TestCase):
             permissions=[
                 "staff.manage", "leave.setup.view", "leave.setup.manage", "leave.request.view",
                 "leave.request.manage", "leave.balance.adjust",
+                "notifications.setup.manage", "notifications.templates.manage", "notifications.rules.manage",
             ],
         )
         Membership.objects.create(tenant=self.school_a, user=self.admin, role=self.admin_role)
@@ -61,7 +64,7 @@ class LeaveFoundationTests(TestCase):
 
         self.employee = create_employee(
             user=self.admin, tenant=self.school_a, employee_number="EMP-001", first_name="Jane", last_name="Doe",
-            job_title="Teacher", employment_type="PERMANENT", hire_date=date(2020, 1, 1),
+            job_title="Teacher", employment_type="PERMANENT", hire_date=date(2020, 1, 1), phone_number="0711111111",
         )
 
     def make_workflow(self, *, single_stage=False):
@@ -273,6 +276,27 @@ class DecisionFlowTests(LeaveFoundationTests):
         self.assertEqual(consumed.count(), 1)
         self.assertEqual(consumed.first().days, -5)
         self.assertEqual(resolve_leave_balance(tenant=self.school_a, employee=self.employee, leave_type=leave_type, year=2026), 16)
+
+    def test_final_approval_notifies_the_employee_when_configured(self):
+        set_channel_enabled(user=self.admin, tenant=self.school_a, channel=NotificationChannel.SMS, enabled=True)
+        template = create_notification_template(
+            user=self.admin, tenant=self.school_a, code="LEAVE_APPROVED_SMS", name="Leave approved", channel=NotificationChannel.SMS,
+            body="Dear {{ employee_name }}, your leave from {{ start_date }} to {{ end_date }} was approved.",
+        )
+        create_notification_rule(
+            user=self.admin, tenant=self.school_a, event_code="leave.request.approved",
+            recipient_type=NotificationRecipientType.EMPLOYEE, channel=NotificationChannel.SMS, template=template,
+        )
+        workflow = self.make_workflow(single_stage=True)
+        leave_type = self.make_leave_type(code="NOTIFY", approval_workflow=workflow)
+        self.grant(leave_type, 2026)
+        request = self.submit(leave_type)
+
+        decide_leave_request_stage(user=self.supervisor, tenant=self.school_a, leave_request=request, decision=LeaveRequestApprovalStatus.APPROVED)
+
+        outbox = NotificationOutbox.objects.get(tenant=self.school_a)
+        self.assertEqual(outbox.recipient, "0711111111")
+        self.assertIn("Jane Doe", outbox.context["body"])
 
     def test_middle_stage_rejection_skips_later_stages_and_posts_no_ledger(self):
         workflow = self.make_workflow()

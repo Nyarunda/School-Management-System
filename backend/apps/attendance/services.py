@@ -4,6 +4,7 @@ from django.utils import timezone
 
 from apps.academics.models import AcademicYear, EnrollmentStatus, StudentEnrollment, TeacherAssignment
 from apps.activity.services import record_activity
+from apps.notifications.services import publish_notification_event
 from apps.tenancy.services import require_permission, require_same_tenant
 
 from .models import AttendanceRecord, AttendanceSession, AttendanceSessionStatus, AttendanceSetup, AttendanceStatus
@@ -160,6 +161,13 @@ def record_attendance_bulk(*, user, tenant, session, entries):
                     tenant=tenant, actor=user, action="attendance.record.corrected",
                     resource_type="attendance_record", resource_id=str(record.id),
                     metadata={"previous": previous, "new": {"status": status, "remarks": remarks}},
+                )
+            if status == AttendanceStatus.ABSENT and previous["status"] != AttendanceStatus.ABSENT:
+                publish_notification_event(
+                    tenant=tenant, event_code="attendance.student.absent",
+                    dedupe_key=f"attendance-absent:{record.id}:{locked_session.session_date}",
+                    context={"session_date": str(locked_session.session_date)},
+                    recipient_refs={"student": student}, actor=user,
                 )
         records.append(record)
 

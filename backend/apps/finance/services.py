@@ -6,6 +6,7 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from apps.activity.services import record_activity
+from apps.notifications.services import publish_notification_event
 from apps.students.models import Student
 from apps.tenancy.services import require_permission
 
@@ -260,7 +261,7 @@ def record_payment(*, user, tenant, student, payment_method, amount, idempotency
                 external_reference=external_reference,
                 received_at=received_at or timezone.now(),
             )
-            Receipt.objects.create(
+            receipt = Receipt.objects.create(
                 tenant=tenant,
                 payment=payment,
                 receipt_number=_next_number(tenant=tenant, document_type="RECEIPT"),
@@ -283,6 +284,11 @@ def record_payment(*, user, tenant, student, payment_method, amount, idempotency
         action="payment.recorded",
         resource_type="payment",
         resource_id=str(payment.id),
+    )
+    publish_notification_event(
+        tenant=tenant, event_code="finance.payment.received", dedupe_key=f"payment-received:{payment.id}",
+        context={"amount": str(amount), "receipt_number": receipt.receipt_number},
+        recipient_refs={"student": student}, actor=user,
     )
     return payment
 

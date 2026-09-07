@@ -6,6 +6,9 @@ from django.test import TestCase
 
 from apps.academics.models import AcademicLevel, AcademicYear, ClassGroup, EnrollmentStatus, StudentEnrollment, Subject, TeacherAssignment
 from apps.activity.models import ActivityEvent
+from apps.guardians.models import Guardian, StudentGuardian
+from apps.notifications.models import NotificationChannel, NotificationOutbox, NotificationRecipientType
+from apps.notifications.services import create_notification_rule, create_notification_template, set_channel_enabled
 from apps.students.models import Student
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
@@ -24,6 +27,7 @@ class AttendanceFoundationTests(TestCase):
             permissions=[
                 "attendance.session.manage", "attendance.record.view", "attendance.any_class",
                 "attendance.session.override_calendar",
+                "notifications.setup.manage", "notifications.templates.manage", "notifications.rules.manage",
             ],
         )
         Membership.objects.create(tenant=self.school_a, user=self.admin, role=self.admin_role)
@@ -196,6 +200,29 @@ class RecordAttendanceBulkTests(AttendanceFoundationTests):
         )
         self.assertEqual(len(records), 2)
         self.assertEqual(AttendanceRecord.objects.filter(session=session).count(), 2)
+
+    def test_marking_absent_notifies_the_primary_guardian_once_not_on_a_no_op_resubmission(self):
+        guardian = Guardian.objects.create(tenant=self.school_a, first_name="Rose", last_name="Otieno", phone_number="0700000001")
+        StudentGuardian.objects.create(tenant=self.school_a, student=self.student, guardian=guardian, relationship="Mother", is_primary=True)
+        set_channel_enabled(user=self.admin, tenant=self.school_a, channel=NotificationChannel.SMS, enabled=True)
+        template = create_notification_template(
+            user=self.admin, tenant=self.school_a, code="ABSENT_SMS", name="Absent", channel=NotificationChannel.SMS,
+            body="Dear {{ guardian_name }}, your child was marked absent on {{ session_date }}.",
+        )
+        create_notification_rule(
+            user=self.admin, tenant=self.school_a, event_code="attendance.student.absent",
+            recipient_type=NotificationRecipientType.GUARDIAN, channel=NotificationChannel.SMS, template=template,
+        )
+        session, _ = self.open_session()
+
+        record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
+                               entries=[{"student": self.student, "status": AttendanceStatus.ABSENT}])
+        self.assertEqual(NotificationOutbox.objects.filter(tenant=self.school_a).count(), 1)
+
+        # Remarks-only correction while remaining ABSENT must not re-notify.
+        record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
+                               entries=[{"student": self.student, "status": AttendanceStatus.ABSENT, "remarks": "Called in sick"}])
+        self.assertEqual(NotificationOutbox.objects.filter(tenant=self.school_a).count(), 1)
 
     def test_student_not_on_the_roster_is_rejected(self):
         session, _ = self.open_session()

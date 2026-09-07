@@ -6,6 +6,7 @@ from django.db.models import Sum
 from django.utils import timezone
 
 from apps.activity.services import record_activity
+from apps.notifications.services import publish_notification_event
 from apps.staff.models import Employee
 from apps.tenancy.services import require_permission, require_same_tenant
 
@@ -329,6 +330,11 @@ def _finalize_approval(*, tenant, leave_request, locked_employee, user, actor=No
     record_activity(
         tenant=tenant, actor=actor or user, action="leave.request.approved",
         resource_type="leave_request", resource_id=str(leave_request.id),
+    )
+    publish_notification_event(
+        tenant=tenant, event_code="leave.request.approved", dedupe_key=f"leave-approved:{leave_request.id}",
+        context={"start_date": str(leave_request.start_date), "end_date": str(leave_request.end_date)},
+        recipient_refs={"employee": locked_employee}, actor=actor or user,
     )
     return leave_request
 
