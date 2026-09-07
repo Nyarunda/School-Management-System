@@ -28,6 +28,7 @@ INSTALLED_APPS = [
     "apps.assessments",
     "apps.timetable",
     "apps.staff",
+    "apps.leave",
 ]
 
 MIDDLEWARE = [
