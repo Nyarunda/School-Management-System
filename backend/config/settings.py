@@ -105,6 +105,14 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.finance.tasks.resweep_unmatched_incoming_payments",
         "schedule": 3600.0,
     },
+    "notifications-expand-pending-events": {
+        "task": "apps.notifications.tasks.expand_pending_notification_events",
+        "schedule": 30.0,
+    },
+    "notifications-reap-stale-events": {
+        "task": "apps.notifications.tasks.reap_stale_notification_events",
+        "schedule": 300.0,
+    },
     "notifications-dispatch-pending": {
         "task": "apps.notifications.tasks.dispatch_pending_notifications",
         "schedule": 30.0,

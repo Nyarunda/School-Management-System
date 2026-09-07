@@ -13,6 +13,6 @@ class StubSMSGateway(NotificationGateway):
     rows look exactly like a real provider's would.
     """
 
-    def send(self, *, tenant, recipient, subject, body, sender_id, context):
-        logger.info("SMS (stub): to %s -- %s", recipient, body)
+    def send(self, *, outbox):
+        logger.info("SMS (stub): to %s -- %s", outbox.recipient, outbox.context.get("body", ""))
         return f"stub-sms-{uuid.uuid4()}"

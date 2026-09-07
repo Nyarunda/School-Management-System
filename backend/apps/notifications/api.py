@@ -13,6 +13,7 @@ from apps.tenancy.services import require_membership, require_permission
 from .models import (
     CommunicationChannel,
     CommunicationSetup,
+    GuardianRecipientPolicy,
     NotificationChannel,
     NotificationDeliveryAttempt,
     NotificationOutbox,
@@ -81,7 +82,7 @@ def api_validation_error(error):
 class CommunicationSetupSerializer(serializers.ModelSerializer):
     class Meta:
         model = CommunicationSetup
-        fields = ["notifications_enabled", "default_country_code", "quiet_hours_enabled", "quiet_hours_start", "quiet_hours_end"]
+        fields = ["notifications_enabled", "default_country_code"]
 
 
 class CommunicationSetupView(APIView):
@@ -91,10 +92,7 @@ class CommunicationSetupView(APIView):
         tenant = resolve_notifications_tenant(request, "notifications.setup.view")
         setup = CommunicationSetup.objects.filter(tenant=tenant).first()
         if setup is None:
-            return Response({
-                "notifications_enabled": True, "default_country_code": "", "quiet_hours_enabled": False,
-                "quiet_hours_start": None, "quiet_hours_end": None,
-            })
+            return Response({"notifications_enabled": True, "default_country_code": ""})
         return Response(CommunicationSetupSerializer(setup).data)
 
     def patch(self, request):
@@ -234,13 +232,14 @@ class NotificationTemplateDetailView(APIView):
 class NotificationRuleSerializer(serializers.ModelSerializer):
     class Meta:
         model = NotificationRule
-        fields = ["id", "event_code", "recipient_type", "channel", "template", "enabled"]
+        fields = ["id", "event_code", "recipient_type", "recipient_policy", "channel", "template", "enabled"]
         read_only_fields = ["id"]
 
 
 class NotificationRuleCreateSerializer(serializers.Serializer):
     event_code = serializers.CharField(max_length=80)
     recipient_type = serializers.ChoiceField(choices=NotificationRecipientType.choices)
+    recipient_policy = serializers.ChoiceField(choices=GuardianRecipientPolicy.choices, required=False, allow_null=True, default=None)
     channel = serializers.ChoiceField(choices=NotificationChannel.choices)
     template = serializers.UUIDField()
     enabled = serializers.BooleanField(required=False, default=True)
@@ -249,6 +248,7 @@ class NotificationRuleCreateSerializer(serializers.Serializer):
 class NotificationRuleUpdateSerializer(serializers.Serializer):
     template = serializers.UUIDField(required=False)
     enabled = serializers.BooleanField(required=False)
+    recipient_policy = serializers.ChoiceField(choices=GuardianRecipientPolicy.choices, required=False)
 
 
 class NotificationRuleListCreateView(ListCreateAPIView):
@@ -295,7 +295,10 @@ class NotificationRuleDetailView(APIView):
 class NotificationOutboxSerializer(serializers.ModelSerializer):
     class Meta:
         model = NotificationOutbox
-        fields = ["id", "channel", "recipient", "message_type", "status", "attempts", "last_error", "created_at", "processed_at"]
+        fields = [
+            "id", "channel", "recipient", "recipient_user", "message_type", "status", "attempts", "last_error",
+            "created_at", "processed_at",
+        ]
         read_only_fields = fields
 
 

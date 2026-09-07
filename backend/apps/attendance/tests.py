@@ -7,8 +7,8 @@ from django.test import TestCase
 from apps.academics.models import AcademicLevel, AcademicYear, ClassGroup, EnrollmentStatus, StudentEnrollment, Subject, TeacherAssignment
 from apps.activity.models import ActivityEvent
 from apps.guardians.models import Guardian, StudentGuardian
-from apps.notifications.models import NotificationChannel, NotificationOutbox, NotificationRecipientType
-from apps.notifications.services import create_notification_rule, create_notification_template, set_channel_enabled
+from apps.notifications.models import NotificationChannel, NotificationEvent, NotificationOutbox, NotificationRecipientType
+from apps.notifications.services import create_notification_rule, create_notification_template, expand_notification_event, set_channel_enabled
 from apps.students.models import Student
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
@@ -217,11 +217,15 @@ class RecordAttendanceBulkTests(AttendanceFoundationTests):
 
         record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
                                entries=[{"student": self.student, "status": AttendanceStatus.ABSENT}])
+        for event in NotificationEvent.objects.filter(tenant=self.school_a):
+            expand_notification_event(event=event)
         self.assertEqual(NotificationOutbox.objects.filter(tenant=self.school_a).count(), 1)
 
         # Remarks-only correction while remaining ABSENT must not re-notify.
         record_attendance_bulk(user=self.teacher, tenant=self.school_a, session=session,
                                entries=[{"student": self.student, "status": AttendanceStatus.ABSENT, "remarks": "Called in sick"}])
+        for event in NotificationEvent.objects.filter(tenant=self.school_a):
+            expand_notification_event(event=event)
         self.assertEqual(NotificationOutbox.objects.filter(tenant=self.school_a).count(), 1)
 
     def test_student_not_on_the_roster_is_rejected(self):

@@ -81,6 +81,12 @@ class NotificationsApiTests(TestCase):
         self.assertEqual(list_response.status_code, 200)
         self.assertNotIn("encrypted_api_key", list_response.data[0])
 
+    def test_provider_configure_rejects_in_app(self):
+        response = self.client.post(
+            "/api/v1/notifications/providers/", {"channel": "IN_APP", "provider": "STUB"}, format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+
     def create_template(self, **overrides):
         payload = {"code": "PAYMENT_SMS", "name": "Payment SMS", "channel": "SMS", "body": "Hi {{ guardian_name }}"}
         payload.update(overrides)
@@ -110,6 +116,7 @@ class NotificationsApiTests(TestCase):
         )
         self.assertEqual(create_response.status_code, 201)
         rule_id = create_response.data["id"]
+        self.assertEqual(create_response.data["recipient_policy"], "PRIMARY_AND_EMERGENCY")  # default for GUARDIAN
 
         patch_response = self.client.patch(
             f"/api/v1/notifications/rules/{rule_id}/", {"enabled": False}, format="json", **self.headers(),
@@ -153,7 +160,13 @@ class NotificationsApiTests(TestCase):
     def test_inbox_list_and_mark_read(self):
         from .models import UserNotification
 
-        notification = UserNotification.objects.create(tenant=self.tenant, user=self.admin, title="Hi", message="Body")
+        source_outbox = enqueue_notification(
+            tenant=self.tenant, channel=NotificationChannel.IN_APP, recipient_user_id=self.admin.id,
+            message_type="x", idempotency_key="inbox:1", context={"subject": "Hi", "body": "Body"},
+        )
+        notification = UserNotification.objects.create(
+            tenant=self.tenant, user=self.admin, source_notification=source_outbox, title="Hi", message="Body",
+        )
 
         list_response = self.client.get("/api/v1/notifications/inbox/", **self.headers())
         self.assertEqual(list_response.status_code, 200)
@@ -166,7 +179,13 @@ class NotificationsApiTests(TestCase):
     def test_inbox_only_shows_the_authenticated_users_own_notifications(self):
         from .models import UserNotification
 
-        UserNotification.objects.create(tenant=self.tenant, user=self.viewer, title="Not mine", message="Body")
+        source_outbox = enqueue_notification(
+            tenant=self.tenant, channel=NotificationChannel.IN_APP, recipient_user_id=self.viewer.id,
+            message_type="x", idempotency_key="inbox:2", context={"subject": "Hi", "body": "Body"},
+        )
+        UserNotification.objects.create(
+            tenant=self.tenant, user=self.viewer, source_notification=source_outbox, title="Not mine", message="Body",
+        )
         response = self.client.get("/api/v1/notifications/inbox/", **self.headers())
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["count"], 0)

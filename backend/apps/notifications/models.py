@@ -1,6 +1,7 @@
 import uuid
 
 from django.db import models
+from django.db.models import Q
 
 from apps.activity.durable_work import DurableWorkModel
 from apps.finance.fields import EncryptedCharField
@@ -15,14 +16,11 @@ class NotificationChannel(models.TextChoices):
 
 class CommunicationSetup(TenantOwnedModel):
     """One per tenant. Absence of a row (unconfigured tenant) is treated as
-    notifications_enabled=True with no quiet hours -- see publish_notification_event.
+    notifications_enabled=True -- see publish_notification_event.
     """
 
     notifications_enabled = models.BooleanField(default=True)
     default_country_code = models.CharField(max_length=5, blank=True)
-    quiet_hours_enabled = models.BooleanField(default=False)
-    quiet_hours_start = models.TimeField(null=True, blank=True)
-    quiet_hours_end = models.TimeField(null=True, blank=True)
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=["tenant"], name="unique_communication_setup_per_tenant")]
@@ -30,8 +28,8 @@ class CommunicationSetup(TenantOwnedModel):
 
 class CommunicationChannel(TenantOwnedModel):
     """Per-tenant on/off switch for a channel. Off by default -- a tenant
-    must explicitly opt in before publish_notification_event enqueues
-    anything on that channel, even if a NotificationRule exists for it.
+    must explicitly opt in before an event's expansion enqueues anything on
+    that channel, even if a NotificationRule exists for it.
     """
 
     channel = models.CharField(max_length=10, choices=NotificationChannel.choices)
@@ -46,7 +44,8 @@ class NotificationProviderConfig(TenantOwnedModel):
     shape is generic (api key/secret) -- sufficient for the stub gateway and
     a first real provider; a provider needing a different credential shape
     is a future extension, mirroring how TenantMpesaConfiguration's fields
-    are specific to that one gateway.
+    are specific to that one gateway. Never configurable for IN_APP -- there
+    is no external provider to configure (enforced in services.configure_provider).
     """
 
     channel = models.CharField(max_length=10, choices=NotificationChannel.choices)
@@ -81,10 +80,19 @@ class NotificationRecipientType(models.TextChoices):
     EMPLOYEE = "EMPLOYEE", "Employee"
 
 
+class GuardianRecipientPolicy(models.TextChoices):
+    PRIMARY = "PRIMARY", "Primary only"
+    PRIMARY_AND_EMERGENCY = "PRIMARY_AND_EMERGENCY", "Primary and emergency contacts"
+
+
 class NotificationRule(TenantOwnedModel):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     event_code = models.CharField(max_length=80)
     recipient_type = models.CharField(max_length=20, choices=NotificationRecipientType.choices)
+    # Meaningful only when recipient_type=GUARDIAN -- which guardians of a
+    # student get notified is a "can schools differ?" policy choice, not a
+    # hardcoded Python default. Blank for EMPLOYEE (no policy applies).
+    recipient_policy = models.CharField(max_length=30, blank=True, choices=GuardianRecipientPolicy.choices)
     channel = models.CharField(max_length=10, choices=NotificationChannel.choices)
     template = models.ForeignKey(NotificationTemplate, on_delete=models.PROTECT, related_name="rules")
     enabled = models.BooleanField(default=True)
@@ -98,18 +106,45 @@ class NotificationRule(TenantOwnedModel):
         ]
 
 
+class NotificationEvent(TenantOwnedModel, DurableWorkModel):
+    """What publish_notification_event writes -- a durable, idempotent FACT
+    that a business event happened, committed atomically with the triggering
+    write. All rule lookup, recipient resolution, and template rendering
+    (and therefore all risk from tenant notification misconfiguration) is
+    deferred to async expansion (tasks.expand_pending_notification_events),
+    so a bad template can never roll back a payment, leave approval, or
+    attendance record. recipient_refs stores serialized references
+    ({"student": "<uuid str>"}), never live model instances -- expansion
+    re-resolves them via catalogue.EVENT_CATALOGUE's ref-to-model mapping.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    event_code = models.CharField(max_length=80)
+    dedupe_key = models.CharField(max_length=160)
+    context = models.JSONField(default=dict)
+    recipient_refs = models.JSONField(default=dict)
+    actor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["tenant", "dedupe_key"], name="unique_notification_event_dedupe_per_tenant"),
+        ]
+        indexes = [models.Index(fields=["tenant", "status", "available_at"])]
+
+
 class NotificationOutbox(TenantOwnedModel, DurableWorkModel):
-    """A durable, Celery-consumed queue of outbound notifications. Enqueued
-    from within the same transaction as the triggering business event (see
-    services.enqueue_notification/publish_notification_event) so it can
-    never diverge from the state that caused it. For IN_APP rows, `recipient`
-    holds str(user.id) rather than a phone/email -- InAppGateway resolves it
-    back to a User when the row is claimed.
+    """A durable, Celery-consumed queue of outbound notifications, created
+    by expand_pending_notification_events from a NotificationEvent. For
+    IN_APP rows, `recipient_user` identifies the target User; `recipient`
+    (a plain string) is used for SMS/EMAIL only -- never both, enforced by
+    a CheckConstraint below.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     channel = models.CharField(max_length=10, choices=NotificationChannel.choices)
-    recipient = models.CharField(max_length=120)
+    recipient = models.CharField(max_length=120, blank=True)
+    recipient_user = models.ForeignKey(User, on_delete=models.PROTECT, null=True, blank=True, related_name="+")
     message_type = models.CharField(max_length=60)  # a template/category key, e.g. "invoice_issued"
     context = models.JSONField(default=dict)  # keep to template parameters only, not arbitrary payloads
     idempotency_key = models.CharField(max_length=120)
@@ -118,6 +153,13 @@ class NotificationOutbox(TenantOwnedModel, DurableWorkModel):
     class Meta:
         constraints = [
             models.UniqueConstraint(fields=["tenant", "idempotency_key"], name="unique_notification_idempotency_per_tenant"),
+            models.CheckConstraint(
+                condition=(
+                    Q(channel="IN_APP", recipient="", recipient_user__isnull=False)
+                    | (~Q(channel="IN_APP") & Q(recipient_user__isnull=True))
+                ),
+                name="in_app_uses_recipient_user_others_use_recipient",
+            ),
         ]
         indexes = [models.Index(fields=["tenant", "status", "available_at"])]
 
@@ -150,15 +192,24 @@ class NotificationDeliveryAttempt(TenantOwnedModel):
     error_code = models.CharField(max_length=60, blank=True)
     error_message = models.TextField(blank=True)
 
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["notification", "attempt_number"], name="unique_delivery_attempt_number"),
+        ]
+
 
 class UserNotification(TenantOwnedModel):
     """The IN_APP channel's delivery target -- created by InAppGateway when
     an IN_APP NotificationOutbox row is claimed, not written directly by
-    business domains.
+    business domains. source_notification is a one-to-one provenance link:
+    InAppGateway uses get_or_create() against it, so a worker that creates
+    this row and then crashes before the outbox is marked processed retries
+    into a no-op rather than a duplicate in-app notification.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
+    source_notification = models.OneToOneField(NotificationOutbox, on_delete=models.PROTECT, related_name="user_notification")
     title = models.CharField(max_length=150)
     message = models.TextField()
     resource_type = models.CharField(max_length=80, blank=True)

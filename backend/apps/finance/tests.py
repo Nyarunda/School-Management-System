@@ -7,8 +7,8 @@ from django.test import TestCase
 
 from apps.academics.models import AcademicLevel, AcademicYear
 from apps.guardians.models import Guardian, StudentGuardian
-from apps.notifications.models import NotificationChannel, NotificationOutbox, NotificationRecipientType
-from apps.notifications.services import create_notification_rule, create_notification_template, set_channel_enabled
+from apps.notifications.models import NotificationChannel, NotificationEvent, NotificationOutbox, NotificationRecipientType
+from apps.notifications.services import create_notification_rule, create_notification_template, expand_notification_event, set_channel_enabled
 from apps.tenancy.models import Membership, Role, Tenant, User
 
 from .models import (
@@ -325,6 +325,8 @@ class PaymentTests(TestCase):
 
         payment = self._record_payment()
 
+        event = NotificationEvent.objects.get(tenant=self.school_a)
+        expand_notification_event(event=event)
         outbox = NotificationOutbox.objects.get(tenant=self.school_a)
         self.assertEqual(outbox.recipient, "0700000001")
         self.assertIn(payment.receipt.receipt_number, outbox.context["body"])

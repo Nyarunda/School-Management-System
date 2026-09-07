@@ -4,8 +4,8 @@ from django.core.exceptions import ValidationError
 from django.test import TestCase
 
 from apps.activity.models import ActivityEvent
-from apps.notifications.models import NotificationChannel, NotificationOutbox, NotificationRecipientType
-from apps.notifications.services import create_notification_rule, create_notification_template, set_channel_enabled
+from apps.notifications.models import NotificationChannel, NotificationEvent, NotificationOutbox, NotificationRecipientType
+from apps.notifications.services import create_notification_rule, create_notification_template, expand_notification_event, set_channel_enabled
 from apps.staff.services import create_employee
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
@@ -294,6 +294,8 @@ class DecisionFlowTests(LeaveFoundationTests):
 
         decide_leave_request_stage(user=self.supervisor, tenant=self.school_a, leave_request=request, decision=LeaveRequestApprovalStatus.APPROVED)
 
+        event = NotificationEvent.objects.get(tenant=self.school_a)
+        expand_notification_event(event=event)
         outbox = NotificationOutbox.objects.get(tenant=self.school_a)
         self.assertEqual(outbox.recipient, "0711111111")
         self.assertIn("Jane Doe", outbox.context["body"])

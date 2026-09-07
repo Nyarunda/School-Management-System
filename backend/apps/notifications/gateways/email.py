@@ -11,6 +11,8 @@ class StubEmailGateway(NotificationGateway):
     without a real email provider (its own future milestone).
     """
 
-    def send(self, *, tenant, recipient, subject, body, sender_id, context):
-        logger.info("EMAIL (stub): to %s -- subject=%r -- %s", recipient, subject, body)
+    def send(self, *, outbox):
+        logger.info(
+            "EMAIL (stub): to %s -- subject=%r -- %s", outbox.recipient, outbox.context.get("subject", ""), outbox.context.get("body", ""),
+        )
         return f"stub-email-{uuid.uuid4()}"

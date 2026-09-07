@@ -1,31 +1,25 @@
-from django.core.exceptions import ValidationError
-
-from apps.tenancy.models import User
-
 from ..models import UserNotification
 from .base import NotificationGateway
 
 
 class InAppGateway(NotificationGateway):
-    """Instead of an external call, writes a UserNotification row for the
-    User identified by `recipient` (str(user.id), set by
-    catalogue._resolve_employee_recipients for IN_APP rows). A missing/
-    unparsable recipient is a genuine data problem, not a transient
-    failure -- it still goes through the outbox's normal retry/backoff
-    path and eventually dead-letters, same as any other gateway failure.
+    """Instead of an external call, writes a UserNotification row for
+    outbox.recipient_user. Idempotent via source_notification's OneToOne:
+    a worker that creates the row and then crashes before the outbox is
+    marked processed retries into a no-op (get_or_create returns the
+    existing row) rather than a duplicate in-app notification.
     """
 
-    def send(self, *, tenant, recipient, subject, body, sender_id, context):
-        try:
-            user = User.objects.get(pk=recipient)
-        except (User.DoesNotExist, ValueError, ValidationError) as error:
-            raise ValidationError(f"No user found for in-app recipient {recipient!r}") from error
-        UserNotification.objects.create(
-            tenant=tenant,
-            user=user,
-            title=subject or context.get("title", ""),
-            message=body,
-            resource_type=context.get("resource_type", ""),
-            resource_id=str(context.get("resource_id", "")),
+    def send(self, *, outbox):
+        notification, _ = UserNotification.objects.get_or_create(
+            tenant=outbox.tenant,
+            source_notification=outbox,
+            defaults={
+                "user": outbox.recipient_user,
+                "title": outbox.context.get("subject", ""),
+                "message": outbox.context.get("body", ""),
+                "resource_type": outbox.context.get("resource_type", ""),
+                "resource_id": str(outbox.context.get("resource_id", "")),
+            },
         )
-        return f"in-app-{user.id}"
+        return f"in-app-{notification.id}"
