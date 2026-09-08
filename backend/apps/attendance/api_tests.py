@@ -135,6 +135,28 @@ class AttendanceApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["count"], 3)
 
+    def test_session_list_query_shape_is_bounded(self):
+        base_date = date.fromisoformat(self.session_date)
+        for offset in (0, 1, 2):
+            self.client.post(
+                "/api/v1/attendance/sessions/open/",
+                {
+                    "class_group": str(self.class_group.id),
+                    "session_date": (base_date + timedelta(days=offset)).isoformat(),
+                    "force": True,
+                },
+                format="json", **self.headers(),
+            )
+
+        # Milestone 22.3 permanent query-count regression coverage -- a
+        # curated set of the highest-value list endpoints, not an exhaustive
+        # per-app audit.
+        with self.assertNumQueries(5):
+            response = self.client.get(f"/api/v1/attendance/sessions/?class_group={self.class_group.id}", **self.headers())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 3)
+
     def test_student_summary_is_bounded_and_includes_status_counts(self):
         open_response = self.client.post(
             "/api/v1/attendance/sessions/open/",

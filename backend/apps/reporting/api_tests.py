@@ -56,6 +56,17 @@ class ReportingApiTests(TemporaryDocumentStorageMixin, TestCase):
         self.assertEqual(len(response.data["rows"]), 1)
         self.assertFalse(response.data["has_more"])
 
+    def test_preview_query_shape_is_bounded(self):
+        for index in range(2, 5):
+            Student.objects.create(tenant=self.tenant, admission_number=f"ADM-00{index}", first_name="Student", last_name=str(index))
+
+        # Milestone 22.3 permanent query-count regression coverage.
+        with self.assertNumQueries(6):
+            response = self.client.get("/api/v1/reports/students.enrollment_register/preview/", **self.headers())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.data["rows"]), 4)
+
     def test_disabling_the_underlying_module_blocks_preview_even_with_permission(self):
         from apps.platform.services import set_module_override
 

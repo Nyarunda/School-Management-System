@@ -1,7 +1,10 @@
 from django.urls import include, path
 
+from .health import liveness, readiness
 
 urlpatterns = [
+	path("healthz/", liveness, name="liveness"),
+	path("readyz/", readiness, name="readiness"),
 	path("api/v1/session/", include("apps.tenancy.urls")),
 	path("api/v1/students/", include("apps.students.urls")),
 ]

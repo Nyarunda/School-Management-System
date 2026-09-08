@@ -122,6 +122,24 @@ class StudentDocumentApiTests(TemporaryDocumentStorageMixin, TestCase):
         list_after_delete = self.client.get(f"/api/v1/students/{self.student.id}/documents/", **self.headers())
         self.assertEqual(list_after_delete.data["count"], 0)
 
+    def test_document_list_query_shape_is_bounded(self):
+        for index in range(3):
+            self.client.post(
+                f"/api/v1/students/{self.student.id}/documents/",
+                {"document_type": "Birth certificate", "file": make_upload(name=f"doc-{index}.pdf")},
+                format="multipart", **self.headers(),
+            )
+
+        # Milestone 22.3: select_related("document") on the queryset keeps
+        # this bounded regardless of document count -- without it, this
+        # would grow by one query per document (StudentDocumentSerializer
+        # reads 4 fields off the related Document row per item).
+        with self.assertNumQueries(6):
+            response = self.client.get(f"/api/v1/students/{self.student.id}/documents/", **self.headers())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 3)
+
     def test_viewer_only_role_cannot_upload(self):
         viewer = User.objects.create_user(username="viewer", password="secret")
         Membership.objects.create(

@@ -91,3 +91,11 @@ class ProductionSettingsTests(SimpleTestCase):
         result = self.load_settings({}, expr="'CACHES' in dir(s)")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "False")
+
+    def test_postgres_backend_reuses_connections_with_health_checks(self):
+        result = self.load_settings(
+            {"DB_ENGINE": "postgres"},
+            expr="(s.DATABASES['default']['CONN_MAX_AGE'], s.DATABASES['default']['CONN_HEALTH_CHECKS'])",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "(60, True)")

@@ -36,6 +36,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "config.middleware.RequestIdMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -60,6 +61,34 @@ TEMPLATES = [
 ]
 WSGI_APPLICATION = "config.wsgi.application"
 
+# JSON in production (machine-parseable for log aggregation), a plain
+# human-readable line otherwise -- both carry the request_id filter so every
+# record (including config.cache's existing Redis-outage logs) is
+# request-correlated. django.request is routed here at ERROR so a genuinely
+# unhandled exception -- silent beyond Django's bare default until now -- is
+# actually visible.
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "filters": {"request_id": {"()": "config.logging_utils.RequestIdFilter"}},
+    "formatters": {
+        "json": {"()": "config.logging_utils.JsonFormatter"},
+        "console": {"format": "%(asctime)s %(levelname)s %(name)s [%(request_id)s] %(message)s"},
+    },
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+            "filters": ["request_id"],
+            "formatter": "json" if PRODUCTION else "console",
+        },
+    },
+    "root": {"handlers": ["console"], "level": os.getenv("DJANGO_LOG_LEVEL", "INFO")},
+    "loggers": {
+        "django": {"handlers": ["console"], "level": "INFO", "propagate": False},
+        "django.request": {"handlers": ["console"], "level": "ERROR", "propagate": False},
+    },
+}
+
 if os.getenv("DB_ENGINE", "sqlite").lower() == "postgres":
     DATABASES = {
         "default": {
@@ -69,6 +98,16 @@ if os.getenv("DB_ENGINE", "sqlite").lower() == "postgres":
             "PASSWORD": os.getenv("POSTGRES_PASSWORD", "school_management_dev"),
             "HOST": os.getenv("POSTGRES_HOST", "postgres"),
             "PORT": os.getenv("POSTGRES_PORT", "5432"),
+            # Reuses a connection across requests instead of opening/closing
+            # one per request. This trades per-request overhead for a
+            # standing connection-count budget: (replica count *
+            # GUNICORN_WORKERS * GUNICORN_THREADS) + Celery workers + Beat +
+            # admin/migration headroom must stay under Postgres's
+            # max_connections. Not a concern at today's scale; if it ever
+            # becomes one, the standard next step is a connection pooler
+            # (e.g. PgBouncer) in front of Postgres, not a setting here.
+            "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "60")),
+            "CONN_HEALTH_CHECKS": True,
         }
     }
 else:
@@ -137,6 +176,27 @@ CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
 CELERY_TASK_IGNORE_RESULT = True  # nothing calls .get()/AsyncResult on any task; no result backend needed
 CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "true").lower() == "true"
 CELERY_TASK_EAGER_PROPAGATES = True
+# acks_late means a task is only ack'd (removed from the queue) AFTER it
+# finishes -- if a worker is killed mid-task, the message is redelivered to
+# another worker rather than silently lost. Safe today because every
+# existing task is either durable_work-lease-protected (reporting,
+# notifications) or independently idempotent under at-least-once redelivery
+# (documents, finance -- see their tasks.py docstrings). STANDING RULE: every
+# Celery task added in the future must be idempotent under at-least-once
+# delivery, or must explicitly opt out of this default -- do not assume
+# exactly-once execution.
+CELERY_TASK_ACKS_LATE = True
+CELERY_TASK_REJECT_ON_WORKER_LOST = True
+# Soft limit fires SoftTimeLimitExceeded inside the task ~30s before the hard
+# kill -- a DB transaction rolls back cleanly if that exception propagates
+# uncaught, but a non-transactional side effect (an HTTP call already sent, a
+# file already written) is NOT undone. A task that times out is left in
+# whatever state its own durable-work lease/idempotency guarantee provides --
+# the same failure shape as a hard-killed worker, not a new one.
+CELERY_TASK_TIME_LIMIT = int(os.getenv("CELERY_TASK_TIME_LIMIT", "300"))
+CELERY_TASK_SOFT_TIME_LIMIT = int(os.getenv("CELERY_TASK_SOFT_TIME_LIMIT", "270"))
+CELERY_WORKER_PREFETCH_MULTIPLIER = int(os.getenv("CELERY_WORKER_PREFETCH_MULTIPLIER", "1"))
+CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
 CELERY_BEAT_SCHEDULE = {
     "finance-resweep-unmatched-incoming-payments": {
         "task": "apps.finance.tasks.resweep_unmatched_incoming_payments",

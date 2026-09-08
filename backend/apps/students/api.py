@@ -101,7 +101,7 @@ class StudentDocumentListCreateView(ListCreateAPIView):
 
     def get_queryset(self):
         _, student = self.get_student()
-        return StudentDocument.objects.filter(student=student).order_by("-document__created_at")
+        return StudentDocument.objects.filter(student=student).select_related("document").order_by("-document__created_at")
 
     def create(self, request, *args, **kwargs):
         tenant = resolve_request_tenant(request, "students.document.manage")

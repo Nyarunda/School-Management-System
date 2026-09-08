@@ -174,6 +174,47 @@ class FinanceApiTests(TestCase):
         self.assertEqual(summary_response.data["summary"]["total_invoiced"], Decimal("50000.00"))
         self.assertEqual(len(summary_response.data["recent_invoices"]), 1)
 
+    def test_invoice_list_query_shape_is_bounded(self):
+        from .models import FeeStructure, Invoice, InvoiceLine, StudentFeeAssignment
+
+        for index in range(3):
+            structure = FeeStructure.objects.create(
+                tenant=self.school_a, name=f"Structure {index}", academic_year=self.year, academic_level=self.level, is_approved=True,
+            )
+            assignment = StudentFeeAssignment.objects.create(tenant=self.school_a, student=self.student, fee_structure=structure)
+            invoice = Invoice.objects.create(
+                tenant=self.school_a, invoice_number=f"INV-2026-{index}", idempotency_key=f"idem-{index}",
+                student=self.student, assignment=assignment, subtotal=Decimal("50000.00"), total=Decimal("50000.00"),
+            )
+            InvoiceLine.objects.create(
+                tenant=self.school_a, invoice=invoice, fee_item=self.item, description="Tuition fee",
+                unit_amount=Decimal("50000.00"), net_amount=Decimal("50000.00"),
+            )
+
+        # Milestone 22.3 permanent query-count regression coverage.
+        with self.assertNumQueries(6):
+            response = self.client.get("/api/v1/finance/invoices/", **self.headers())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 3)
+
+    def test_payment_list_query_shape_is_bounded(self):
+        for index in range(3):
+            self.client.post(
+                "/api/v1/finance/payments/",
+                {
+                    "student": str(self.student.id), "amount": "1000.00", "payment_method": str(self.payment_method.id),
+                    "idempotency_key": f"payment-list-{index}",
+                },
+                format="json", **self.headers(),
+            )
+
+        with self.assertNumQueries(8):
+            response = self.client.get("/api/v1/finance/payments/", **self.headers())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 3)
+
     def _issued_invoice(self, structure_name="Grade 8 2026"):
         structure_response = self.client.post(
             "/api/v1/finance/fee-structures/",

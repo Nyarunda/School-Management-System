@@ -117,6 +117,31 @@ class DurableWorkLifecycleTests(TestCase):
         self.assertEqual(statuses.count(DurableWorkStatus.PENDING), 2)
         self.assertEqual(statuses.count(DurableWorkStatus.PROCESSING), 1)
 
+    def test_a_task_interrupted_mid_processing_is_reclaimed_and_re_claimable(self):
+        """Milestone 22.3: backs the CELERY_TASK_SOFT_TIME_LIMIT documentation
+        in config/settings.py -- a task killed mid-processing (a timeout, a
+        worker crash) never calls mark_processed/mark_failed, exactly like
+        this test's interrupted claim. Proves the existing lease mechanism
+        alone is what makes that safe: the row isn't just flipped back to
+        PENDING, it's fully re-claimable by the next run.
+        """
+        row = make_outbox(self.tenant)
+        queryset = NotificationOutbox.objects.filter(tenant=self.tenant)
+
+        claimed = claim_due(queryset, lease_seconds=1)
+        self.assertEqual([claimed_row.pk for claimed_row in claimed], [row.pk])
+        # Simulate the interruption: no mark_processed()/mark_failed() call.
+        # Force the lease into the past instead of sleeping past it.
+        NotificationOutbox.objects.filter(pk=row.pk).update(lease_expires_at=timezone.now() - timedelta(seconds=1))
+
+        reclaimed = reap_stale(queryset)
+        self.assertEqual(reclaimed, 1)
+        row.refresh_from_db()
+        self.assertEqual(row.status, DurableWorkStatus.PENDING)
+
+        re_claimed = claim_due(queryset)
+        self.assertEqual([re_claimed_row.pk for re_claimed_row in re_claimed], [row.pk])
+
     def test_claim_due_returns_rows_with_attempts_already_incremented(self):
         row = make_outbox(self.tenant)
 
