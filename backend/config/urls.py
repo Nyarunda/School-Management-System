@@ -6,6 +6,8 @@ urlpatterns = [
 	path("healthz/", liveness, name="liveness"),
 	path("readyz/", readiness, name="readiness"),
 	path("api/v1/session/", include("apps.tenancy.urls")),
+	path("api/v1/tenancy/", include("apps.tenancy.admin_urls")),
+	path("api/v1/auth/", include("apps.tenancy.auth_urls")),
 	path("api/v1/students/", include("apps.students.urls")),
 ]
 urlpatterns += [path("api/v1/finance/", include("apps.finance.urls"))]

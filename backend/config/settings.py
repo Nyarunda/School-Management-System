@@ -16,6 +16,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    "rest_framework.authtoken",
     "apps.tenancy",
     "apps.admissions",
     "apps.students",
@@ -113,11 +114,11 @@ if os.getenv("DB_ENGINE", "sqlite").lower() == "postgres":
 else:
     DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
 
-# Currently inert: no endpoint anywhere calls Django's validate_password().
-# Set proactively so it's already correct the moment a
-# password-set/change/reset API is added -- but that future serializer/
-# service must actually call validate_password() itself; this setting alone
-# doesn't intercept every User.set_password()/create_user() call path.
+# apps.tenancy.services.accept_invite (Milestone 22.4) is the first real
+# caller of validate_password() -- this setting alone still doesn't
+# intercept every User.set_password()/create_user() call path (e.g.
+# apps.tenancy.services.invite_user's set_unusable_password() is
+# deliberately unvalidated, since it never sets a usable password).
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
@@ -134,6 +135,13 @@ AUTH_USER_MODEL = "tenancy.User"
 
 REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "config.exceptions.exception_handler",
+    # TokenAuthentication is what apps.tenancy.auth_api.LoginView/InviteAcceptView
+    # actually issue (Milestone 22.4) -- SessionAuthentication stays too since
+    # it's DRF's own default and nothing here depends on removing it.
+    "DEFAULT_AUTHENTICATION_CLASSES": [
+        "rest_framework.authentication.TokenAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
+    ],
     # Per-user/per-IP abuse protection -- NOT tenant-level noisy-neighbor
     # protection (a tenant with 300 active users gets ~300x the throughput
     # of a tenant with one; that's a real gap this milestone deliberately

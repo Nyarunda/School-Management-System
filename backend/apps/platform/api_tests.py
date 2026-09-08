@@ -23,8 +23,13 @@ class PlatformApiTests(TestCase):
         self.assertEqual(response.status_code, 403)
 
     def test_unauthenticated_request_is_rejected(self):
+        # 401, not 403: once TokenAuthentication is registered (Milestone
+        # 22.4), DRF's permission_denied() sees an authenticator with a real
+        # authenticate_header() and raises NotAuthenticated for missing
+        # credentials, reserving 403 for an authenticated-but-forbidden actor
+        # (see test_ordinary_tenant_member_cannot_reach_platform_endpoints).
         response = self.client.get("/api/v1/platform/modules/")
-        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.status_code, 401)
 
     def test_module_catalogue_is_listed(self):
         self.client.force_authenticate(self.superuser)

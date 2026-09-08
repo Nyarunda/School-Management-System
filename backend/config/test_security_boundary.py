@@ -14,6 +14,8 @@ EXPECTED_PUBLIC_VIEWS = {
     "MpesaC2BValidationView",
     "MpesaC2BConfirmationView",
     "MpesaStkCallbackView",
+    "LoginView",
+    "InviteAcceptView",
 }
 
 
