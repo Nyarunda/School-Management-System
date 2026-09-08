@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.documents.services import open_document_stream
+from apps.platform.services import require_module_enabled
 from apps.tenancy.models import Campus, User
 from apps.tenancy.services import require_permission
 
@@ -38,7 +39,9 @@ def resolve_staff_tenant(request, permission):
     if not slug:
         raise NotFound("Tenant context is required")
     try:
-        return require_permission(user=request.user, tenant_slug=slug, permission=permission).tenant
+        membership = require_permission(user=request.user, tenant_slug=slug, permission=permission)
+        require_module_enabled(tenant=membership.tenant, module_code="staff_hr")
+        return membership.tenant
     except DjangoValidationError as error:
         raise PermissionDenied(error.messages) from error
 

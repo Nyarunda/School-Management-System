@@ -31,6 +31,13 @@ class StaffApiTests(TemporaryDocumentStorageMixin, TestCase):
     def headers(self):
         return {"HTTP_X_TENANT_SLUG": "school-a"}
 
+    def test_disabling_the_staff_hr_module_blocks_access_even_with_permission(self):
+        from apps.platform.services import set_module_override
+
+        set_module_override(tenant=self.school_a, module_code="staff_hr", is_enabled=False)
+        response = self.client.get("/api/v1/staff/employees/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
     def create_employee(self, **overrides):
         payload = {
             "employee_number": "EMP-001", "first_name": "Jane", "last_name": "Doe", "job_title": "Teacher",

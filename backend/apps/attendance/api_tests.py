@@ -51,6 +51,13 @@ class AttendanceApiTests(TestCase):
     def headers(self):
         return {"HTTP_X_TENANT_SLUG": "school-a"}
 
+    def test_disabling_the_attendance_module_blocks_access_even_with_permission(self):
+        from apps.platform.services import set_module_override
+
+        set_module_override(tenant=self.school_a, module_code="attendance", is_enabled=False)
+        response = self.client.get("/api/v1/attendance/sessions/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
     def test_missing_tenant_header_is_rejected(self):
         response = self.client.post("/api/v1/attendance/sessions/open/", {"class_group": str(self.class_group.id), "session_date": self.session_date}, format="json")
         self.assertEqual(response.status_code, 404)

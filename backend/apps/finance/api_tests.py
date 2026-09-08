@@ -94,6 +94,14 @@ class FinanceApiTests(TestCase):
     def headers(self):
         return {"HTTP_X_TENANT_SLUG": "school-a"}
 
+    def test_disabling_the_finance_module_blocks_access_even_with_permission(self):
+        from apps.platform.services import set_module_override
+
+        self.client.force_authenticate(self.user)
+        set_module_override(tenant=self.school_a, module_code="finance", is_enabled=False)
+        response = self.client.get("/api/v1/finance/setup/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
     def test_finance_flow_uses_business_actions_and_student_summary(self):
         setup_response = self.client.get("/api/v1/finance/setup/", **self.headers())
         self.assertEqual(setup_response.status_code, 200)

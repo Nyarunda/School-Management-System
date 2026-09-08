@@ -44,6 +44,13 @@ class TimetableApiTests(TestCase):
     def headers(self):
         return {"HTTP_X_TENANT_SLUG": "school-a"}
 
+    def test_disabling_the_academics_module_blocks_access_even_with_permission(self):
+        from apps.platform.services import set_module_override
+
+        set_module_override(tenant=self.school_a, module_code="academics", is_enabled=False)
+        response = self.client.get("/api/v1/timetable/entries/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
     def create_entry(self, **overrides):
         payload = {
             "term": str(self.term.id), "class_group": str(self.class_group.id), "subject": str(self.subject.id),

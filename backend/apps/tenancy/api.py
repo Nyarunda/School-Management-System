@@ -4,6 +4,8 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.platform.services import get_enabled_modules
+
 from .models import Membership
 from .services import require_membership
 
@@ -36,6 +38,7 @@ class SessionView(APIView):
                 "id": str(active.tenant.id),
                 "name": active.tenant.name,
                 "slug": active.tenant.slug,
+                "enabled_modules": sorted(get_enabled_modules(active.tenant)),
             } if active else None,
             "memberships": [{
                 "tenant": {"id": str(item.tenant.id), "name": item.tenant.name, "slug": item.tenant.slug},

@@ -14,6 +14,7 @@ from rest_framework.views import APIView
 
 from apps.academics.models import AcademicLevel, AcademicYear
 from apps.students.models import Student
+from apps.platform.services import require_module_enabled
 from apps.tenancy.services import require_permission
 
 from .models import (
@@ -69,7 +70,9 @@ def resolve_finance_tenant(request, permission):
     if not slug:
         raise NotFound("Tenant context is required")
     try:
-        return require_permission(user=request.user, tenant_slug=slug, permission=permission).tenant
+        membership = require_permission(user=request.user, tenant_slug=slug, permission=permission)
+        require_module_enabled(tenant=membership.tenant, module_code="finance")
+        return membership.tenant
     except ValidationError as error:
         raise PermissionDenied(error.messages) from error
 

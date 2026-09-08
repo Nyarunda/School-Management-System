@@ -108,3 +108,7 @@ class EnrollmentRegisterRowsTests(TestCase):
     def test_filters_by_status(self):
         rows = enrollment_register_rows(tenant=self.school_a, status=StudentStatus.GRADUATED)
         self.assertEqual([row["admission_number"] for row in rows], ["ADM-002"])
+
+    def test_limit_bounds_the_returned_rows(self):
+        rows = enrollment_register_rows(tenant=self.school_a, limit=1)
+        self.assertEqual(len(rows), 1)

@@ -7,7 +7,9 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.activity.durable_work import DurableWorkStatus
 from apps.documents.services import open_document_stream
+from apps.platform.services import require_module_enabled
 from apps.tenancy.services import require_membership, require_permission
 
 from .catalogue import REPORT_CATALOGUE, get_report_definition
@@ -35,6 +37,7 @@ def resolve_reports_tenant(request, *, definition, capability):
     tenant = resolve_reports_membership(request).tenant
     try:
         require_permission(user=request.user, tenant=tenant, permission=f"reports.{definition.permission_group}.{capability}")
+        require_module_enabled(tenant=tenant, module_code=definition.module_code)
     except DjangoValidationError as error:
         raise PermissionDenied(error.messages) from error
     return tenant
@@ -116,8 +119,13 @@ class ReportExportRequestView(APIView):
         except DjangoValidationError as error:
             return api_validation_error(error)
         tenant = resolve_reports_tenant(request, definition=definition, capability="export")
+        idempotency_key = request.data.get("idempotency_key")
+        params = {key: value for key, value in request.data.items() if key != "idempotency_key"}
         try:
-            job = request_report_export(user=request.user, tenant=tenant, report_code=report_code, params=request.data)
+            job = request_report_export(
+                user=request.user, tenant=tenant, report_code=report_code, params=params,
+                idempotency_key=idempotency_key,
+            )
         except DjangoValidationError as error:
             return api_validation_error(error)
         return Response(ReportExportJobSerializer(job).data, status=status.HTTP_202_ACCEPTED)
@@ -145,9 +153,14 @@ class ReportExportDownloadView(APIView):
         definition = get_report_definition(job.report_code)
         try:
             require_permission(user=request.user, tenant=tenant, permission=f"reports.{definition.permission_group}.export")
+            require_module_enabled(tenant=tenant, module_code=definition.module_code)
         except DjangoValidationError as error:
             raise PermissionDenied(error.messages) from error
         if job.document is None:
+            if job.status == DurableWorkStatus.FAILED:
+                raise NotFound(job.last_error or "This export failed and has no file to download")
+            if job.status == DurableWorkStatus.PROCESSED:
+                raise NotFound("This export has expired; request a new one")
             raise NotFound("This export is not ready yet")
         stream = open_document_stream(document=job.document)
         response = FileResponse(stream, content_type="text/csv")

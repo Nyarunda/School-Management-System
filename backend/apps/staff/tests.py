@@ -359,3 +359,9 @@ class EmployeeRegisterRowsTests(StaffFoundationTests):
         change_employment_status(user=self.admin, tenant=self.school_a, employee=employee, status=EmploymentStatus.SUSPENDED)
         rows = employee_register_rows(tenant=self.school_a, status=EmploymentStatus.SUSPENDED)
         self.assertEqual([row["employee_number"] for row in rows], ["EMP-001"])
+
+    def test_limit_bounds_the_returned_rows(self):
+        self.make_employee(campus=self.campus)
+        self.make_employee(employee_number="EMP-002", campus=self.other_campus)
+        rows = employee_register_rows(tenant=self.school_a, limit=1)
+        self.assertEqual(len(rows), 1)

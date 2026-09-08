@@ -1,7 +1,7 @@
 from .models import AssessmentResult
 
 
-def results_sheet_rows(*, tenant, class_group_id, term_id):
+def results_sheet_rows(*, tenant, class_group_id, term_id, limit=None):
     """One row per (student, subject, assessment) -- a flat listing rather
     than a pivoted per-subject grade summary, since a class+term can have
     several assessments per subject. Suitable for a spreadsheet pivot on
@@ -14,6 +14,8 @@ def results_sheet_rows(*, tenant, class_group_id, term_id):
         .select_related("student", "assessment", "assessment__subject")
         .order_by("student__admission_number", "assessment__subject__name", "assessment__name")
     )
+    if limit is not None:
+        results = results[:limit]
     return [
         {
             "admission_number": result.student.admission_number, "full_name": result.student.full_name,

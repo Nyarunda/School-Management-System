@@ -53,7 +53,15 @@ class ReportingApiTests(TemporaryDocumentStorageMixin, TestCase):
     def test_preview_returns_rows(self):
         response = self.client.get("/api/v1/reports/students.enrollment_register/preview/", **self.headers())
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.data["total_count"], 1)
+        self.assertEqual(len(response.data["rows"]), 1)
+        self.assertFalse(response.data["has_more"])
+
+    def test_disabling_the_underlying_module_blocks_preview_even_with_permission(self):
+        from apps.platform.services import set_module_override
+
+        set_module_override(tenant=self.tenant, module_code="student_records", is_enabled=False)
+        response = self.client.get("/api/v1/reports/students.enrollment_register/preview/", **self.headers())
+        self.assertEqual(response.status_code, 403)
 
     def test_preview_rejects_an_unknown_report_code(self):
         response = self.client.get("/api/v1/reports/not.a.real.report/preview/", **self.headers())
@@ -105,3 +113,33 @@ class ReportingApiTests(TemporaryDocumentStorageMixin, TestCase):
         job_id = create_response.data["id"]
         response = self.client.get(f"/api/v1/reports/exports/{job_id}/download/", **self.headers())
         self.assertEqual(response.status_code, 404)
+        self.assertIn("not ready yet", str(response.data["detail"]))
+
+    def test_download_of_an_expired_export_says_expired_not_not_ready(self):
+        create_response = self.client.post(
+            "/api/v1/reports/students.enrollment_register/export/", {}, format="json", **self.headers(),
+        )
+        job = ReportExportJob.objects.get(pk=create_response.data["id"])
+        generate_report_export(job=job)
+        job.mark_processed()
+        # Simulate the retention purge: the document is gone but the job
+        # stays PROCESSED with its row_count intact.
+        job.document = None
+        job.save(update_fields=["document"])
+
+        response = self.client.get(f"/api/v1/reports/exports/{job.id}/download/", **self.headers())
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("expired", str(response.data["detail"]))
+
+    def test_download_of_a_failed_export_surfaces_the_failure_reason(self):
+        create_response = self.client.post(
+            "/api/v1/reports/students.enrollment_register/export/", {}, format="json", **self.headers(),
+        )
+        job = ReportExportJob.objects.get(pk=create_response.data["id"])
+        job.status = "FAILED"
+        job.last_error = "boom"
+        job.save(update_fields=["status", "last_error"])
+
+        response = self.client.get(f"/api/v1/reports/exports/{job.id}/download/", **self.headers())
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("boom", str(response.data["detail"]))

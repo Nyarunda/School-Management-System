@@ -24,8 +24,18 @@ class ReportExportJob(TenantOwnedModel, DurableWorkModel):
     params = models.JSONField(default=dict)
     requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
     row_count = models.PositiveIntegerField(null=True, blank=True)
-    document = models.ForeignKey("documents.Document", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    # OneToOne, not ForeignKey: one export produces exactly one artifact --
+    # this encodes that invariant at the schema level rather than by convention.
+    document = models.OneToOneField("documents.Document", on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    idempotency_key = models.CharField(max_length=120, blank=True, default="")
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         indexes = [models.Index(fields=["tenant", "status", "available_at"])]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["tenant", "idempotency_key"],
+                condition=~models.Q(idempotency_key=""),
+                name="unique_report_export_idempotency_per_tenant",
+            )
+        ]

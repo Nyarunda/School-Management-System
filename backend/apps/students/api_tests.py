@@ -8,6 +8,13 @@ from .models import Student
 
 
 class StudentApiTests(TestCase):
+    def test_disabling_the_student_records_module_blocks_access_even_with_permission(self):
+        from apps.platform.services import set_module_override
+
+        set_module_override(tenant=self.school_a, module_code="student_records", is_enabled=False)
+        response = self.client.get("/api/v1/students/", HTTP_X_TENANT_SLUG="school-a")
+        self.assertEqual(response.status_code, 403)
+
     def test_superuser_requires_membership_but_can_bypass_role_permission(self):
         self.user.is_superuser = True
         self.user.save(update_fields=["is_superuser"])
@@ -63,7 +70,11 @@ class StudentApiTests(TestCase):
         self.assertEqual(response.data["results"][0]["admission_number"], "ADM-001")
 
     def test_student_list_query_shape_is_bounded(self):
-        with self.assertNumQueries(3):
+        # 3 for the request itself (membership, count, page) + 2 for
+        # Milestone 21's module-entitlement check (TenantSubscription,
+        # TenantModuleOverride) -- get_enabled_modules is not cached, by
+        # design for now (see apps.platform's Milestone 22 non-goals).
+        with self.assertNumQueries(5):
             response = self.client.get("/api/v1/students/", HTTP_X_TENANT_SLUG="school-a")
 
         self.assertEqual(response.status_code, 200)

@@ -382,3 +382,17 @@ class AbsenceSummaryRowsTests(AttendanceFoundationTests):
             campus_id=str(self.other_campus.id),
         )
         self.assertEqual(rows, [])
+
+    def test_limit_bounds_the_returned_rows(self):
+        session, _ = self.open_session()
+        record_attendance_bulk(
+            user=self.teacher, tenant=self.school_a, session=session,
+            entries=[
+                {"student": self.student, "status": AttendanceStatus.ABSENT},
+                {"student": self.other_student, "status": AttendanceStatus.LATE},
+            ],
+        )
+        rows = absence_summary_rows(
+            tenant=self.school_a, start_date=self.session_date, end_date=self.session_date, limit=1,
+        )
+        self.assertEqual(len(rows), 1)

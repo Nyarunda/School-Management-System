@@ -31,6 +31,7 @@ INSTALLED_APPS = [
     "apps.leave",
     "apps.documents",
     "apps.reporting",
+    "apps.platform",
 ]
 
 MIDDLEWARE = [

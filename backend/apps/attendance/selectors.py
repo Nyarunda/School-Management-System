@@ -3,7 +3,7 @@ from django.db.models import Count, Q
 from .models import AttendanceRecord, AttendanceStatus
 
 
-def absence_summary_rows(*, tenant, start_date, end_date, campus_id=None):
+def absence_summary_rows(*, tenant, start_date, end_date, campus_id=None, limit=None):
     records = (
         AttendanceRecord.objects.for_tenant(tenant)
         .filter(session__session_date__gte=start_date, session__session_date__lte=end_date)
@@ -24,6 +24,10 @@ def absence_summary_rows(*, tenant, start_date, end_date, campus_id=None):
         )
         .order_by("student__admission_number")
     )
+    # As with collections_summary_rows, this bounds the aggregated row count
+    # but not the underlying scan cost of the GROUP BY itself.
+    if limit is not None:
+        aggregated = aggregated[:limit]
     return [
         {
             "admission_number": row["student__admission_number"],

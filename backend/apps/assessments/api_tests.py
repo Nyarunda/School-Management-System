@@ -54,6 +54,13 @@ class AssessmentApiTests(TestCase):
     def headers(self):
         return {"HTTP_X_TENANT_SLUG": "school-a"}
 
+    def test_disabling_the_assessments_module_blocks_access_even_with_permission(self):
+        from apps.platform.services import set_module_override
+
+        set_module_override(tenant=self.school_a, module_code="assessments", is_enabled=False)
+        response = self.client.get("/api/v1/assessments/assessments/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
     def open_assessment(self, name="CAT 1"):
         return self.client.post(
             "/api/v1/assessments/assessments/open/",

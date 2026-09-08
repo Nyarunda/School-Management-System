@@ -10,7 +10,7 @@ def list_students(*, tenant):
     )
 
 
-def enrollment_register_rows(*, tenant, campus_id=None, status=None):
+def enrollment_register_rows(*, tenant, campus_id=None, status=None, limit=None):
     # A dedicated query rather than reusing list_students(): that selector's
     # .only() is tuned for the list-view shape and deliberately excludes
     # date_of_birth, which this report needs -- reusing it would silently
@@ -20,6 +20,8 @@ def enrollment_register_rows(*, tenant, campus_id=None, status=None):
         queryset = queryset.filter(campus_id=campus_id)
     if status:
         queryset = queryset.filter(status=status)
+    if limit is not None:
+        queryset = queryset[:limit]
     return [
         {
             "admission_number": student.admission_number, "full_name": student.full_name, "status": student.status,

@@ -11,6 +11,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.documents.services import open_document_stream
+from apps.platform.services import require_module_enabled
 from apps.tenancy.services import require_permission
 
 from .models import Student, StudentDocument
@@ -43,6 +44,7 @@ def resolve_request_tenant(request, permission="students.view"):
         membership = require_permission(
             user=request.user, tenant_slug=slug, permission=permission
         )
+        require_module_enabled(tenant=membership.tenant, module_code="student_records")
     except DjangoValidationError as error:
         raise PermissionDenied(error.messages) from error
     return membership.tenant

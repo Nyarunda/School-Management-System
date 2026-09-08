@@ -452,3 +452,16 @@ class ResultsSheetRowsTests(AssessmentFoundationTests):
         )
         rows = results_sheet_rows(tenant=self.school_a, class_group_id=str(self.class_group.id), term_id=str(other_term.id))
         self.assertEqual(rows, [])
+
+    def test_limit_bounds_the_returned_rows(self):
+        self.make_grading_scheme()
+        assessment, _ = self.open_assessment()
+        record_assessment_marks(
+            user=self.teacher, tenant=self.school_a, assessment=assessment,
+            entries=[
+                {"student": self.student, "mark_status": MarkStatus.SCORED, "score": Decimal("85")},
+                {"student": self.other_student, "mark_status": MarkStatus.SCORED, "score": Decimal("40")},
+            ],
+        )
+        rows = results_sheet_rows(tenant=self.school_a, class_group_id=str(self.class_group.id), term_id=str(self.term.id), limit=1)
+        self.assertEqual(len(rows), 1)

@@ -33,7 +33,28 @@ def _coerce_string(value):
     return str(value)
 
 
-_COERCERS = {"uuid": _coerce_uuid, "date": _coerce_date, "string": _coerce_string}
+def _coerce_int(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValidationError("Must be an integer")
+
+
+_COERCERS = {"uuid": _coerce_uuid, "date": _coerce_date, "string": _coerce_string, "int": _coerce_int}
+
+
+def require_campus_scope(*, membership, params):
+    """Same guard already duplicated per-app as `_require_campus_scope` in
+    timetable/assessments/attendance/leave/staff services.py: a user whose
+    Membership.campus is set can never read a *different* campus's data,
+    even with the right permission. Reporting's campus-filterable reports
+    must not become a way around that -- this mirrors the existing
+    convention of one small copy per app rather than a shared tenancy
+    utility, since that's what the other five copies already establish.
+    """
+    campus_id = params.get("campus_id")
+    if campus_id and membership.campus_id is not None and str(membership.campus_id) != str(campus_id):
+        raise ValidationError("User is not authorized for this campus")
 
 
 @dataclass(frozen=True)
@@ -47,17 +68,23 @@ class ReportParameter:
 class ReportDefinition:
     label: str
     permission_group: str
+    module_code: str  # Milestone 21: apps.platform module this report's data belongs to
     parameters: dict
     columns: list  # [(field_name, header), ...] in export/preview order
-    query: Callable  # (*, tenant, **params) -> iterable of dict-like rows
+    query: Callable  # (*, tenant, limit=None, **params) -> iterable of dict-like rows
     max_rows: int  # hard cap enforced identically by preview and export
     max_date_range_days: Optional[int] = None
     date_range_fields: Optional[tuple] = None  # (start_field_name, end_field_name)
+    # (*, membership, params) -> None, raises ValidationError to reject.
+    # Re-run both at request time and (via generate_report_export) at
+    # generation time, so a requester who loses access between requesting
+    # and a delayed async generation can't still receive the file.
+    authorize: Optional[Callable] = None
 
 
 REPORT_CATALOGUE = {
     "finance.fee_statement": ReportDefinition(
-        label="Student Fee Statement", permission_group="finance",
+        label="Student Fee Statement", permission_group="finance", module_code="finance",
         parameters={
             "student_id": ReportParameter(type="uuid", required=True),
             "as_of": ReportParameter(type="date", required=False, default=lambda: timezone.now().date()),
@@ -69,7 +96,7 @@ REPORT_CATALOGUE = {
         query=finance_selectors.fee_statement_rows, max_rows=5000,
     ),
     "finance.collections_summary": ReportDefinition(
-        label="Collections Summary", permission_group="finance",
+        label="Collections Summary", permission_group="finance", module_code="finance",
         parameters={
             "start_date": ReportParameter(type="date", required=True),
             "end_date": ReportParameter(type="date", required=True),
@@ -82,9 +109,9 @@ REPORT_CATALOGUE = {
         max_date_range_days=366, date_range_fields=("start_date", "end_date"),
     ),
     "students.enrollment_register": ReportDefinition(
-        label="Enrollment Register", permission_group="students",
+        label="Enrollment Register", permission_group="students", module_code="student_records",
         parameters={
-            "campus_id": ReportParameter(type="uuid", required=False),
+            "campus_id": ReportParameter(type="int", required=False),  # Campus.id is a plain integer PK, not a UUID
             "status": ReportParameter(type="string", required=False),
         },
         columns=[
@@ -92,13 +119,14 @@ REPORT_CATALOGUE = {
             ("campus", "Campus"), ("date_of_birth", "Date of Birth"),
         ],
         query=students_selectors.enrollment_register_rows, max_rows=20000,
+        authorize=require_campus_scope,
     ),
     "attendance.absence_summary": ReportDefinition(
-        label="Absence Summary", permission_group="attendance",
+        label="Absence Summary", permission_group="attendance", module_code="attendance",
         parameters={
             "start_date": ReportParameter(type="date", required=True),
             "end_date": ReportParameter(type="date", required=True),
-            "campus_id": ReportParameter(type="uuid", required=False),
+            "campus_id": ReportParameter(type="int", required=False),  # Campus.id is a plain integer PK, not a UUID
         },
         columns=[
             ("admission_number", "Admission No."), ("full_name", "Name"),
@@ -106,9 +134,10 @@ REPORT_CATALOGUE = {
         ],
         query=attendance_selectors.absence_summary_rows, max_rows=20000,
         max_date_range_days=366, date_range_fields=("start_date", "end_date"),
+        authorize=require_campus_scope,
     ),
     "assessments.results_sheet": ReportDefinition(
-        label="Results Sheet", permission_group="assessments",
+        label="Results Sheet", permission_group="assessments", module_code="assessments",
         parameters={
             "class_group_id": ReportParameter(type="uuid", required=True),
             "term_id": ReportParameter(type="uuid", required=True),
@@ -120,9 +149,9 @@ REPORT_CATALOGUE = {
         query=assessments_selectors.results_sheet_rows, max_rows=20000,
     ),
     "staff.employee_register": ReportDefinition(
-        label="Employee Register", permission_group="staff",
+        label="Employee Register", permission_group="staff", module_code="staff_hr",
         parameters={
-            "campus_id": ReportParameter(type="uuid", required=False),
+            "campus_id": ReportParameter(type="int", required=False),  # Campus.id is a plain integer PK, not a UUID
             "status": ReportParameter(type="string", required=False),
         },
         columns=[
@@ -131,6 +160,7 @@ REPORT_CATALOGUE = {
             ("campus", "Campus"), ("hire_date", "Hire Date"),
         ],
         query=staff_selectors.employee_register_rows, max_rows=20000,
+        authorize=require_campus_scope,
     ),
 }
 

@@ -26,7 +26,7 @@ def _describe_ledger_entry(entry):
     return ""
 
 
-def fee_statement_rows(*, tenant, student_id, as_of):
+def fee_statement_rows(*, tenant, student_id, as_of, limit=None):
     from apps.students.models import Student
 
     student = Student.objects.for_tenant(tenant).filter(pk=student_id).first()
@@ -39,8 +39,10 @@ def fee_statement_rows(*, tenant, student_id, as_of):
         .select_related(
             "invoice", "credit_note", "payment_allocation__invoice", "allocation_reversal",
         )
-        .order_by("posted_at")
+        .order_by("posted_at", "id")
     )
+    if limit is not None:
+        entries = entries[:limit]
     running_balance = Decimal("0")
     rows = []
     for entry in entries:
@@ -57,7 +59,7 @@ def fee_statement_rows(*, tenant, student_id, as_of):
     return rows
 
 
-def collections_summary_rows(*, tenant, start_date, end_date):
+def collections_summary_rows(*, tenant, start_date, end_date, limit=None):
     payments = (
         Payment.objects.for_tenant(tenant)
         .filter(status=PaymentStatus.RECEIVED, received_at__date__gte=start_date, received_at__date__lte=end_date)
@@ -66,6 +68,12 @@ def collections_summary_rows(*, tenant, start_date, end_date):
         .annotate(payment_count=Count("id"), total_amount=Sum("amount"))
         .order_by("collection_date", "payment_method__name")
     )
+    # Slicing a grouped/annotated queryset still bounds the number of
+    # aggregated rows Python has to build, but the GROUP BY itself still
+    # scans the full date range -- this doesn't reduce DB scan cost the way
+    # it does for the ungrouped reports below.
+    if limit is not None:
+        payments = payments[:limit]
     return [
         {
             "collection_date": row["collection_date"], "payment_method": row["payment_method__name"],

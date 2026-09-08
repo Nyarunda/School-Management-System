@@ -27,6 +27,13 @@ class DocumentSetupApiTests(TestCase):
         response = self.client.get("/api/v1/documents/setup/")
         self.assertEqual(response.status_code, 404)
 
+    def test_disabling_the_documents_module_blocks_access_even_with_permission(self):
+        from apps.platform.services import set_module_override
+
+        set_module_override(tenant=self.tenant, module_code="documents", is_enabled=False)
+        response = self.client.get("/api/v1/documents/setup/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
     def test_get_defaults_when_unconfigured(self):
         response = self.client.get("/api/v1/documents/setup/", **self.headers())
         self.assertEqual(response.status_code, 200)

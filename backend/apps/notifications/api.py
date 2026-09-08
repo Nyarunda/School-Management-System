@@ -8,6 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.platform.services import require_module_enabled
 from apps.tenancy.services import require_membership, require_permission
 
 from .models import (
@@ -47,7 +48,9 @@ def resolve_notifications_tenant(request, permission):
     if not slug:
         raise NotFound("Tenant context is required")
     try:
-        return require_permission(user=request.user, tenant_slug=slug, permission=permission).tenant
+        membership = require_permission(user=request.user, tenant_slug=slug, permission=permission)
+        require_module_enabled(tenant=membership.tenant, module_code="communications")
+        return membership.tenant
     except DjangoValidationError as error:
         raise PermissionDenied(error.messages) from error
 
@@ -61,7 +64,9 @@ def resolve_member_tenant(request):
     if not slug:
         raise NotFound("Tenant context is required")
     try:
-        return require_membership(user=request.user, tenant_slug=slug).tenant
+        membership = require_membership(user=request.user, tenant_slug=slug)
+        require_module_enabled(tenant=membership.tenant, module_code="communications")
+        return membership.tenant
     except DjangoValidationError as error:
         raise PermissionDenied(error.messages) from error
 

@@ -748,3 +748,9 @@ class ReportSelectorTests(PaymentTests):
         reverse_payment(user=self.user, tenant=self.school_a, payment=payment, reason="Bounced cheque")
         rows = collections_summary_rows(tenant=self.school_a, start_date=date(2000, 1, 1), end_date=date(2100, 1, 1))
         self.assertEqual(rows, [])
+
+    def test_fee_statement_rows_limit_bounds_the_returned_rows(self):
+        payment = self._record_payment()
+        allocate_payment(user=self.user, tenant=self.school_a, payment=payment, invoice=self.invoice, amount=Decimal("50000.00"))
+        rows = fee_statement_rows(tenant=self.school_a, student_id=str(self.student.id), as_of=date(2100, 1, 1), limit=1)
+        self.assertEqual(len(rows), 1)

@@ -39,6 +39,13 @@ class LeaveApiTests(TestCase):
         response = self.client.get("/api/v1/leave/requests/")
         self.assertEqual(response.status_code, 404)
 
+    def test_disabling_the_staff_hr_module_blocks_access_even_with_permission(self):
+        from apps.platform.services import set_module_override
+
+        set_module_override(tenant=self.school_a, module_code="staff_hr", is_enabled=False)
+        response = self.client.get("/api/v1/leave/requests/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
     def test_leave_setup_get_and_patch(self):
         get_response = self.client.get("/api/v1/leave/setup/", **self.headers())
         self.assertEqual(get_response.status_code, 200)
