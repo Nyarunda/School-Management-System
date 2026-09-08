@@ -2,8 +2,10 @@ from django.urls import path
 
 from .api import (
     ModuleCatalogueView,
+    PlatformAuditEventListView,
     SubscriptionPlanDetailView,
     SubscriptionPlanListCreateView,
+    TenantAuditEventListView,
     TenantModuleOverrideDetailView,
     TenantModuleOverrideListView,
     TenantSubscriptionView,
@@ -18,5 +20,10 @@ urlpatterns = [
     path(
         "tenants/<uuid:tenant_id>/overrides/<str:module_code>/",
         TenantModuleOverrideDetailView.as_view(), name="platform-tenant-override-detail",
+    ),
+    path("audit-events/", PlatformAuditEventListView.as_view(), name="platform-audit-events"),
+    path(
+        "tenants/<uuid:tenant_id>/audit-events/",
+        TenantAuditEventListView.as_view(), name="platform-tenant-audit-events",
     ),
 ]

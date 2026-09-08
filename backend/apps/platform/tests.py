@@ -1,10 +1,10 @@
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 
-from apps.tenancy.models import Tenant
+from apps.tenancy.models import AuditEvent, Tenant, User
 
 from .catalogue import MODULE_CATALOGUE
-from .models import SubscriptionPlan, TenantModuleOverride, TenantSubscription
+from .models import PlatformAuditEvent, SubscriptionPlan, TenantModuleOverride, TenantSubscription
 from .services import (
     assign_plan,
     clear_module_override,
@@ -158,6 +158,63 @@ class PlanServiceTests(TestCase):
         plan = create_plan(name="Standard", module_codes=["finance"], is_default=True)
         with self.assertRaises(ValidationError):
             delete_plan(plan=plan)
+
+
+class AuditTrailTests(TestCase):
+    """Milestone 22.2: every privileged platform write records an audit
+    trail -- PlatformAuditEvent for actions with no single tenant (plan
+    CRUD), AuditEvent for the tenant-scoped ones (assignment, overrides).
+    """
+
+    def setUp(self):
+        self.actor = User.objects.create_user(username="super-admin", password="secret", is_superuser=True)
+        self.tenant = Tenant.objects.create(name="School A", slug="school-a")
+
+    def test_create_plan_records_a_platform_audit_event(self):
+        plan = create_plan(actor=self.actor, name="Standard", module_codes=["finance"])
+        event = PlatformAuditEvent.objects.get(action="platform.plan.created", resource_id=str(plan.id))
+        self.assertEqual(event.actor, self.actor)
+        self.assertEqual(event.resource_type, "SubscriptionPlan")
+        self.assertEqual(event.metadata["name"], "Standard")
+        self.assertEqual(event.metadata["module_codes"], ["finance"])
+
+    def test_update_plan_records_the_fields_that_changed(self):
+        plan = create_plan(actor=self.actor, name="Standard", module_codes=["finance"])
+        update_plan(actor=self.actor, plan=plan, name="Professional")
+        event = PlatformAuditEvent.objects.get(action="platform.plan.updated", resource_id=str(plan.id))
+        self.assertEqual(event.metadata["updated_fields"], ["name"])
+        self.assertEqual(event.metadata["name"], "Professional")
+
+    def test_delete_plan_records_the_deleted_plan_s_identity(self):
+        plan = create_plan(actor=self.actor, name="Retired", module_codes=["finance"])
+        plan_id = str(plan.id)
+        delete_plan(actor=self.actor, plan=plan)
+        event = PlatformAuditEvent.objects.get(action="platform.plan.deleted", resource_id=plan_id)
+        self.assertEqual(event.metadata["name"], "Retired")
+
+    def test_assign_plan_records_a_tenant_scoped_audit_event(self):
+        plan = create_plan(actor=self.actor, name="Standard", module_codes=["finance"])
+        assign_plan(actor=self.actor, tenant=self.tenant, plan=plan)
+        event = AuditEvent.objects.for_tenant(self.tenant).get(action="platform.subscription.assigned")
+        self.assertEqual(event.actor, self.actor)
+        self.assertEqual(event.metadata["plan_id"], str(plan.id))
+
+    def test_set_module_override_records_a_tenant_scoped_audit_event(self):
+        set_module_override(actor=self.actor, tenant=self.tenant, module_code="finance", is_enabled=False)
+        event = AuditEvent.objects.for_tenant(self.tenant).get(action="platform.module_override.set")
+        self.assertEqual(event.resource_id, "finance")
+        self.assertFalse(event.metadata["is_enabled"])
+
+    def test_clear_module_override_records_a_tenant_scoped_audit_event(self):
+        set_module_override(actor=self.actor, tenant=self.tenant, module_code="finance", is_enabled=False)
+        clear_module_override(actor=self.actor, tenant=self.tenant, module_code="finance")
+        event = AuditEvent.objects.for_tenant(self.tenant).get(action="platform.module_override.cleared")
+        self.assertEqual(event.resource_id, "finance")
+
+    def test_actor_defaults_to_none_for_system_triggered_calls(self):
+        plan = create_plan(name="Standard", module_codes=["finance"])
+        event = PlatformAuditEvent.objects.get(action="platform.plan.created", resource_id=str(plan.id))
+        self.assertIsNone(event.actor)
 
 
 class ModelValidationTests(TestCase):

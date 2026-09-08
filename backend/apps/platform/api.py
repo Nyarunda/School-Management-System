@@ -1,14 +1,16 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
+from rest_framework.generics import ListAPIView
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import BasePermission
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.tenancy.models import Tenant
+from apps.tenancy.models import AuditEvent, Tenant
 
 from .catalogue import MODULE_CATALOGUE
-from .models import SubscriptionPlan, TenantModuleOverride, TenantSubscription
+from .models import PlatformAuditEvent, SubscriptionPlan, TenantModuleOverride, TenantSubscription
 from .services import (
     assign_plan,
     clear_module_override,
@@ -92,7 +94,7 @@ class SubscriptionPlanListCreateView(APIView):
         serializer = SubscriptionPlanCreateSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            plan = create_plan(**serializer.validated_data)
+            plan = create_plan(actor=request.user, **serializer.validated_data)
         except DjangoValidationError as error:
             return api_validation_error(error)
         return Response(SubscriptionPlanSerializer(plan).data, status=status.HTTP_201_CREATED)
@@ -110,7 +112,7 @@ class SubscriptionPlanDetailView(APIView):
         serializer = SubscriptionPlanUpdateSerializer(data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         try:
-            plan = update_plan(plan=plan, **serializer.validated_data)
+            plan = update_plan(actor=request.user, plan=plan, **serializer.validated_data)
         except DjangoValidationError as error:
             return api_validation_error(error)
         return Response(SubscriptionPlanSerializer(plan).data)
@@ -118,7 +120,7 @@ class SubscriptionPlanDetailView(APIView):
     def delete(self, request, plan_id):
         plan = get_object_or_404(SubscriptionPlan, pk=plan_id)
         try:
-            delete_plan(plan=plan)
+            delete_plan(actor=request.user, plan=plan)
         except DjangoValidationError as error:
             return api_validation_error(error)
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -142,7 +144,7 @@ class TenantSubscriptionView(APIView):
         serializer.is_valid(raise_exception=True)
         plan = get_object_or_404(SubscriptionPlan, pk=serializer.validated_data["plan_id"])
         try:
-            assign_plan(tenant=tenant, plan=plan)
+            assign_plan(actor=request.user, tenant=tenant, plan=plan)
         except DjangoValidationError as error:
             return api_validation_error(error)
         return Response({
@@ -179,7 +181,8 @@ class TenantModuleOverrideDetailView(APIView):
         serializer.is_valid(raise_exception=True)
         try:
             override = set_module_override(
-                tenant=tenant, module_code=module_code, is_enabled=serializer.validated_data["is_enabled"],
+                actor=request.user, tenant=tenant, module_code=module_code,
+                is_enabled=serializer.validated_data["is_enabled"],
             )
         except DjangoValidationError as error:
             return api_validation_error(error)
@@ -187,5 +190,50 @@ class TenantModuleOverrideDetailView(APIView):
 
     def delete(self, request, tenant_id, module_code):
         tenant = get_object_or_404(Tenant, pk=tenant_id)
-        clear_module_override(tenant=tenant, module_code=module_code)
+        clear_module_override(actor=request.user, tenant=tenant, module_code=module_code)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class PlatformAuditPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class PlatformAuditEventSerializer(serializers.ModelSerializer):
+    actor = serializers.SerializerMethodField()
+
+    class Meta:
+        model = PlatformAuditEvent
+        fields = ["id", "actor", "action", "resource_type", "resource_id", "metadata", "created_at"]
+
+    def get_actor(self, obj):
+        return obj.actor.username if obj.actor else None
+
+
+class TenantAuditEventSerializer(serializers.ModelSerializer):
+    actor = serializers.SerializerMethodField()
+
+    class Meta:
+        model = AuditEvent
+        fields = ["id", "actor", "action", "resource_type", "resource_id", "metadata", "created_at"]
+
+    def get_actor(self, obj):
+        return obj.actor.username if obj.actor else None
+
+
+class PlatformAuditEventListView(ListAPIView):
+    permission_classes = [IsSuperUser]
+    serializer_class = PlatformAuditEventSerializer
+    pagination_class = PlatformAuditPagination
+    queryset = PlatformAuditEvent.objects.all().order_by("-created_at")
+
+
+class TenantAuditEventListView(ListAPIView):
+    permission_classes = [IsSuperUser]
+    serializer_class = TenantAuditEventSerializer
+    pagination_class = PlatformAuditPagination
+
+    def get_queryset(self):
+        tenant = get_object_or_404(Tenant, pk=self.kwargs["tenant_id"])
+        return AuditEvent.objects.for_tenant(tenant).order_by("-created_at")

@@ -2,7 +2,7 @@ import uuid
 
 from django.db import models
 
-from apps.tenancy.models import Tenant
+from apps.tenancy.models import Tenant, User
 
 from .catalogue import MODULE_CATALOGUE
 
@@ -79,3 +79,21 @@ class TenantModuleOverride(models.Model):
 
         if self.module_code not in MODULE_CATALOGUE:
             raise ValidationError(f"Unknown module code: {self.module_code}")
+
+
+class PlatformAuditEvent(models.Model):
+    """Audit trail for platform-level (non-tenant-scoped) Super Admin actions
+    -- SubscriptionPlan create/update/delete apply globally, so unlike
+    apps.tenancy.models.AuditEvent (tenant-owned) there is no single tenant
+    to attach these to.
+    """
+
+    actor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    action = models.CharField(max_length=120)
+    resource_type = models.CharField(max_length=120)
+    resource_id = models.CharField(max_length=120)
+    metadata = models.JSONField(default=dict)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]

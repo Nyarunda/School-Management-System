@@ -1,9 +1,9 @@
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from apps.tenancy.models import Membership, Role, Tenant, User
+from apps.tenancy.models import AuditEvent, Membership, Role, Tenant, User
 
-from .models import SubscriptionPlan, TenantSubscription
+from .models import PlatformAuditEvent, SubscriptionPlan, TenantSubscription
 
 
 class PlatformApiTests(TestCase):
@@ -117,6 +117,77 @@ class PlatformApiTests(TestCase):
 
         delete_response = self.client.delete(f"/api/v1/platform/plans/{plan_id}/")
         self.assertEqual(delete_response.status_code, 400)
+
+
+class AuditEventApiTests(TestCase):
+    """Milestone 22.2: privileged platform writes made through the API
+    record the calling superuser as the audit event's actor, and the two
+    new read endpoints are Super-Admin-only, paginated, newest-first.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.tenant = Tenant.objects.create(name="School A", slug="school-a")
+        self.superuser = User.objects.create_user(username="root", password="secret", is_superuser=True, is_staff=True)
+        self.ordinary_admin = User.objects.create_user(username="admin", password="secret")
+        role = Role.objects.create(tenant=self.tenant, name="Admin", permissions=["finance.view"])
+        Membership.objects.create(tenant=self.tenant, user=self.ordinary_admin, role=role)
+
+    def test_creating_a_plan_via_the_api_attributes_the_audit_event_to_the_caller(self):
+        self.client.force_authenticate(self.superuser)
+        response = self.client.post(
+            "/api/v1/platform/plans/", {"name": "Standard", "module_codes": ["finance"]}, format="json",
+        )
+        event = PlatformAuditEvent.objects.get(action="platform.plan.created", resource_id=response.data["id"])
+        self.assertEqual(event.actor, self.superuser)
+
+    def test_assigning_a_plan_via_the_api_records_a_tenant_scoped_audit_event(self):
+        self.client.force_authenticate(self.superuser)
+        plan_response = self.client.post(
+            "/api/v1/platform/plans/", {"name": "Standard", "module_codes": ["finance"]}, format="json",
+        )
+        self.client.put(
+            f"/api/v1/platform/tenants/{self.tenant.id}/subscription/",
+            {"plan_id": plan_response.data["id"]}, format="json",
+        )
+        event = AuditEvent.objects.for_tenant(self.tenant).get(action="platform.subscription.assigned")
+        self.assertEqual(event.actor, self.superuser)
+
+    def test_platform_audit_events_endpoint_is_superuser_only(self):
+        self.client.force_authenticate(self.ordinary_admin)
+        response = self.client.get("/api/v1/platform/audit-events/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_tenant_audit_events_endpoint_is_superuser_only(self):
+        self.client.force_authenticate(self.ordinary_admin)
+        response = self.client.get(f"/api/v1/platform/tenants/{self.tenant.id}/audit-events/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_platform_audit_events_are_listed_newest_first(self):
+        self.client.force_authenticate(self.superuser)
+        self.client.post("/api/v1/platform/plans/", {"name": "First", "module_codes": ["finance"]}, format="json")
+        self.client.post("/api/v1/platform/plans/", {"name": "Second", "module_codes": ["finance"]}, format="json")
+
+        response = self.client.get("/api/v1/platform/audit-events/")
+        self.assertEqual(response.status_code, 200)
+        actions = [entry["action"] for entry in response.data["results"]]
+        self.assertEqual(actions[0], "platform.plan.created")
+        self.assertEqual(response.data["results"][0]["metadata"]["name"], "Second")
+
+    def test_tenant_audit_events_only_include_that_tenant_s_events(self):
+        self.client.force_authenticate(self.superuser)
+        other_tenant = Tenant.objects.create(name="School B", slug="school-b")
+        plan_response = self.client.post(
+            "/api/v1/platform/plans/", {"name": "Standard", "module_codes": ["finance"]}, format="json",
+        )
+        self.client.put(
+            f"/api/v1/platform/tenants/{self.tenant.id}/subscription/",
+            {"plan_id": plan_response.data["id"]}, format="json",
+        )
+
+        response = self.client.get(f"/api/v1/platform/tenants/{other_tenant.id}/audit-events/")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["results"], [])
 
 
 class SessionEntitlementTests(TestCase):

@@ -1,8 +1,10 @@
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 
+from apps.tenancy.models import AuditEvent
+
 from .catalogue import MODULE_CATALOGUE
-from .models import SubscriptionPlan, TenantModuleOverride, TenantSubscription
+from .models import PlatformAuditEvent, SubscriptionPlan, TenantModuleOverride, TenantSubscription
 
 
 def get_enabled_modules(tenant):
@@ -48,7 +50,7 @@ def _validate_module_codes(module_codes):
     return canonical
 
 
-def create_plan(*, name, module_codes, is_default=False, is_active=True):
+def create_plan(*, actor=None, name, module_codes, is_default=False, is_active=True):
     canonical_codes = _validate_module_codes(module_codes)
     if is_default and not is_active:
         raise ValidationError("An inactive plan cannot be the default plan")
@@ -56,16 +58,25 @@ def create_plan(*, name, module_codes, is_default=False, is_active=True):
         with transaction.atomic():
             if is_default:
                 SubscriptionPlan.objects.filter(is_default=True).update(is_default=False)
-            return SubscriptionPlan.objects.create(
+            plan = SubscriptionPlan.objects.create(
                 name=name, module_codes=canonical_codes, is_default=is_default, is_active=is_active,
             )
+            PlatformAuditEvent.objects.create(
+                actor=actor, action="platform.plan.created", resource_type="SubscriptionPlan",
+                resource_id=str(plan.id),
+                metadata={
+                    "name": plan.name, "module_codes": plan.module_codes,
+                    "is_default": plan.is_default, "is_active": plan.is_active,
+                },
+            )
+            return plan
     except IntegrityError as error:
         if is_default:
             raise ValidationError("Another request changed the default plan at the same time; try again") from error
         raise
 
 
-def update_plan(*, plan, name=None, module_codes=None, is_active=None, is_default=None):
+def update_plan(*, actor=None, plan, name=None, module_codes=None, is_active=None, is_default=None):
     """Two invariants beyond simple field updates, both there so
     services.get_enabled_modules and signals.provision_default_subscription
     can keep assuming "there is always exactly one active default plan"
@@ -84,6 +95,11 @@ def update_plan(*, plan, name=None, module_codes=None, is_active=None, is_defaul
     if plan.is_default and is_default is False:
         raise ValidationError("Cannot unset the default plan directly -- set a different active plan as default instead")
 
+    updated_fields = [
+        field for field, value in
+        (("name", name), ("module_codes", module_codes), ("is_active", is_active), ("is_default", is_default))
+        if value is not None
+    ]
     try:
         with transaction.atomic():
             if name is not None:
@@ -97,6 +113,14 @@ def update_plan(*, plan, name=None, module_codes=None, is_active=None, is_defaul
             if is_active is not None:
                 plan.is_active = is_active
             plan.save()
+            PlatformAuditEvent.objects.create(
+                actor=actor, action="platform.plan.updated", resource_type="SubscriptionPlan",
+                resource_id=str(plan.id),
+                metadata={
+                    "updated_fields": updated_fields, "name": plan.name, "module_codes": plan.module_codes,
+                    "is_default": plan.is_default, "is_active": plan.is_active,
+                },
+            )
             return plan
     except IntegrityError as error:
         if is_default:
@@ -104,31 +128,54 @@ def update_plan(*, plan, name=None, module_codes=None, is_active=None, is_defaul
         raise
 
 
-def delete_plan(*, plan):
+def delete_plan(*, actor=None, plan):
     if plan.is_default:
         raise ValidationError("Cannot delete the default plan -- make a different plan the default first")
     if TenantSubscription.objects.filter(plan=plan).exists():
         raise ValidationError("Cannot delete a plan that is currently assigned to a tenant")
-    plan.delete()
+    with transaction.atomic():
+        plan_id, name, module_codes = str(plan.id), plan.name, plan.module_codes
+        plan.delete()
+        PlatformAuditEvent.objects.create(
+            actor=actor, action="platform.plan.deleted", resource_type="SubscriptionPlan", resource_id=plan_id,
+            metadata={"name": name, "module_codes": module_codes},
+        )
 
 
-def assign_plan(*, tenant, plan):
+def assign_plan(*, actor=None, tenant, plan):
     """is_active=False blocks new assignment -- it never retroactively
     strips a tenant already on the plan (see SubscriptionPlan's docstring).
     """
     if not plan.is_active:
         raise ValidationError("Cannot assign an inactive plan")
-    subscription, _ = TenantSubscription.objects.update_or_create(tenant=tenant, defaults={"plan": plan})
-    return subscription
+    with transaction.atomic():
+        subscription, _ = TenantSubscription.objects.update_or_create(tenant=tenant, defaults={"plan": plan})
+        AuditEvent.objects.create(
+            tenant=tenant, actor=actor, action="platform.subscription.assigned",
+            resource_type="TenantSubscription", resource_id=str(subscription.pk),
+            metadata={"plan_id": str(plan.id), "plan_name": plan.name},
+        )
+        return subscription
 
 
-def set_module_override(*, tenant, module_code, is_enabled):
+def set_module_override(*, actor=None, tenant, module_code, is_enabled):
     _validate_module_codes([module_code])
-    override, _ = TenantModuleOverride.objects.update_or_create(
-        tenant=tenant, module_code=module_code, defaults={"is_enabled": is_enabled},
-    )
-    return override
+    with transaction.atomic():
+        override, _ = TenantModuleOverride.objects.update_or_create(
+            tenant=tenant, module_code=module_code, defaults={"is_enabled": is_enabled},
+        )
+        AuditEvent.objects.create(
+            tenant=tenant, actor=actor, action="platform.module_override.set",
+            resource_type="TenantModuleOverride", resource_id=module_code,
+            metadata={"is_enabled": is_enabled},
+        )
+        return override
 
 
-def clear_module_override(*, tenant, module_code):
-    TenantModuleOverride.objects.filter(tenant=tenant, module_code=module_code).delete()
+def clear_module_override(*, actor=None, tenant, module_code):
+    with transaction.atomic():
+        TenantModuleOverride.objects.filter(tenant=tenant, module_code=module_code).delete()
+        AuditEvent.objects.create(
+            tenant=tenant, actor=actor, action="platform.module_override.cleared",
+            resource_type="TenantModuleOverride", resource_id=module_code, metadata={},
+        )
