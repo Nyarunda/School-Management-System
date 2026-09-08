@@ -164,6 +164,10 @@ REST_FRAMEWORK = {
         # a legitimate Safaricom callback with 429 is worse than under-throttling,
         # since a dropped callback risks a payment never getting ingested.
         "mpesa_callback": os.getenv("THROTTLE_RATE_MPESA_CALLBACK", "120/min"),
+        # RC Area 2: LoginView/InviteAcceptView (apps.tenancy.auth_api) are
+        # credential-verification endpoints -- the general anon rate
+        # (100/hour) is far too generous a brute-force window for them.
+        "login": os.getenv("THROTTLE_RATE_LOGIN", "5/min"),
     },
 }
 

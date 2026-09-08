@@ -1,7 +1,7 @@
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 
-from apps.tenancy.models import AuditEvent, Tenant, User
+from apps.tenancy.models import AuditEvent, Membership, Tenant, User
 
 from .catalogue import MODULE_CATALOGUE
 from .models import PlatformAuditEvent, SubscriptionPlan, TenantModuleOverride, TenantSubscription
@@ -11,6 +11,7 @@ from .services import (
     create_plan,
     delete_plan,
     get_enabled_modules,
+    provision_tenant,
     require_module_enabled,
     set_module_override,
     update_plan,
@@ -215,6 +216,41 @@ class AuditTrailTests(TestCase):
         plan = create_plan(name="Standard", module_codes=["finance"])
         event = PlatformAuditEvent.objects.get(action="platform.plan.created", resource_id=str(plan.id))
         self.assertIsNone(event.actor)
+
+
+class ProvisionTenantServiceTests(TestCase):
+    """RC Area 2: the Super Admin tenant-provisioning entry point."""
+
+    def setUp(self):
+        self.actor = User.objects.create_user(username="super-admin-provisioner", password="secret", is_superuser=True)
+
+    def test_provision_tenant_creates_exactly_one_subscription(self):
+        tenant = provision_tenant(actor=self.actor, name="New School", slug="new-school-1", admin_email="admin@new-school-1.example")
+        self.assertEqual(TenantSubscription.objects.filter(tenant=tenant).count(), 1)
+
+    def test_provision_tenant_creates_an_inactive_admin_membership_until_accepted(self):
+        tenant = provision_tenant(actor=self.actor, name="New School", slug="new-school-2", admin_email="admin@new-school-2.example")
+        membership = Membership.objects.get(tenant=tenant)
+        self.assertFalse(membership.is_active)
+        self.assertEqual(membership.user.email, "admin@new-school-2.example")
+
+    def test_provision_tenant_rejects_admin_permissions_without_the_guard_permission(self):
+        with self.assertRaises(ValidationError):
+            provision_tenant(
+                actor=self.actor, name="New School", slug="new-school-3", admin_email="admin@new-school-3.example",
+                admin_permissions=["tenancy.role.view"],
+            )
+
+    def test_provision_tenant_rejects_a_duplicate_slug(self):
+        provision_tenant(actor=self.actor, name="New School", slug="dup-school", admin_email="admin1@dup-school.example")
+        with self.assertRaises(ValidationError):
+            provision_tenant(actor=self.actor, name="Another School", slug="dup-school", admin_email="admin2@dup-school.example")
+
+    def test_provision_tenant_records_a_platform_audit_event(self):
+        tenant = provision_tenant(actor=self.actor, name="New School", slug="new-school-4", admin_email="admin@new-school-4.example")
+        event = PlatformAuditEvent.objects.get(action="platform.tenant.provisioned", resource_id=str(tenant.id))
+        self.assertEqual(event.metadata["slug"], "new-school-4")
+        self.assertEqual(event.actor, self.actor)
 
 
 class ModelValidationTests(TestCase):

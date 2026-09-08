@@ -194,6 +194,11 @@ class InviteAndAcceptTests(TenancyAdminTestBase):
         self.assertEqual(membership.user.email, "new.teacher@example.com")
         self.assertTrue(Membership.objects.filter(pk=membership.pk, tenant=self.school_a, role=self.member_role).exists())
 
+    def test_invite_creates_an_inactive_membership_until_accepted(self):
+        membership = invite_user(actor=self.admin_user, tenant=self.school_a, email="new.teacher@example.com", role=self.member_role)
+        self.assertFalse(membership.is_active)
+        self.assertIsNone(membership.invite_accepted_at)
+
     def test_invite_enqueues_a_notification(self):
         invite_user(actor=self.admin_user, tenant=self.school_a, email="new.teacher@example.com", role=self.member_role)
         outbox_entry = NotificationOutbox.objects.for_tenant(self.school_a).get(message_type="tenancy.user_invited")
@@ -213,6 +218,7 @@ class InviteAndAcceptTests(TenancyAdminTestBase):
         existing = User.objects.create_user(username="existing", email="existing@example.com", password="whatever")
         membership = invite_user(actor=self.admin_user, tenant=self.school_a, email="EXISTING@example.com", role=self.member_role)
         self.assertEqual(membership.user_id, existing.id)
+        self.assertFalse(membership.is_active)
 
     def test_invite_rejects_a_role_the_actor_cannot_grant(self):
         finance_role = Role.objects.create(tenant=self.school_a, name="Bursar", permissions=["finance.invoice.view"])
@@ -220,17 +226,52 @@ class InviteAndAcceptTests(TenancyAdminTestBase):
             invite_user(actor=self.admin_user, tenant=self.school_a, email="new.bursar@example.com", role=finance_role)
 
     def test_accept_invite_sets_a_usable_password(self):
-        _, token = self._invite_and_get_token()
+        membership, token = self._invite_and_get_token()
         user = accept_invite(token=token, password="a-strong-passw0rd!")
         user.refresh_from_db()
+        membership.refresh_from_db()
         self.assertTrue(user.has_usable_password())
         self.assertTrue(user.check_password("a-strong-passw0rd!"))
+        self.assertTrue(membership.is_active)
+        self.assertIsNotNone(membership.invite_accepted_at)
 
     def test_accept_invite_is_single_use(self):
         _, token = self._invite_and_get_token()
         accept_invite(token=token, password="a-strong-passw0rd!")
         with self.assertRaises(ValidationError):
             accept_invite(token=token, password="another-passw0rd!")
+
+    def test_accept_invite_requires_a_password_for_a_new_user(self):
+        _, token = self._invite_and_get_token()
+        with self.assertRaises(ValidationError):
+            accept_invite(token=token, password=None)
+
+    def test_inviting_an_existing_user_to_a_second_tenant_grants_no_premature_access(self):
+        """The demonstrated RC Area 2 defect: an existing user (already
+        holding a usable password from another tenant) must not get
+        immediately-active access to a newly-inviting tenant, and must be
+        able to accept that second tenant's invite without it being wrongly
+        rejected as 'already accepted'.
+        """
+        existing = User.objects.create_user(username="existing", email="existing@example.com", password="whatever")
+        membership, token = self._invite_and_get_token(email="existing@example.com")
+        self.assertEqual(membership.user_id, existing.id)
+        self.assertFalse(membership.is_active)
+
+        returned_user = accept_invite(token=token, password=None)
+
+        self.assertEqual(returned_user.id, existing.id)
+        membership.refresh_from_db()
+        self.assertTrue(membership.is_active)
+        self.assertIsNotNone(membership.invite_accepted_at)
+        self.assertTrue(existing.check_password("whatever"))
+
+    def test_accept_invite_replay_is_rejected_via_invite_accepted_at_not_password_state(self):
+        existing = User.objects.create_user(username="existing2", email="existing2@example.com", password="whatever")
+        membership, token = self._invite_and_get_token(email="existing2@example.com")
+        accept_invite(token=token, password=None)
+        with self.assertRaises(ValidationError):
+            accept_invite(token=token, password=None)
 
     def test_accept_invite_rejects_a_tampered_token(self):
         with self.assertRaises(ValidationError):

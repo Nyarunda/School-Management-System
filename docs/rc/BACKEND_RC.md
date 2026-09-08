@@ -48,8 +48,29 @@ Re-run in full as part of this area's verification (see session log) — all gre
 
 ---
 
-## Area 2 — Authentication, tenancy & security
-*Not started.* Grounding already gathered from a retroactive review of Milestone 22.4 — see project memory `rc_area2_grounding_22_4_defects`. Known items to address: existing-user invite flow grants premature active access + incorrectly blocks legitimate acceptance (root cause: password state is User-level, acceptance is Membership-level); no dedicated login/invite-accept throttle scope; no Super Admin tenant-provisioning API.
+## Area 2 — Authentication, tenancy & security ✅ CLOSED
+
+**Baseline under test:** `91144e2` (RC Area 1 close). **Date:** 2026-09-09.
+Grounding: a retroactive review of Milestone 22.4, verified claim-by-claim against actual code before this area was planned — see project memory `rc_area2_grounding_22_4_defects`.
+
+### Findings
+
+| Finding | Classification | Resolution |
+|---|---|---|
+| `invite_user` granted an *existing* user (already holding a usable password from another tenant) immediately-active `Membership` access before they ever visited the invite link; `accept_invite` then gated single-use replay protection on the user's *global* `has_usable_password()`, so that same existing user was wrongly told "This invite has already been accepted." | **DEFECT, fixed this area** | Every invite (new or existing user) now creates `Membership(is_active=False)`. A new `Membership.invite_accepted_at` field is the single-use acceptance gate, resolved via `(tenant_id, user_id)` from the token — independent of the user's global password state. A password is only required/touched for a genuinely new user. |
+| Deactivating a membership *before* its invite was ever accepted, then replaying the still-valid (7-day) token, would reactivate it and set `invite_accepted_at` — overriding the admin's deactivation. | **ACCEPTED RISK** | Not fixed this area: closing it means teaching `deactivate_membership` to also invalidate outstanding invites, which is new behavior, not a fix for the demonstrated defect. Did not exist as a risk before this area's fix (new-user memberships weren't touched by `accept_invite`'s `is_active` at all). Revisit if it's ever demonstrated to matter in practice. |
+| "Invite token only contains `user_id`, so a multi-tenant user's invite is ambiguous" (raised in the retroactive review) | **Debunked, no action** | False against actual code: `invite_user` signs both `user_id` and `tenant_id`, and `Membership` is unique per `(tenant, user)` — no ambiguity exists. Recorded here rather than silently dropped. |
+| `_ensure_not_removing_last_administrator`'s locking strategy (raised in the retroactive review) | **No action needed** | Already correct: locks a stable `select_for_update().filter(tenant=tenant, is_active=True)` query, verified by a real passing PostgreSQL concurrency test. |
+| `LoginView`/`InviteAcceptView` had no dedicated throttle scope, sharing the general `AnonRateThrottle` (100/hour) — far too generous for credential-verification endpoints | **DEFECT, fixed this area** | New `ScopedRateThrottle` scope `"login"` (5/min, env-overridable via `THROTTLE_RATE_LOGIN`), mirroring the existing `mpesa_callback` pattern. |
+| No Super Admin API existed to provision a new tenant + its first administrator (shell/ORM-only) | **New capability, added this area** | `apps.platform.services.provision_tenant` (atomic: `Tenant` creation cooperates with the existing `provision_default_subscription` signal rather than duplicating it; creates the initial admin `Role` + reuses `invite_user` for the admin's `User`/`Membership`) behind a new `IsSuperUser`-gated `POST /api/v1/platform/tenants/`. The initial admin goes through the same consent-gated invite/accept flow as anyone else. |
+| `DEFAULT_AUTHENTICATION_CLASSES` worry (implicit-default risk) | **Confirmed not a bug, no action** | Already explicit (`TokenAuthentication` + `SessionAuthentication`), not relying on DRF's implicit defaults. Kept both — `SessionAuthentication` supports the browsable API / same-origin session tooling and isn't the risk originally worried about. |
+| DRF token lifetime has no expiry | **ACCEPTED RISK, carried from Area 1** | No expiry/rotation mechanism added this area — out of demonstrated-defect scope. |
+
+### Test coverage
+`apps/tenancy/tests.py` (new/updated `InviteAndAcceptTests` cases for the exact demonstrated bug and its replay behavior), `apps/tenancy/api_tests.py` (existing-user second-tenant accept round trip), `config/test_throttling.py` (new `LoginThrottleTests`), `apps/platform/tests.py`/`api_tests.py` (new `provision_tenant` service + API tests: single-subscription signal cooperation, admin-guard-permission requirement, non-superuser 403).
+
+### Full test suite (SQLite + PostgreSQL 17)
+SQLite: 779 tests, OK (41 skipped — Postgres-only cases). PostgreSQL 17 (`postgres:17-alpine`, disposable container): 779 tests, OK (0 skipped).
 
 ## Area 3 — Critical business journeys
 *Not started.*

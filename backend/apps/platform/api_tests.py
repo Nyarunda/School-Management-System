@@ -98,6 +98,29 @@ class PlatformApiTests(TestCase):
             len(self.client.get(f"/api/v1/platform/tenants/{self.tenant.id}/overrides/").data), 0,
         )
 
+    def test_provision_tenant_succeeds_for_a_superuser(self):
+        self.client.force_authenticate(self.superuser)
+        response = self.client.post(
+            "/api/v1/platform/tenants/",
+            {"name": "New School", "slug": "new-school-api", "admin_email": "admin@new-school-api.example"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.data["slug"], "new-school-api")
+        tenant = Tenant.objects.get(pk=response.data["tenant_id"])
+        self.assertEqual(TenantSubscription.objects.filter(tenant=tenant).count(), 1)
+        membership = Membership.objects.get(tenant=tenant)
+        self.assertFalse(membership.is_active)
+
+    def test_provision_tenant_rejects_a_non_superuser(self):
+        self.client.force_authenticate(self.ordinary_admin)
+        response = self.client.post(
+            "/api/v1/platform/tenants/",
+            {"name": "New School", "slug": "new-school-api-2", "admin_email": "admin@new-school-api-2.example"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 403)
+
     def test_override_boolean_string_is_parsed_correctly(self):
         """The bug this guards against: bool("false") is True in Python --
         the write path must go through a real BooleanField, not a bare

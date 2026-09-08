@@ -205,3 +205,26 @@ class TenancyAdminApiTests(TestCase):
         )
         self.assertEqual(login_response.status_code, 200)
         self.assertEqual(login_response.data["token"], issued_token)
+
+    def test_inviting_an_existing_user_to_a_second_tenant_accepts_without_a_password(self):
+        existing = User.objects.create_user(username="existing-api", email="existing-api@example.com", password="whatever")
+        invite_response = self.client.post(
+            "/api/v1/tenancy/users/invite/",
+            {"email": "existing-api@example.com", "role": self.viewer_role.id}, format="json", **self.headers(),
+        )
+        self.assertEqual(invite_response.status_code, 201)
+        membership_id = invite_response.data["id"]
+        self.assertFalse(Membership.objects.get(pk=membership_id).is_active)
+
+        outbox_entry = NotificationOutbox.objects.for_tenant(self.school_a).get(
+            message_type="tenancy.user_invited", recipient="existing-api@example.com",
+        )
+        token = outbox_entry.context["invite_link"].split("token=")[1]
+
+        anonymous_client = APIClient()
+        accept_response = anonymous_client.post("/api/v1/auth/invites/accept/", {"token": token}, format="json")
+        self.assertEqual(accept_response.status_code, 200)
+
+        membership = Membership.objects.get(pk=membership_id)
+        self.assertTrue(membership.is_active)
+        self.assertTrue(existing.check_password("whatever"))

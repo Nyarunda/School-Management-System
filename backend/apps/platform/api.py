@@ -17,6 +17,7 @@ from .services import (
     create_plan,
     delete_plan,
     get_enabled_modules,
+    provision_tenant,
     set_module_override,
     update_plan,
 )
@@ -73,6 +74,14 @@ class TenantModuleOverrideWriteSerializer(serializers.Serializer):
     is_enabled = serializers.BooleanField()
 
 
+class TenantProvisionSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=200)
+    slug = serializers.SlugField(max_length=80)
+    admin_email = serializers.EmailField()
+    admin_role_name = serializers.CharField(max_length=100, default="Administrator")
+    admin_permissions = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True)
+
+
 class ModuleCatalogueView(APIView):
     permission_classes = [IsSuperUser]
 
@@ -124,6 +133,30 @@ class SubscriptionPlanDetailView(APIView):
         except DjangoValidationError as error:
             return api_validation_error(error)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class TenantProvisionView(APIView):
+    """The single Super Admin entry point for bringing a new tenant + its
+    first administrator into existence -- see services.provision_tenant.
+    """
+
+    permission_classes = [IsSuperUser]
+
+    def post(self, request):
+        serializer = TenantProvisionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            tenant = provision_tenant(
+                actor=request.user, name=data["name"], slug=data["slug"], admin_email=data["admin_email"],
+                admin_role_name=data["admin_role_name"], admin_permissions=data.get("admin_permissions"),
+            )
+        except DjangoValidationError as error:
+            return api_validation_error(error)
+        return Response(
+            {"tenant_id": str(tenant.id), "slug": tenant.slug, "name": tenant.name},
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class TenantSubscriptionView(APIView):

@@ -4,6 +4,7 @@ from django.core import signing
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import F
+from django.utils import timezone
 
 from .models import AuditEvent, Membership, Role, User
 from .permissions_catalogue import validate_permission_codes
@@ -172,7 +173,10 @@ def invite_user(*, actor, tenant, email, role, campus=None):
                 raise ValidationError("A user with this email already exists under a different address") from error
 
         try:
-            membership = Membership.objects.create(tenant=tenant, user=user, role=role, campus=campus)
+            # is_active=False regardless of whether the user is new or
+            # already exists elsewhere -- membership only becomes active
+            # once the invite is actually accepted (see accept_invite).
+            membership = Membership.objects.create(tenant=tenant, user=user, role=role, campus=campus, is_active=False)
         except IntegrityError as error:
             raise ValidationError("This person is already a member of this tenant") from error
 
@@ -190,7 +194,7 @@ def invite_user(*, actor, tenant, email, role, campus=None):
     return membership
 
 
-def accept_invite(*, token, password):
+def accept_invite(*, token, password=None):
     try:
         payload = signing.loads(token, salt=INVITE_TOKEN_SALT, max_age=INVITE_TOKEN_MAX_AGE_SECONDS)
     except signing.SignatureExpired as error:
@@ -199,27 +203,42 @@ def accept_invite(*, token, password):
         raise ValidationError("This invite link is invalid") from error
 
     try:
-        user = User.objects.get(pk=payload["user_id"])
-    except User.DoesNotExist as error:
+        membership = Membership.objects.select_related("user").get(
+            tenant_id=payload.get("tenant_id"), user_id=payload["user_id"],
+        )
+    except Membership.DoesNotExist as error:
         raise ValidationError("This invite link is no longer valid") from error
 
-    # has_usable_password() is False only until the first accept -- a
-    # single natural guard against a leaked/reused invite link resetting an
-    # already-set password, with no separate token-nonce table needed.
-    if user.has_usable_password():
+    # invite_accepted_at (not is_active, and not the user's global password
+    # state) is the single-use replay guard -- it's the one flag that means
+    # exactly "this specific membership's invite was accepted", independent
+    # of an admin separately activating/deactivating the membership, and
+    # independent of the user's password already being usable from another
+    # tenant's membership.
+    if membership.invite_accepted_at is not None:
         raise ValidationError("This invite has already been accepted")
 
-    validate_password(password, user=user)
+    user = membership.user
+    # A genuinely new user (set_unusable_password() in invite_user) must set
+    # a password to accept; an existing user (invited to an additional
+    # tenant) already has one from elsewhere and keeps it untouched.
+    needs_password = not user.has_usable_password()
+    if needs_password:
+        if not password:
+            raise ValidationError("A password is required to accept this invite")
+        validate_password(password, user=user)
 
     with transaction.atomic():
-        user.set_password(password)
-        user.save(update_fields=["password"])
-        tenant_id = payload.get("tenant_id")
-        if tenant_id:
-            AuditEvent.objects.create(
-                tenant_id=tenant_id, actor=user, action="tenancy.user.invite_accepted",
-                resource_type="User", resource_id=str(user.id), metadata={},
-            )
+        if needs_password:
+            user.set_password(password)
+            user.save(update_fields=["password"])
+        membership.invite_accepted_at = timezone.now()
+        membership.is_active = True
+        membership.save(update_fields=["invite_accepted_at", "is_active"])
+        AuditEvent.objects.create(
+            tenant_id=membership.tenant_id, actor=user, action="tenancy.user.invite_accepted",
+            resource_type="User", resource_id=str(user.id), metadata={},
+        )
     return user
 
 

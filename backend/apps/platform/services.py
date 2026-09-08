@@ -1,10 +1,16 @@
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 
-from apps.tenancy.models import AuditEvent
+from apps.tenancy.models import AuditEvent, Role, Tenant
+from apps.tenancy.permissions_catalogue import validate_permission_codes
+from apps.tenancy.services import ADMIN_GUARD_PERMISSION, invite_user
 
 from .catalogue import MODULE_CATALOGUE
 from .models import PlatformAuditEvent, SubscriptionPlan, TenantModuleOverride, TenantSubscription
+
+DEFAULT_TENANT_ADMIN_PERMISSIONS = [
+    "tenancy.membership.manage", "tenancy.membership.view", "tenancy.role.manage", "tenancy.role.view",
+]
 
 
 def get_enabled_modules(tenant):
@@ -179,3 +185,34 @@ def clear_module_override(*, actor=None, tenant, module_code):
             tenant=tenant, actor=actor, action="platform.module_override.cleared",
             resource_type="TenantModuleOverride", resource_id=module_code, metadata={},
         )
+
+
+def provision_tenant(*, actor, name, slug, admin_email, admin_role_name="Administrator", admin_permissions=None):
+    """The one Super Admin entry point for bringing a new tenant into
+    existence with its first administrator -- everything else (schools
+    onboarding staff, students, etc.) happens from inside that tenant once
+    this has run. Deliberately reuses apps.tenancy.services.invite_user for
+    the admin's User/Membership rather than creating them directly, so the
+    initial admin goes through the exact same consent-gated invite/accept
+    flow as anyone else invited later (their membership starts inactive
+    until they accept).
+    """
+    canonical = validate_permission_codes(admin_permissions or DEFAULT_TENANT_ADMIN_PERMISSIONS)
+    if ADMIN_GUARD_PERMISSION not in canonical:
+        raise ValidationError(f"The initial admin role must include {ADMIN_GUARD_PERMISSION}")
+
+    with transaction.atomic():
+        try:
+            # Tenant.objects.create's post_save signal
+            # (apps.platform.signals.provision_default_subscription)
+            # assigns the default TenantSubscription -- not duplicated here.
+            tenant = Tenant.objects.create(name=name, slug=slug)
+        except IntegrityError as error:
+            raise ValidationError("A tenant with this slug already exists") from error
+        role = Role.objects.create(tenant=tenant, name=admin_role_name, permissions=canonical)
+        membership = invite_user(actor=actor, tenant=tenant, email=admin_email, role=role)
+        PlatformAuditEvent.objects.create(
+            actor=actor, action="platform.tenant.provisioned", resource_type="Tenant", resource_id=str(tenant.id),
+            metadata={"slug": tenant.slug, "admin_email": membership.user.email},
+        )
+    return tenant

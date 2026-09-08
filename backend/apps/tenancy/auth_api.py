@@ -4,6 +4,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from .services import accept_invite
@@ -18,6 +19,11 @@ class LoginView(ObtainAuthToken):
     """
 
     permission_classes = [AllowAny]
+    # A credential-verification endpoint needs a much tighter, dedicated
+    # rate than the general anon throttle (100/hour) -- mirrors the
+    # mpesa_callback ScopedRateThrottle pattern in apps.finance.mpesa_api.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
 
 
 class LogoutView(APIView):
@@ -30,17 +36,26 @@ class LogoutView(APIView):
 
 class InviteAcceptSerializer(serializers.Serializer):
     token = serializers.CharField()
-    password = serializers.CharField()
+    # Optional: only required for a genuinely new user (no usable password
+    # yet). An existing user accepting an invite to an additional tenant
+    # keeps their current password and doesn't need to supply one --
+    # services.accept_invite enforces the actual requirement.
+    password = serializers.CharField(required=False, allow_blank=True)
 
 
 class InviteAcceptView(APIView):
     permission_classes = [AllowAny]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "login"
 
     def post(self, request):
         serializer = InviteAcceptSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         try:
-            user = accept_invite(token=serializer.validated_data["token"], password=serializer.validated_data["password"])
+            user = accept_invite(
+                token=serializer.validated_data["token"],
+                password=serializer.validated_data.get("password") or None,
+            )
         except DjangoValidationError as error:
             return Response({"detail": error.messages}, status=status.HTTP_400_BAD_REQUEST)
         token, _ = Token.objects.get_or_create(user=user)

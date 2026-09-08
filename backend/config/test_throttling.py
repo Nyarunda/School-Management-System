@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from django.core.cache import cache
 from django.test import TestCase, override_settings
-from rest_framework.throttling import UserRateThrottle
+from rest_framework.throttling import ScopedRateThrottle, UserRateThrottle
 
 from apps.tenancy.models import User
 
@@ -56,3 +56,23 @@ class ThrottlingTests(TestCase):
             response = self.client.get("/api/v1/session/")
         self.assertNotEqual(response.status_code, 500)
         self.assertNotEqual(response.status_code, 429)
+
+
+class LoginThrottleTests(TestCase):
+    """RC Area 2: LoginView/InviteAcceptView use a dedicated "login" scope,
+    distinct from and much tighter than the general anon rate, since they
+    are credential-verification endpoints.
+    """
+
+    def setUp(self):
+        cache.clear()
+        self.addCleanup(cache.clear)
+        from rest_framework.test import APIClient
+        self.client = APIClient()
+
+    def test_login_is_throttled_at_the_dedicated_scope_not_the_anon_rate(self):
+        with patch.object(ScopedRateThrottle, "THROTTLE_RATES", {"login": "1/min"}):
+            first = self.client.post("/api/v1/auth/login/", {"username": "nobody", "password": "wrong"}, format="json")
+            self.assertNotEqual(first.status_code, 429)
+            second = self.client.post("/api/v1/auth/login/", {"username": "nobody", "password": "wrong"}, format="json")
+        self.assertEqual(second.status_code, 429)
