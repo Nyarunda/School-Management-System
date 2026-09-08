@@ -249,7 +249,7 @@ DOCUMENT_STORAGE_BACKEND = os.getenv("DOCUMENT_STORAGE_BACKEND", "apps.documents
 
 if PRODUCTION:
     required = ("DJANGO_SECRET_KEY", "FIELD_ENCRYPTION_KEY", "PUBLIC_BASE_URL", "DJANGO_ALLOWED_HOSTS", "DJANGO_CACHE_URL")
-    if any(not os.getenv(name) for name in required):
+    if any(not os.getenv(name, "").strip() for name in required):
         raise ImproperlyConfigured(
             "Production requires explicit secret, encryption key, public URL, allowed hosts, and cache URL"
         )
@@ -262,6 +262,17 @@ if PRODUCTION:
         raise ImproperlyConfigured("Production PUBLIC_BASE_URL must be an external HTTPS URL")
     if "*" in ALLOWED_HOSTS or DATABASES["default"]["ENGINE"] != "django.db.backends.postgresql":
         raise ImproperlyConfigured("Production requires explicit allowed hosts and PostgreSQL")
+    # RC Area 1 defect fix: these previously fell back to hardcoded dev
+    # defaults (config/settings.py's postgres DATABASES branch) even in
+    # production if the operator forgot to set them -- a deploy could
+    # silently run against the dev password with zero error.
+    if any(not os.getenv(name, "").strip() for name in ("POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_HOST")):
+        raise ImproperlyConfigured("Production requires explicit POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, and POSTGRES_HOST")
+    if os.getenv("POSTGRES_PASSWORD") == "school_management_dev":
+        raise ImproperlyConfigured("Production cannot use the development database password")
+    parsed_cache_url = urlparse(os.getenv("DJANGO_CACHE_URL", ""))
+    if parsed_cache_url.scheme not in ("redis", "rediss") or not parsed_cache_url.hostname:
+        raise ImproperlyConfigured("Production DJANGO_CACHE_URL must be a redis:// or rediss:// URL with a host")
     from cryptography.fernet import Fernet
     try:
         Fernet(FIELD_ENCRYPTION_KEY)

@@ -12,7 +12,7 @@ class ProductionSettingsTests(SimpleTestCase):
         env = {key: value for key, value in os.environ.items() if key not in (
             "DJANGO_ENV", "DJANGO_SECRET_KEY", "DJANGO_ALLOWED_HOSTS", "FIELD_ENCRYPTION_KEY", "PUBLIC_BASE_URL",
             "DB_ENGINE", "BEHIND_REVERSE_PROXY", "DJANGO_CACHE_URL", "HSTS_SECONDS", "HSTS_INCLUDE_SUBDOMAINS",
-            "HSTS_PRELOAD")}
+            "HSTS_PRELOAD", "POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_HOST")}
         env.update(overrides)
         return subprocess.run([sys.executable, "-c", f"import config.settings as s; print({expr})"],
             cwd=Path(__file__).resolve().parent.parent, env=env, capture_output=True, text=True, timeout=15)
@@ -21,7 +21,9 @@ class ProductionSettingsTests(SimpleTestCase):
         return {"DJANGO_ENV": "production", "DJANGO_SECRET_KEY": "x" * 50,
                 "FIELD_ENCRYPTION_KEY": Fernet.generate_key().decode(), "PUBLIC_BASE_URL": "https://school.example",
                 "DJANGO_ALLOWED_HOSTS": "school.example", "DB_ENGINE": "postgres",
-                "DJANGO_CACHE_URL": "redis://localhost:6379/2"}
+                "DJANGO_CACHE_URL": "redis://localhost:6379/2",
+                "POSTGRES_DB": "school_management", "POSTGRES_USER": "school_management",
+                "POSTGRES_PASSWORD": "rc-test-password", "POSTGRES_HOST": "postgres"}
 
     def test_production_refuses_missing_configuration(self):
         self.assertNotEqual(self.load_settings({"DJANGO_ENV": "production"}).returncode, 0)
@@ -39,6 +41,31 @@ class ProductionSettingsTests(SimpleTestCase):
     def test_production_refuses_missing_cache_url(self):
         no_cache_url = {key: value for key, value in self.valid().items() if key != "DJANGO_CACHE_URL"}
         self.assertNotEqual(self.load_settings(no_cache_url).returncode, 0)
+
+    def test_production_refuses_missing_or_blank_postgres_configuration(self):
+        for name in ("POSTGRES_DB", "POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_HOST"):
+            for value in (None, "   "):
+                with self.subTest(name=name, value=value):
+                    overrides = self.valid()
+                    if value is None:
+                        overrides.pop(name)
+                    else:
+                        overrides[name] = value
+                    self.assertNotEqual(self.load_settings(overrides).returncode, 0)
+
+    def test_production_refuses_development_postgres_password(self):
+        self.assertNotEqual(
+            self.load_settings({**self.valid(), "POSTGRES_PASSWORD": "school_management_dev"}).returncode,
+            0,
+        )
+
+    def test_production_refuses_invalid_cache_urls(self):
+        for cache_url in ("garbage://whatever", "redis:///2", "not-a-url"):
+            with self.subTest(cache_url=cache_url):
+                self.assertNotEqual(
+                    self.load_settings({**self.valid(), "DJANGO_CACHE_URL": cache_url}).returncode,
+                    0,
+                )
 
     def test_production_enables_security_headers(self):
         checks = {
