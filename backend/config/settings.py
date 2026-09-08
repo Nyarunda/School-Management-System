@@ -36,6 +36,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
@@ -73,7 +74,17 @@ if os.getenv("DB_ENGINE", "sqlite").lower() == "postgres":
 else:
     DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
 
-AUTH_PASSWORD_VALIDATORS = []
+# Currently inert: no endpoint anywhere calls Django's validate_password().
+# Set proactively so it's already correct the moment a
+# password-set/change/reset API is added -- but that future serializer/
+# service must actually call validate_password() itself; this setting alone
+# doesn't intercept every User.set_password()/create_user() call path.
+AUTH_PASSWORD_VALIDATORS = [
+    {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},
+    {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
+    {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
+    {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+]
 LANGUAGE_CODE = "en-us"
 TIME_ZONE = "Africa/Nairobi"
 USE_I18N = True
@@ -84,6 +95,29 @@ AUTH_USER_MODEL = "tenancy.User"
 
 REST_FRAMEWORK = {
     "EXCEPTION_HANDLER": "config.exceptions.exception_handler",
+    # Per-user/per-IP abuse protection -- NOT tenant-level noisy-neighbor
+    # protection (a tenant with 300 active users gets ~300x the throughput
+    # of a tenant with one; that's a real gap this milestone deliberately
+    # doesn't close -- see the plan's non-goals). UserRateThrottle scopes by
+    # authenticated user id; AnonRateThrottle is the safety net for any
+    # future AllowAny view that doesn't get an explicit scope. The 3 M-Pesa
+    # webhook views (apps/finance/mpesa_api.py) opt into the
+    # "mpesa_callback" scope instead via ScopedRateThrottle.
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.UserRateThrottle",
+        "rest_framework.throttling.AnonRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "user": os.getenv("THROTTLE_RATE_USER", "1000/hour"),
+        "anon": os.getenv("THROTTLE_RATE_ANON", "100/hour"),
+        # A protective ceiling against a flood/DoS, not ordinary traffic
+        # shaping -- callback_token authentication and the human-verification
+        # workflow (MpesaCallbackLog/CallbackVerifyView) are the real security
+        # boundary here. Deliberately generous and env-overridable: rejecting
+        # a legitimate Safaricom callback with 429 is worse than under-throttling,
+        # since a dropped callback risks a payment never getting ingested.
+        "mpesa_callback": os.getenv("THROTTLE_RATE_MPESA_CALLBACK", "120/min"),
+    },
 }
 
 # Dev-only Fernet key (generated once for this repo's development default).
@@ -146,9 +180,11 @@ DOCUMENT_STORAGE_ROOT = os.getenv("DOCUMENT_STORAGE_ROOT", str(BASE_DIR / "docum
 DOCUMENT_STORAGE_BACKEND = os.getenv("DOCUMENT_STORAGE_BACKEND", "apps.documents.storage.local.LocalFilesystemBackend")
 
 if PRODUCTION:
-    required = ("DJANGO_SECRET_KEY", "FIELD_ENCRYPTION_KEY", "PUBLIC_BASE_URL", "DJANGO_ALLOWED_HOSTS")
+    required = ("DJANGO_SECRET_KEY", "FIELD_ENCRYPTION_KEY", "PUBLIC_BASE_URL", "DJANGO_ALLOWED_HOSTS", "DJANGO_CACHE_URL")
     if any(not os.getenv(name) for name in required):
-        raise ImproperlyConfigured("Production requires explicit secret, encryption key, public URL, and allowed hosts")
+        raise ImproperlyConfigured(
+            "Production requires explicit secret, encryption key, public URL, allowed hosts, and cache URL"
+        )
     if SECRET_KEY == "development-only-change-me" or len(SECRET_KEY) < 32:
         raise ImproperlyConfigured("Production requires a non-default secret key of at least 32 characters")
     if FIELD_ENCRYPTION_KEY == "tcgm_bXMcNCa925qDWCcoGJCg_UHxRh0N50KsbHtbic=":
@@ -165,3 +201,42 @@ if PRODUCTION:
         raise ImproperlyConfigured("FIELD_ENCRYPTION_KEY must be a valid Fernet key") from None
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
+    SECURE_SSL_REDIRECT = True
+    SECURE_CONTENT_TYPE_NOSNIFF = True
+    X_FRAME_OPTIONS = "DENY"
+    SECURE_REFERRER_POLICY = "strict-origin-when-cross-origin"
+    # Each independently env-overridable: HSTS with includeSubDomains+preload
+    # is strong but only correct once every relevant subdomain is HTTPS-capable
+    # -- an operational decision for whoever owns DNS, not something to bake
+    # in as a silent assumption. Defaults to the strong posture.
+    SECURE_HSTS_SECONDS = int(os.getenv("HSTS_SECONDS", "31536000"))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv("HSTS_INCLUDE_SUBDOMAINS", "true").lower() == "true"
+    SECURE_HSTS_PRELOAD = os.getenv("HSTS_PRELOAD", "true").lower() == "true"
+    # Only trust X-Forwarded-Proto when Django is actually deployed behind a
+    # TLS-terminating reverse proxy/load balancer that overwrites/strips any
+    # client-supplied X-Forwarded-Proto before forwarding -- setting this
+    # when Django is directly internet-facing would let a client spoof the
+    # header and bypass SECURE_SSL_REDIRECT. The deployment invariant this
+    # setting assumes: INTERNET -> trusted reverse proxy/LB -> Django, never
+    # INTERNET -> Django directly. Defaults to the confirmed topology but
+    # stays a one-line env override, not a hardcoded assumption.
+    if os.getenv("BEHIND_REVERSE_PROXY", "true").lower() == "true":
+        SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+    # DRF throttle counters live in the cache -- Django's default per-process
+    # LocMemCache would let each Gunicorn worker independently allow the full
+    # configured rate. DJANGO_CACHE_URL is explicit (checked in `required`
+    # above), not derived from CELERY_BROKER_URL -- coupling Django's cache
+    # config to Celery's URL shape would make a config mistake here silently
+    # weaken a security control. config.cache.FailOpenRedisCache (not
+    # Django's built-in RedisCache directly -- it has no IGNORE_EXCEPTIONS
+    # equivalent) makes the cache, and therefore throttling, fail *open* on
+    # a Redis outage: a request that can't reach the cache is allowed
+    # through rather than raising a 500 for every authenticated request or,
+    # worse, dropping a legitimate M-Pesa callback. Redis HA/monitoring
+    # itself is a later hardening pass.
+    CACHES = {
+        "default": {
+            "BACKEND": "config.cache.FailOpenRedisCache",
+            "LOCATION": os.getenv("DJANGO_CACHE_URL"),
+        }
+    }

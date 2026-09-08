@@ -8,17 +8,20 @@ from django.test import SimpleTestCase
 
 
 class ProductionSettingsTests(SimpleTestCase):
-    def load_settings(self, overrides):
+    def load_settings(self, overrides, expr="s.DEBUG"):
         env = {key: value for key, value in os.environ.items() if key not in (
-            "DJANGO_ENV", "DJANGO_SECRET_KEY", "DJANGO_ALLOWED_HOSTS", "FIELD_ENCRYPTION_KEY", "PUBLIC_BASE_URL", "DB_ENGINE")}
+            "DJANGO_ENV", "DJANGO_SECRET_KEY", "DJANGO_ALLOWED_HOSTS", "FIELD_ENCRYPTION_KEY", "PUBLIC_BASE_URL",
+            "DB_ENGINE", "BEHIND_REVERSE_PROXY", "DJANGO_CACHE_URL", "HSTS_SECONDS", "HSTS_INCLUDE_SUBDOMAINS",
+            "HSTS_PRELOAD")}
         env.update(overrides)
-        return subprocess.run([sys.executable, "-c", "import config.settings as s; print(s.DEBUG)"],
+        return subprocess.run([sys.executable, "-c", f"import config.settings as s; print({expr})"],
             cwd=Path(__file__).resolve().parent.parent, env=env, capture_output=True, text=True, timeout=15)
 
     def valid(self):
         return {"DJANGO_ENV": "production", "DJANGO_SECRET_KEY": "x" * 50,
                 "FIELD_ENCRYPTION_KEY": Fernet.generate_key().decode(), "PUBLIC_BASE_URL": "https://school.example",
-                "DJANGO_ALLOWED_HOSTS": "school.example", "DB_ENGINE": "postgres"}
+                "DJANGO_ALLOWED_HOSTS": "school.example", "DB_ENGINE": "postgres",
+                "DJANGO_CACHE_URL": "redis://localhost:6379/2"}
 
     def test_production_refuses_missing_configuration(self):
         self.assertNotEqual(self.load_settings({"DJANGO_ENV": "production"}).returncode, 0)
@@ -32,3 +35,59 @@ class ProductionSettingsTests(SimpleTestCase):
         for overrides in ({"PUBLIC_BASE_URL": "http://localhost:8000"}, {"DB_ENGINE": "sqlite"}, {"FIELD_ENCRYPTION_KEY": "invalid"}):
             with self.subTest(overrides=overrides):
                 self.assertNotEqual(self.load_settings({**self.valid(), **overrides}).returncode, 0)
+
+    def test_production_refuses_missing_cache_url(self):
+        no_cache_url = {key: value for key, value in self.valid().items() if key != "DJANGO_CACHE_URL"}
+        self.assertNotEqual(self.load_settings(no_cache_url).returncode, 0)
+
+    def test_production_enables_security_headers(self):
+        checks = {
+            "s.SECURE_SSL_REDIRECT": "True",
+            "s.SECURE_HSTS_SECONDS": "31536000",
+            "s.SECURE_HSTS_INCLUDE_SUBDOMAINS": "True",
+            "s.SECURE_HSTS_PRELOAD": "True",
+            "s.SECURE_CONTENT_TYPE_NOSNIFF": "True",
+            "s.X_FRAME_OPTIONS": "DENY",
+            "s.SECURE_REFERRER_POLICY": "strict-origin-when-cross-origin",
+        }
+        for expr, expected in checks.items():
+            with self.subTest(expr=expr):
+                result = self.load_settings(self.valid(), expr=expr)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), expected)
+
+    def test_hsts_posture_is_independently_env_overridable(self):
+        overrides = {
+            "HSTS_SECONDS": "3600",
+            "HSTS_INCLUDE_SUBDOMAINS": "false",
+            "HSTS_PRELOAD": "false",
+        }
+        result = self.load_settings({**self.valid(), **overrides}, expr="(s.SECURE_HSTS_SECONDS, s.SECURE_HSTS_INCLUDE_SUBDOMAINS, s.SECURE_HSTS_PRELOAD)")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "(3600, False, False)")
+
+    def test_proxy_ssl_header_defaults_on_and_is_reversible_via_env(self):
+        default_result = self.load_settings(self.valid(), expr="s.SECURE_PROXY_SSL_HEADER")
+        self.assertEqual(default_result.returncode, 0, default_result.stderr)
+        self.assertEqual(default_result.stdout.strip(), "('HTTP_X_FORWARDED_PROTO', 'https')")
+
+        disabled_result = self.load_settings(
+            {**self.valid(), "BEHIND_REVERSE_PROXY": "false"},
+            expr="getattr(s, 'SECURE_PROXY_SSL_HEADER', None)",
+        )
+        self.assertEqual(disabled_result.returncode, 0, disabled_result.stderr)
+        self.assertEqual(disabled_result.stdout.strip(), "None")
+
+    def test_production_uses_an_explicit_fail_open_redis_cache_not_locmem(self):
+        result = self.load_settings(
+            self.valid(), expr="(s.CACHES['default']['BACKEND'], s.CACHES['default']['LOCATION'])",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(), "('config.cache.FailOpenRedisCache', 'redis://localhost:6379/2')",
+        )
+
+    def test_development_keeps_the_default_local_cache(self):
+        result = self.load_settings({}, expr="'CACHES' in dir(s)")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "False")

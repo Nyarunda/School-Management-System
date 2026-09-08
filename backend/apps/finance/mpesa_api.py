@@ -5,6 +5,7 @@ from rest_framework.generics import ListAPIView, RetrieveAPIView
 from rest_framework.exceptions import NotFound
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.students.models import Student
@@ -124,6 +125,8 @@ def _resolve_mpesa_config_or_404(callback_token):
 class MpesaC2BValidationView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "mpesa_callback"
 
     def post(self, request, callback_token):
         config = _resolve_mpesa_config_or_404(callback_token)
@@ -134,6 +137,8 @@ class MpesaC2BValidationView(APIView):
 class MpesaC2BConfirmationView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "mpesa_callback"
 
     def post(self, request, callback_token):
         config = _resolve_mpesa_config_or_404(callback_token)
@@ -146,6 +151,8 @@ class MpesaC2BConfirmationView(APIView):
 class MpesaStkCallbackView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "mpesa_callback"
 
     def post(self, request, callback_token, request_id=None):
         config = _resolve_mpesa_config_or_404(callback_token)

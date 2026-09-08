@@ -200,6 +200,50 @@ class MpesaApiTests(TestCase):
             self.assertEqual(response.status_code, 200)
         self.assertEqual(MpesaCallbackLog.objects.filter(status="RECEIVED").count(), 2)
 
+    def test_webhook_views_are_throttled_on_their_own_scope(self):
+        from apps.finance.mpesa_api import MpesaC2BConfirmationView, MpesaC2BValidationView, MpesaStkCallbackView
+        from rest_framework.throttling import ScopedRateThrottle
+
+        for view_class in (MpesaC2BValidationView, MpesaC2BConfirmationView, MpesaStkCallbackView):
+            self.assertEqual(view_class.throttle_classes, [ScopedRateThrottle])
+            self.assertEqual(view_class.throttle_scope, "mpesa_callback")
+
+    def test_a_throttled_webhook_request_leaves_no_partial_state(self):
+        """A 429 must happen before log_mpesa_callback runs at all -- proving
+        throttling can't leave a half-written callback record, and (since
+        Milestone 22.1 deliberately keeps this rate generous) that retrying
+        after a 429 is always safe because nothing was recorded the first time.
+
+        DRF throttle classes snapshot DEFAULT_THROTTLE_RATES into a class
+        attribute at import time -- override_settings(REST_FRAMEWORK=...)
+        doesn't reach already-imported throttle classes, so the rate is
+        patched directly on ScopedRateThrottle instead.
+        """
+        from unittest.mock import patch
+
+        from django.core.cache import cache
+        from rest_framework.throttling import ScopedRateThrottle
+
+        config = self._configure()
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+        with patch.object(ScopedRateThrottle, "THROTTLE_RATES", {"mpesa_callback": "1/min"}):
+            first = self.client.post(
+                f"/api/v1/finance/mpesa/{config['callback_token']}/c2b/validation/",
+                {"TransID": "QGH900", "TransAmount": "1000", "BillRefNumber": self.student.admission_number},
+                format="json",
+            )
+            self.assertEqual(first.status_code, 200)
+            second = self.client.post(
+                f"/api/v1/finance/mpesa/{config['callback_token']}/c2b/validation/",
+                {"TransID": "QGH901", "TransAmount": "1000", "BillRefNumber": self.student.admission_number},
+                format="json",
+            )
+            self.assertEqual(second.status_code, 429)
+
+        self.assertEqual(MpesaCallbackLog.objects.filter(status="RECEIVED").count(), 1)
+
     def test_stk_push_malformed_student_id_is_a_400_not_a_500(self):
         self._configure()
 
