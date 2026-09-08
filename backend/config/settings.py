@@ -30,6 +30,7 @@ INSTALLED_APPS = [
     "apps.staff",
     "apps.leave",
     "apps.documents",
+    "apps.reporting",
 ]
 
 MIDDLEWARE = [
@@ -125,6 +126,14 @@ CELERY_BEAT_SCHEDULE = {
     "documents-purge-expired": {
         "task": "apps.documents.tasks.purge_expired_documents_task",
         "schedule": 3600.0,
+    },
+    "reports-generate-pending-exports": {
+        "task": "apps.reporting.tasks.generate_pending_report_exports",
+        "schedule": 60.0,
+    },
+    "reports-reap-stale-exports": {
+        "task": "apps.reporting.tasks.reap_stale_report_exports",
+        "schedule": 300.0,
     },
 }
 

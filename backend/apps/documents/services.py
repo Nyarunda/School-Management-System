@@ -1,5 +1,5 @@
 import hashlib
-import mimetypes
+import os
 import re
 import uuid
 from datetime import timedelta
@@ -21,6 +21,7 @@ ALLOWED_CONTENT_TYPES = {
     "application/pdf": ".pdf",
     "image/jpeg": ".jpg",
     "image/png": ".png",
+    "text/csv": ".csv",
 }
 MAX_UPLOAD_SIZE_BYTES = 10 * 1024 * 1024
 CHUNK_SIZE = 64 * 1024
@@ -61,7 +62,7 @@ def _compute_retention_expiry(tenant):
     return timezone.now() + timedelta(days=setup.default_retention_days)
 
 
-def upload_document(*, tenant, uploaded_by, file_obj, original_filename, content_type):
+def upload_document(*, tenant, uploaded_by, file_obj, original_filename, content_type, retention_days=None):
     """Streams file_obj while hashing and counting bytes -- size_bytes is
     always the ACTUAL number of bytes written, never a trusted
     client-supplied size. An oversized upload is caught mid-stream (never
@@ -75,12 +76,23 @@ def upload_document(*, tenant, uploaded_by, file_obj, original_filename, content
     own return -- can't be closed transactionally; that's what
     find_orphaned_storage_keys/the purge_orphaned_documents management
     command exist for.
+
+    retention_days, when given, overrides the tenant's DocumentSetup
+    default outright -- for a caller (e.g. Reporting's generated exports)
+    whose retention is fixed platform policy, not a tenant setup choice.
+    Leaving it None (the default) preserves the existing snapshot-from-
+    DocumentSetup behavior for every other caller.
     """
     extension = ALLOWED_CONTENT_TYPES.get(content_type)
     if extension is None:
         raise ValidationError(f"Unsupported content type: {content_type}")
-    guessed_type, _ = mimetypes.guess_type(original_filename or "")
-    if guessed_type is not None and guessed_type != content_type:
+    # Checked against our own ALLOWED_CONTENT_TYPES mapping, not the stdlib
+    # mimetypes module -- on Windows, mimetypes.guess_type consults the
+    # registry, which associates .csv with application/vnd.ms-excel (an
+    # installed Excel's file association) rather than text/csv, making an
+    # OS-dependent guess an unreliable source of truth here.
+    _, actual_extension = os.path.splitext(original_filename or "")
+    if actual_extension.lower() != extension:
         raise ValidationError("File extension does not match the declared content type")
 
     filename = _sanitize_filename(original_filename)
@@ -93,10 +105,14 @@ def upload_document(*, tenant, uploaded_by, file_obj, original_filename, content
             tenant=tenant, key=storage_key,
             chunks=_hashing_size_checked_chunks(file_obj, digest=digest, size_holder=size_holder),
         )
+        if retention_days is not None:
+            retention_expires_at = timezone.now() + timedelta(days=retention_days)
+        else:
+            retention_expires_at = _compute_retention_expiry(tenant)
         document = Document.objects.create(
             tenant=tenant, storage_key=storage_key, original_filename=filename, content_type=content_type,
             size_bytes=size_holder["size"], checksum_sha256=digest.hexdigest(), uploaded_by=uploaded_by,
-            retention_expires_at=_compute_retention_expiry(tenant),
+            retention_expires_at=retention_expires_at,
         )
     except Exception:
         backend.delete(tenant=tenant, key=storage_key)

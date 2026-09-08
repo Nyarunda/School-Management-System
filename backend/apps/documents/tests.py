@@ -176,6 +176,15 @@ class RetentionTests(DocumentFoundationTests):
         first.refresh_from_db()
         self.assertIsNotNone(first.retention_expires_at)
 
+    def test_explicit_retention_days_overrides_the_tenant_setup(self):
+        configure_document_setup(user=self.admin, tenant=self.tenant, default_retention_days=30)
+        document = upload_document(
+            tenant=self.tenant, uploaded_by=self.admin, file_obj=make_upload(),
+            original_filename="c.pdf", content_type="application/pdf", retention_days=7,
+        )
+        expected = timezone.now() + timezone.timedelta(days=7)
+        self.assertLess(abs((document.retention_expires_at - expected).total_seconds()), 5)
+
 
 class PurgeExpiredDocumentsTests(DocumentFoundationTests):
     def _make_expired_document(self, name="expired.pdf"):

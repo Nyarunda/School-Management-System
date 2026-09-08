@@ -30,6 +30,7 @@ from .models import (
     GradingScheme,
     MarkStatus,
 )
+from .selectors import results_sheet_rows
 from .services import (
     add_grading_band,
     approve_assessment,
@@ -419,3 +420,35 @@ class LifecycleTests(AssessmentFoundationTests):
                 subject=foreign_subject, assessment_type=foreign_type, name="CAT 1",
                 max_marks=Decimal("100"), scheduled_date=date(2026, 2, 1),
             )
+
+
+class ResultsSheetRowsTests(AssessmentFoundationTests):
+    """Milestone 20 -- the query function apps.reporting's catalogue calls
+    for assessments.results_sheet.
+    """
+
+    def test_returns_one_row_per_student_per_assessment(self):
+        self.make_grading_scheme()
+        assessment, _ = self.open_assessment()
+        record_assessment_marks(
+            user=self.teacher, tenant=self.school_a, assessment=assessment,
+            entries=[
+                {"student": self.student, "mark_status": MarkStatus.SCORED, "score": Decimal("85")},
+                {"student": self.other_student, "mark_status": MarkStatus.SCORED, "score": Decimal("40")},
+            ],
+        )
+        rows = results_sheet_rows(tenant=self.school_a, class_group_id=str(self.class_group.id), term_id=str(self.term.id))
+        by_admission = {row["admission_number"]: row for row in rows}
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(by_admission["ADM-001"]["score"], Decimal("85"))
+        self.assertEqual(by_admission["ADM-001"]["grade"], "A")
+        self.assertEqual(by_admission["ADM-001"]["subject"], "Math")
+
+    def test_scoped_to_the_requested_class_and_term(self):
+        self.make_grading_scheme()
+        self.open_assessment()
+        other_term = Term.objects.create(
+            tenant=self.school_a, academic_year=self.year, name="Term 2", starts_on=date(2026, 5, 1), ends_on=date(2026, 8, 31), sequence=2,
+        )
+        rows = results_sheet_rows(tenant=self.school_a, class_group_id=str(self.class_group.id), term_id=str(other_term.id))
+        self.assertEqual(rows, [])

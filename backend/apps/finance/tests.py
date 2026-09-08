@@ -25,7 +25,7 @@ from .models import (
     ReconciliationStatus,
     Receipt,
 )
-from .selectors import student_balance
+from .selectors import collections_summary_rows, fee_statement_rows, student_balance
 from .services import (
     add_fee_structure_line,
     allocate_payment,
@@ -707,3 +707,44 @@ class ReconciliationTests(TestCase):
         # The raw external id is never copied onto Payment itself -- the
         # OneToOne relationship is the sole place provenance lives.
         self.assertNotEqual(payment.external_reference, "bank-provenance")
+
+
+class ReportSelectorTests(PaymentTests):
+    """Milestone 20 -- the query functions apps.reporting's catalogue calls
+    for finance.fee_statement/finance.collections_summary.
+    """
+
+    def test_fee_statement_rows_reflects_invoice_debit_and_payment_credit(self):
+        payment = self._record_payment()
+        allocate_payment(user=self.user, tenant=self.school_a, payment=payment, invoice=self.invoice, amount=Decimal("50000.00"))
+        rows = fee_statement_rows(tenant=self.school_a, student_id=str(self.student.id), as_of=date(2100, 1, 1))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["debit"], Decimal("50000.00"))
+        self.assertIn("Invoice", rows[0]["description"])
+        self.assertEqual(rows[1]["credit"], Decimal("50000.00"))
+        self.assertEqual(rows[-1]["running_balance"], Decimal("0.00"))
+
+    def test_fee_statement_rows_excludes_entries_after_as_of(self):
+        self._record_payment()
+        rows = fee_statement_rows(tenant=self.school_a, student_id=str(self.student.id), as_of=date(2000, 1, 1))
+        self.assertEqual(rows, [])
+
+    def test_fee_statement_rows_rejects_a_student_outside_the_tenant(self):
+        other_tenant = Tenant.objects.create(name="Other", slug="other")
+        outsider = Student.objects.create(tenant=other_tenant, admission_number="X-1", first_name="X", last_name="Y")
+        with self.assertRaises(ValidationError):
+            fee_statement_rows(tenant=self.school_a, student_id=str(outsider.id), as_of=date(2100, 1, 1))
+
+    def test_collections_summary_rows_aggregates_by_date_and_method(self):
+        self._record_payment()
+        rows = collections_summary_rows(tenant=self.school_a, start_date=date(2000, 1, 1), end_date=date(2100, 1, 1))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["payment_method"], "Bank transfer")
+        self.assertEqual(rows[0]["payment_count"], 1)
+        self.assertEqual(rows[0]["total_amount"], Decimal("50000.00"))
+
+    def test_collections_summary_rows_excludes_reversed_payments(self):
+        payment = self._record_payment()
+        reverse_payment(user=self.user, tenant=self.school_a, payment=payment, reason="Bounced cheque")
+        rows = collections_summary_rows(tenant=self.school_a, start_date=date(2000, 1, 1), end_date=date(2100, 1, 1))
+        self.assertEqual(rows, [])

@@ -8,6 +8,7 @@ from apps.documents.testing import TemporaryDocumentStorageMixin, make_upload
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
 from .models import Employee, EmploymentStatus
+from .selectors import employee_register_rows
 from .services import (
     add_employee_document,
     add_employee_qualification,
@@ -332,3 +333,29 @@ class UserLinkTests(StaffFoundationTests):
         employee = self.make_employee(campus=self.other_campus)
         with self.assertRaises(ValidationError):
             link_user_account(user=self.scoped_admin, tenant=self.school_a, employee=employee, user_account=self.teacher_user)
+
+
+class EmployeeRegisterRowsTests(StaffFoundationTests):
+    """Milestone 20 -- the query function apps.reporting's catalogue calls
+    for staff.employee_register.
+    """
+
+    def test_returns_all_employees_by_default(self):
+        self.make_employee(campus=self.campus)
+        self.make_employee(employee_number="EMP-002", campus=self.other_campus)
+        rows = employee_register_rows(tenant=self.school_a)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["employee_number"], "EMP-001")
+        self.assertEqual(rows[0]["campus"], "Main")
+
+    def test_filters_by_campus(self):
+        self.make_employee(campus=self.campus)
+        self.make_employee(employee_number="EMP-002", campus=self.other_campus)
+        rows = employee_register_rows(tenant=self.school_a, campus_id=str(self.other_campus.id))
+        self.assertEqual([row["employee_number"] for row in rows], ["EMP-002"])
+
+    def test_filters_by_status(self):
+        employee = self.make_employee(campus=self.campus)
+        change_employment_status(user=self.admin, tenant=self.school_a, employee=employee, status=EmploymentStatus.SUSPENDED)
+        rows = employee_register_rows(tenant=self.school_a, status=EmploymentStatus.SUSPENDED)
+        self.assertEqual([row["employee_number"] for row in rows], ["EMP-001"])

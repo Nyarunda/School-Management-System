@@ -13,6 +13,7 @@ from apps.students.models import Student
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
 from .models import AttendanceRecord, AttendanceSession, AttendanceSessionStatus, AttendanceSetup, AttendanceStatus
+from .selectors import absence_summary_rows
 from .services import open_attendance_session, record_attendance_bulk, submit_attendance_session
 
 
@@ -348,3 +349,36 @@ class SubmitAttendanceSessionTests(AttendanceFoundationTests):
         submit_attendance_session(user=self.teacher, tenant=self.school_a, session=session)
         with self.assertRaisesMessage(ValidationError, "already been submitted"):
             submit_attendance_session(user=self.teacher, tenant=self.school_a, session=session)
+
+
+class AbsenceSummaryRowsTests(AttendanceFoundationTests):
+    """Milestone 20 -- the query function apps.reporting's catalogue calls
+    for attendance.absence_summary.
+    """
+
+    def test_summary_counts_absences_and_late_per_student(self):
+        session, _ = self.open_session()
+        record_attendance_bulk(
+            user=self.teacher, tenant=self.school_a, session=session,
+            entries=[
+                {"student": self.student, "status": AttendanceStatus.ABSENT},
+                {"student": self.other_student, "status": AttendanceStatus.LATE},
+            ],
+        )
+        rows = absence_summary_rows(tenant=self.school_a, start_date=self.session_date, end_date=self.session_date)
+        by_admission = {row["admission_number"]: row for row in rows}
+        self.assertEqual(by_admission["ADM-001"]["absent_count"], 1)
+        self.assertEqual(by_admission["ADM-001"]["total_sessions"], 1)
+        self.assertEqual(by_admission["ADM-002"]["late_count"], 1)
+
+    def test_filters_by_campus(self):
+        session, _ = self.open_session()
+        record_attendance_bulk(
+            user=self.teacher, tenant=self.school_a, session=session,
+            entries=[{"student": self.student, "status": AttendanceStatus.ABSENT}],
+        )
+        rows = absence_summary_rows(
+            tenant=self.school_a, start_date=self.session_date, end_date=self.session_date,
+            campus_id=str(self.other_campus.id),
+        )
+        self.assertEqual(rows, [])
