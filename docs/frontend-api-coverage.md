@@ -4,7 +4,7 @@ The authoritative, kept-current integration ledger. Updated whenever a wiring sl
 
 Rows below with exact paths were confirmed by reading the actual backend `urls.py`/`api.py` and the actual frontend call site — not inferred. Domains not yet given a dedicated wiring pass (marked "not yet detailed") are tracked at summary level only, using the original 2026-09-09 audit's counts; their exact endpoint list gets filled in here when that domain's slice is picked up, rather than guessed now.
 
-## Finance (core) — Full
+## Finance (core) — Partial (Credit Note creation closed this slice; Allocation Reversal, Payment detail, Ledger, and Fee Category/Item creation still open)
 
 | Endpoint | Method | Permission | Frontend | Connected | Workflow complete |
 |---|---|---|---|---|---|
@@ -15,15 +15,21 @@ Rows below with exact paths were confirmed by reading the actual backend `urls.p
 | `/finance/student-fee-assignments/<id>/generate-invoice/` | POST | `finance.invoice.create` | `AssignmentsPage` | ✅ | ✅ |
 | `/finance/invoices/` | GET | `finance.invoice.view` | `InvoicesPage` | ✅ | ✅ (raw student id — `STUDENT-GAP-02`) |
 | `/finance/invoices/<id>/issue/` | POST | `finance.invoice.issue` | `InvoicesPage` | ✅ | ✅ |
+| `/finance/credit-notes/` | POST | `finance.credit_note.create` | `InvoicesPage` — new row action on `ISSUED` invoices, closed in the Invoices List Workspace migration | ✅ | ✅ |
+| `/finance/credit-notes/` | GET | `finance.student_account.view` | none | ❌ | Backend has no `invoice`/`student` filter, so a bounded "credit notes for this invoice" view isn't possible without over-fetching the full tenant-wide list; a standalone Credit Notes browsing page wasn't part of this slice's scope |
 | `/finance/payments/` | GET/POST | `finance.payment.view`/`.record` | `PaymentsPage` | ✅ | ✅ (raw student id — `STUDENT-GAP-02`) |
 | `/finance/payments/<id>/allocate/` | POST | `finance.payment.allocate` | `PaymentsPage` | ✅ | ✅ |
 | `/finance/payments/<id>/reverse/` | POST | `finance.payment.reverse` | `PaymentsPage` | ✅ | ✅ |
+| `/finance/payments/<id>/` | GET | `finance.payment.view` | none | ❌ | Redundant today — the list row already carries everything this serializer returns |
+| `/finance/payment-allocations/<id>/reverse/` | POST | `finance.allocation.reverse` | none | ❌ | Narrower than whole-payment reversal; queued for the Payments migration slice |
+| `/finance/ledger-entries/` | GET | `finance.student_account.view` | none | ❌ | Not yet detailed |
 | `/finance/incoming-payments/` | GET | `finance.reconciliation.view` | `IncomingPage` | ✅ | ✅ |
 | `/finance/incoming-payments/<id>/match/` | POST | `finance.reconciliation.match` | `IncomingPage` | ✅ | ✅ |
 | `/finance/incoming-payments/<id>/ignore/` | POST | `finance.reconciliation.ignore` | `IncomingPage` | ✅ | ✅ |
 | `/finance/payment-methods/` | GET | `finance.payment.record` | `IncomingPage`/`PaymentsPage` lookup | ✅ | ✅ |
 | `/finance/setup/` | GET | `finance.setup.view` | `pages.tsx` `SetupPage` (read-only) | ✅ | Partial — no edit UI (out of scope this slice) |
 | `/finance/students/<id>/finance/` | GET | `finance.student_account.view` | `StudentPage` Fees tab | ✅ | ✅ |
+| `/finance/fee-categories/`, `/finance/fee-items/` | POST | `finance.setup.manage` | none | ❌ | Read-only today (`FeeStructuresPage` only lists existing items for the line-add picker) — no UI to create a new category/item |
 | `/academics/academic-years/`, `/academics/academic-levels/` | GET | `academics.setup.view` | `FeeStructuresPage` | ✅ | ✅ |
 
 ## M-Pesa — Full

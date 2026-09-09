@@ -7,6 +7,7 @@ from django.utils import timezone
 from apps.academics.models import (
     AcademicLevel, AcademicYear, ClassGroup, EnrollmentStatus, StudentEnrollment, Subject, TeacherAssignment,
 )
+from apps.finance.models import NumberSeries
 from apps.leave.models import LeaveApprovalWorkflow, LeaveApprovalWorkflowStage, LeaveType
 from apps.platform.catalogue import MODULE_CATALOGUE
 from apps.platform.models import SubscriptionPlan, TenantSubscription
@@ -59,6 +60,7 @@ class Command(BaseCommand):
         self._provision_students(tenant=tenant, campus=campus, year=year, levels=levels, class_groups=class_groups)
         self._provision_staff(tenant=tenant, campus=campus, teacher_user=teacher_user)
         self._provision_leave_workflow(tenant)
+        self._provision_finance_number_series(tenant)
 
         self.stdout.write(self.style.SUCCESS(f"\nDemo tenant ready: {tenant.name} ({tenant.slug})"))
         self.stdout.write("Log in with either account (tenant is selected automatically after login):")
@@ -160,6 +162,15 @@ class Command(BaseCommand):
                 "employment_type": EmploymentType.PERMANENT, "hire_date": date.today() - timedelta(days=720),
             },
         )
+
+    def _provision_finance_number_series(self, tenant):
+        # generate_invoice/issue_credit_note/record_payment/reverse_payment all
+        # hard-require a NumberSeries row per document type (services.py's
+        # _next_number raises ValidationError otherwise) -- mirrors the two
+        # series loadtest_provision.py already sets up, extended to all four
+        # document types Finance actually issues.
+        for document_type, prefix in [("INVOICE", "INV-"), ("CREDIT_NOTE", "CRN-"), ("RECEIPT", "RCT-"), ("PAYMENT_REVERSAL", "REV-")]:
+            NumberSeries.objects.get_or_create(tenant=tenant, document_type=document_type, defaults={"prefix": prefix, "padding": 6})
 
     def _provision_leave_workflow(self, tenant):
         line_manager_role, _ = Role.objects.get_or_create(tenant=tenant, name="Line Manager", defaults={"permissions": ["leave.approve"]})

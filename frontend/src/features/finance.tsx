@@ -1,9 +1,12 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, Page } from "../api/client";
+import { Alert, Button, NumberInput, Stack, Text, Textarea, TextInput } from "@mantine/core";
+import { api, ApiError, Page } from "../api/client";
 import { useAccess } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
 import { Column, DataTable } from "../components/DataTable";
+import { FilterBar } from "../components/FilterBar";
+import { WorkspaceHeader } from "../components/WorkspaceHeader";
 import { notify } from "../components/notifications/notify";
 import { Empty, ErrorState, PageHeader, StatusBadge } from "../components/ui";
 
@@ -24,6 +27,7 @@ const cash=(v:string|number)=>kes.format(Number(v));
 const when=(v:string|null)=>v?new Intl.DateTimeFormat("en-KE",{dateStyle:"medium",timeStyle:"short"}).format(new Date(v)):"—";
 function usePaged<T>(key:string,path:string,params?:Record<string,string|number|undefined>){const [page,setPage]=useState(1);const query=useQuery({queryKey:[key,page,params],queryFn:()=>api<Page<T>>(path,{params:{page,...params}})});return {page,setPage,query,rows:query.data?.results??[]};}
 function Failure({error}:{error:unknown}){return error?<div className="form-error" role="alert">{error instanceof Error?error.message:"The action failed"}</div>:null}
+const errorText=(error:unknown)=>error instanceof ApiError?error.message:error instanceof Error?error.message:"The action failed";
 
 export function FinanceOverview(){return <><PageHeader eyebrow="Finance" title="Finance operations" description="Move from approved charges to invoices, collections and reconciled student accounts."/><div className="workflow-strip"><a href="/finance/fees"><b>1</b><span><strong>Set fees</strong><small>Approve charging schedules</small></span></a><a href="/finance/assignments"><b>2</b><span><strong>Assign & invoice</strong><small>Generate student charges</small></span></a><a href="/finance/payments"><b>3</b><span><strong>Collect & allocate</strong><small>Apply money to invoices</small></span></a><a href="/finance/incoming"><b>4</b><span><strong>Reconcile</strong><small>Resolve incoming money</small></span></a></div></>}
 
@@ -88,7 +92,59 @@ export function FeeStructuresPage(){
 
 export function AssignmentsPage(){const {can}=useAccess();const qc=useQueryClient();const data=usePaged<Assignment>("assignments","/finance/student-fee-assignments/");const students=useQuery({queryKey:["assignment-students"],queryFn:()=>api<Page<Student>>("/students/",{params:{page_size:100}}),enabled:can("finance.fee_structure.edit")});const structures=useQuery({queryKey:["assignment-structures"],queryFn:()=>api<Page<Structure>>("/finance/fee-structures/",{params:{page_size:100}}),enabled:can("finance.fee_structure.edit")});const [open,setOpen]=useState(false);const [student,setStudent]=useState("");const [structure,setStructure]=useState("");const create=useMutation({mutationFn:()=>api("/finance/student-fee-assignments/",{method:"POST",body:JSON.stringify({student,fee_structure:structure})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});setOpen(false);notify.success("Fee structure assigned to student")},onError:error=>notify.error("Fee assignment could not be created",error)});const generate=useMutation({mutationFn:(id:string)=>api(`/finance/student-fee-assignments/${id}/generate-invoice/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});void qc.invalidateQueries({queryKey:["invoices"]});notify.success("Invoice generated")},onError:error=>notify.error("Invoice could not be generated",error)});const columns:Column<Assignment>[]=[{key:"student",header:"Student",cell:r=><strong>{r.student_name}</strong>},{key:"structure",header:"Fee structure",cell:r=>r.fee_structure_name},{key:"status",header:"Status",cell:r=><StatusBadge value={r.status}/>},{key:"assigned",header:"Assigned",cell:r=>when(r.assigned_at)},{key:"action",header:"",cell:r=>can("finance.invoice.create")?<button className="button secondary" disabled={generate.isPending} onClick={e=>{e.stopPropagation();generate.mutate(r.id)}}>Generate invoice</button>:null}];return <><PageHeader eyebrow="Finance · Billing" title="Fee assignments" description="Assign an approved fee structure, then generate the student's draft invoice." action={can("finance.fee_structure.edit")?<button className="button primary" onClick={()=>setOpen(true)}>+ Assign fees</button>:undefined}/><Failure error={generate.error}/><DataTable {...data} loading={data.query.isLoading} error={data.query.error} retry={()=>void data.query.refetch()} columns={columns} rowKey={r=>r.id} count={data.query.data?.count} previous={!!data.query.data?.previous} next={!!data.query.data?.next} onPage={data.setPage}/><ActionDialog open={open} title="Assign fee structure" description="Only approved structures are offered." confirmLabel="Assign fees" busy={create.isPending} onClose={()=>setOpen(false)} onSubmit={e=>{e.preventDefault();create.mutate()}}><Failure error={create.error}/><label>Student<select required value={student} onChange={e=>setStudent(e.target.value)}><option value="">Select student</option>{students.data?.results.map(s=><option key={s.id} value={s.id}>{s.full_name} · {s.admission_number}</option>)}</select></label><label>Approved fee structure<select required value={structure} onChange={e=>setStructure(e.target.value)}><option value="">Select structure</option>{structures.data?.results.filter(s=>s.is_approved).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label></ActionDialog></>}
 
-export function InvoicesPage(){const {can}=useAccess();const qc=useQueryClient();const data=usePaged<Invoice>("invoices","/finance/invoices/");const issue=useMutation({mutationFn:(id:string)=>api(`/finance/invoices/${id}/issue/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["invoices"]});notify.success("Invoice issued")},onError:error=>notify.error("Invoice could not be issued",error)});const columns:Column<Invoice>[]=[{key:"number",header:"Invoice",cell:r=><strong>{r.invoice_number}</strong>},{key:"student",header:"Student",cell:r=><code>{r.student}</code>},{key:"total",header:"Total",cell:r=>cash(r.total)},{key:"status",header:"Status",cell:r=><StatusBadge value={r.status}/>},{key:"date",header:"Issued",cell:r=>when(r.issued_at)},{key:"action",header:"",cell:r=>r.status==="DRAFT"&&can("finance.invoice.issue")?<button className="button secondary" disabled={issue.isPending} onClick={()=>issue.mutate(r.id)}>Issue invoice</button>:null}];return <><PageHeader eyebrow="Finance · Billing" title="Invoices" description="Issue draft invoices only after checking the student and total."/><Failure error={issue.error}/><DataTable {...data} loading={data.query.isLoading} error={data.query.error} retry={()=>void data.query.refetch()} columns={columns} rowKey={r=>r.id} count={data.query.data?.count} previous={!!data.query.data?.previous} next={!!data.query.data?.next} onPage={data.setPage}/></>}
+export function InvoicesPage(){
+	const {can}=useAccess();
+	const qc=useQueryClient();
+	const [page,setPage]=useState(1);
+	// Exact match only -- the backend has no search/name-resolution endpoint
+	// (STUDENT-GAP-02), so this stays a raw id field rather than a picker that
+	// would silently imply a complete, searchable student catalogue.
+	const [studentId,setStudentId]=useState("");
+	const invoices=useQuery({queryKey:["invoices",page,studentId],queryFn:()=>api<Page<Invoice>>("/finance/invoices/",{params:{page,student:studentId||undefined}})});
+	const issue=useMutation({mutationFn:(id:string)=>api(`/finance/invoices/${id}/issue/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["invoices"]});notify.success("Invoice issued")},onError:error=>notify.error("Invoice could not be issued",error)});
+
+	const [creditTarget,setCreditTarget]=useState<Invoice|null>(null);
+	const [creditAmount,setCreditAmount]=useState<number|"">("");
+	const [creditReason,setCreditReason]=useState("");
+	const createCredit=useMutation({
+		mutationFn:()=>api("/finance/credit-notes/",{method:"POST",body:JSON.stringify({student:creditTarget!.student,invoice:creditTarget!.id,amount:creditAmount,reason:creditReason})}),
+		onSuccess:()=>{void qc.invalidateQueries({queryKey:["invoices"]});setCreditTarget(null);notify.success("Credit note issued")},
+		onError:error=>notify.error("Credit note could not be issued",error),
+	});
+
+	const columns:Column<Invoice>[]=[
+		{key:"number",header:"Invoice",cell:r=><Text size="sm" fw={600}>{r.invoice_number}</Text>},
+		{key:"student",header:"Student",cell:r=><Text size="sm" ff="monospace">{r.student}</Text>},
+		{key:"total",header:"Total",cell:r=>cash(r.total)},
+		{key:"status",header:"Status",cell:r=><StatusBadge value={r.status}/>},
+		{key:"date",header:"Issued",cell:r=>when(r.issued_at)},
+		{key:"action",header:"",cell:r=>{
+			if(r.status==="DRAFT"&&can("finance.invoice.issue"))return <Button size="xs" variant="default" disabled={issue.isPending} onClick={e=>{e.stopPropagation();issue.mutate(r.id)}}>Issue invoice</Button>;
+			// Not offered against DRAFT invoices (nothing has been charged yet -- fix
+			// the assignment instead) and VOID has no transition anywhere in the API,
+			// so this is deliberately ISSUED-only, matching the one real use case.
+			if(r.status==="ISSUED"&&can("finance.credit_note.create"))return <Button size="xs" variant="default" onClick={e=>{e.stopPropagation();setCreditTarget(r);setCreditAmount("");setCreditReason("")}}>Create credit note</Button>;
+			return null;
+		}},
+	];
+
+	return <>
+		<WorkspaceHeader title="Invoices" description="Review and issue student invoices."/>
+		<DataTable title="Invoices" columns={columns} rows={invoices.data?.results??[]} rowKey={r=>r.id} loading={invoices.isLoading} error={invoices.error} retry={()=>void invoices.refetch()} onRefresh={()=>void invoices.refetch()}
+			count={invoices.data?.count} page={page} previous={!!invoices.data?.previous} next={!!invoices.data?.next} onPage={setPage}
+			toolbar={<FilterBar>
+				<TextInput label="Student" placeholder="Exact student id" size="xs" w={300} value={studentId} onChange={e=>{setStudentId(e.currentTarget.value);setPage(1)}}/>
+			</FilterBar>}
+		/>
+		<ActionDialog open={!!creditTarget} title="Create credit note" description={creditTarget?`Issues a credit note against invoice ${creditTarget.invoice_number}. This cannot be undone.`:undefined} confirmLabel="Create credit note" busy={createCredit.isPending} onClose={()=>setCreditTarget(null)} onSubmit={e=>{e.preventDefault();createCredit.mutate()}}>
+			<Stack gap="sm">
+				{createCredit.error&&<Alert color="red" variant="light">{errorText(createCredit.error)}</Alert>}
+				<NumberInput label="Amount (KES)" required min={0.01} decimalScale={2} value={creditAmount} onChange={value=>setCreditAmount(value===""||value===undefined?"":Number(value))}/>
+				<Textarea label="Reason" required maxLength={240} value={creditReason} onChange={e=>setCreditReason(e.currentTarget.value)}/>
+			</Stack>
+		</ActionDialog>
+	</>;
+}
 
 export function PaymentsPage(){
 	const {can}=useAccess();
