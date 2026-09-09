@@ -112,6 +112,40 @@ Attendance and Assessments should each get a two-route shape: a list page and a 
 
 M-Pesa keeps its own routes separate from ordinary confirmed payments (`/m-pesa/stk`, `/m-pesa/stk/:id`, `/m-pesa/callbacks`, `/m-pesa/callbacks/:id`), and the callback detail view must keep the RECEIVED/UNTRUSTED → VERIFIED → PROCESSED security boundary visually obvious — this mirrors a real backend trust boundary (see `docs/rc/BACKEND_RC.md` Area 3/4), not just a UI nicety.
 
+## Interaction & feedback standards
+
+**Choosing modal vs. drawer vs. full workspace** — by operation type, not by habit:
+
+| Operation | Interaction |
+|---|---|
+| Read / list / detail | Page, table, or a 360 workspace tab |
+| Small create/edit operation | Mantine `Modal` (this codebase's `ActionDialog`) |
+| Record investigation or larger context | Drawer, or a dedicated workspace |
+| Destructive / irreversible action | Confirmation `Modal` |
+| State transition where the consequence matters | Confirmation `Modal` |
+
+Don't turn every operation into a modal — dense workflows (Attendance registers, Assessment marks entry, Timetable scheduling, 360 workspaces) deserve full operational screens, not dialogs. As of this audit, the existing modal/workspace choices already match this: `ActionDialog` is used only for small create/edit/confirm actions (approve a fee structure, allocate/reverse a payment, record a payment, verify/reject an M-Pesa callback, add a workflow stage), while `RegisterWorkspace` (Attendance) and `AssessmentWorkspace` (Assessments) are already full operational screens for the dense roster/marks-entry interactions. Keep new work consistent with this split rather than defaulting everything to a dialog.
+
+**Feedback on every mutation** — one centralized abstraction, `frontend/src/components/notifications/notify.ts` (`notify.success(message)` / `notify.error(message, error?)` / `notify.warning(message)` / `notify.info(message)`), wrapping `@mantine/notifications`. This is the *only* place `notifications.show(...)` is called anywhere in the codebase — never call it directly from a feature file, and never construct a second one-off toast/sound mechanism. Rules:
+- Toasts render bottom-center (`<Notifications position="bottom-center"/>` in `main.tsx`).
+- Every mutation calls `notify.success(...)` in `onSuccess` and `notify.error(...)` in `onError`, **in addition to**, not instead of, the existing inline field-level error display (each feature file's local `Failure` component) — inline stays the detailed/field-level error, the toast is the at-a-glance outcome.
+- Messages are domain-specific and match the actual action ("Payment recorded successfully", "Invoice issued", "Fee structure approved") — never generic ("Success!", "Something went wrong.").
+- `notify.error` automatically overrides the message to "You do not have permission to perform this action" whenever the underlying error is a 403 (`ApiError` with `status === 403`), regardless of what the call site passed in.
+- Sound (`frontend/src/components/notifications/notificationSound.ts`) plays only on success/error (never on ordinary queries, page loads, or warning/info toasts), is a short WebAudio oscillator tone (no audio asset files), is **off by default**, and is user-toggleable (the sidebar-foot "Sound on/off" button in `components/Shell.tsx`, mirroring the existing density toggle). Never assume sound is available or audible — it fails silently if the browser blocks `AudioContext`.
+
+## Coverage-audit backlog (frontend/backend API wiring)
+
+A full audit (2026-09-09) found the backend has ~130 endpoints; Finance, M-Pesa, Attendance, Assessments, and Leave-workflow-setup have real dedicated UIs, but Documents, Reporting, Notifications, Tenancy Administration, Platform Admin, and Timetable have only generic read-only list coverage or less — roughly 33 working backend endpoints have no frontend caller at all. Completion bar for each: **"endpoint connected" is not "workflow complete"** — a report catalogue `GET` reaching a table isn't Reporting done if preview/export/download have no UI. Remaining wiring work, in priority order:
+
+1. **Notifications + Documents + Reporting** — cross-cutting, currently the weakest coverage; Reporting's export/download makes the RC Area 3 audit-trail code reachable for the first time.
+2. **Tenancy Administration** (permission catalogue, role create/edit, membership activate/deactivate, user invite) — blocks normal operation today (nobody can invite a user or edit a role's permissions from the app).
+3. **Platform Admin remainder** (plan edit/delete, tenant subscription edit, module overrides, per-tenant audit).
+4. **Timetable** (periods + entry CRUD, class/teacher schedule views).
+5. **Leave request lifecycle** (submit/decide/withdraw/cancel) — backend fully built and tested, contract already documented in the coverage-audit plan history.
+6. **Documents CRUD** (student/employee upload/download/delete) — folded into slice 1 when picked up.
+
+Do not invent an endpoint or fabricate data to make a domain look complete — where the backend genuinely has no contract (Guardians has zero API surface; Attendance/Assessment creation needs catalogue endpoints that don't exist), record it in `docs/frontend-backend-contract-gaps.md` instead.
+
 ## What this doc is not
 
 This is direction for future frontend work, not a task list executed all at once. Each piece above gets its own scoped plan when it's actually picked up — see `docs/frontend-backend-contract-gaps.md` for backend API gaps already blocking specific pieces of this (class-group catalogue, attendance/assessment roster identity, assessment reference catalogues).
