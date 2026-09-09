@@ -33,7 +33,8 @@ Rows below with exact paths were confirmed by reading the actual backend `urls.p
 | `/finance/mpesa/stk-push/` | POST | `finance.mpesa.stk_push.initiate` | `mpesa.tsx` `StkWorkspace` | ✅ | ✅ |
 | `/finance/mpesa/stk-requests/` | GET | `finance.mpesa.stk_push.view` | `StkWorkspace` | ✅ | ✅ |
 | `/finance/mpesa/stk-requests/<id>/query/` | POST | `finance.mpesa.stk_push.query` | `StkWorkspace` | ✅ | ✅ |
-| `/finance/mpesa/callbacks/` | GET | `finance.mpesa.callback.view` | `CallbackWorkspace` | ✅ | ✅ |
+| `/finance/mpesa/stk-requests/<id>/identify/` | POST | `finance.mpesa.stk_push.reconcile` | `StkWorkspace` — was unwired, discovered and closed in the M-Pesa Operations Workspace slice | ✅ | ✅ |
+| `/finance/mpesa/callbacks/` | GET | `finance.mpesa.callback.view` (server-side `status` filter honored — first real `FilterBar` consumer) | `CallbackWorkspace` | ✅ | ✅ |
 | `/finance/mpesa/callbacks/<id>/` | GET | `finance.mpesa.callback.view` | `CallbackWorkspace` | ✅ | ✅ |
 | `/finance/mpesa/callbacks/<id>/verify/` | POST | `finance.mpesa.callback.verify` | `CallbackWorkspace` | ✅ | ✅ |
 | `/finance/mpesa/callbacks/<id>/reject/` | POST | `finance.mpesa.callback.verify` | `CallbackWorkspace` | ✅ | ✅ |
