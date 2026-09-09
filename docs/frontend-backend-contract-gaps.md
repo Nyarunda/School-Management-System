@@ -4,8 +4,7 @@ This ledger records backend representation or catalogue gaps that prevent a prod
 
 ## ACADEMIC-GAP-01 — Class-group catalogue
 
-**Status:** Open  
-**Impact:** The attendance API accepts a class-group UUID, but there is no authorised class-group list endpoint from which to populate the **Open Attendance Register** selector.
+**Status:** Closed — `GET /academics/class-groups/` (read-only), gated by `attendance.session.manage` + the `attendance` module flag, filtered to campus scope and `TeacherAssignment`/`attendance.any_class` exactly as `open_attendance_session` already authorizes. Wired into Attendance's **Open register** dialog. No new write surface, no CRUD, no change to `ACADEMIC-GAP-02` or to opening rules.
 
 ## ACADEMIC-GAP-02 — Attendance roster identity
 

@@ -3,9 +3,9 @@ from datetime import date
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from apps.tenancy.models import Membership, Role, Tenant, User
+from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
-from .models import AcademicLevel, AcademicYear
+from .models import AcademicLevel, AcademicYear, ClassGroup, Subject, TeacherAssignment
 
 
 class AcademicCatalogueApiTests(TestCase):
@@ -65,4 +65,118 @@ class AcademicCatalogueApiTests(TestCase):
 
         set_module_override(tenant=self.school_a, module_code="academics", is_enabled=False)
         response = self.client.get("/api/v1/academics/academic-years/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
+
+class ClassGroupCatalogueApiTests(TestCase):
+    """ACADEMIC-GAP-01: the class-group catalogue exists solely so
+    Attendance's Open Register action has a legitimate class_group to
+    submit, so it is gated by attendance.session.manage (not
+    academics.setup.view) and filtered to exactly what
+    apps.attendance.services._require_class_authorization would accept.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.school_a = Tenant.objects.create(name="School A", slug="school-a")
+        self.school_b = Tenant.objects.create(name="School B", slug="school-b")
+
+        self.main_campus = Campus.objects.create(tenant=self.school_a, name="Main", code="MAIN")
+        self.annex_campus = Campus.objects.create(tenant=self.school_a, name="Annex", code="ANNEX")
+        self.level = AcademicLevel.objects.create(tenant=self.school_a, name="Grade 8", code="G8", sequence=8)
+        self.subject = Subject.objects.create(tenant=self.school_a, name="Math", code="MATH")
+
+        self.assigned_class = ClassGroup.objects.create(
+            tenant=self.school_a, name="Grade 8 East", code="G8-E", academic_level=self.level, campus=self.main_campus,
+        )
+        self.unassigned_same_campus_class = ClassGroup.objects.create(
+            tenant=self.school_a, name="Grade 8 West", code="G8-W", academic_level=self.level, campus=self.main_campus,
+        )
+        self.annex_class = ClassGroup.objects.create(
+            tenant=self.school_a, name="Grade 8 Annex", code="G8-A", academic_level=self.level, campus=self.annex_campus,
+        )
+
+        self.teacher = User.objects.create_user(username="teacher", password="secret")
+        self.teacher_role = Role.objects.create(
+            tenant=self.school_a, name="Teacher", permissions=["attendance.session.manage"],
+        )
+        TeacherAssignment.objects.create(tenant=self.school_a, teacher=self.teacher, class_group=self.assigned_class, subject=self.subject)
+
+    def headers(self):
+        return {"HTTP_X_TENANT_SLUG": "school-a"}
+
+    def test_campus_scoped_teacher_sees_only_assigned_classes_in_their_campus(self):
+        Membership.objects.create(tenant=self.school_a, user=self.teacher, role=self.teacher_role, campus=self.main_campus)
+        self.client.force_authenticate(self.teacher)
+        response = self.client.get("/api/v1/academics/class-groups/", **self.headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row["code"] for row in response.data["results"]], ["G8-E"])
+
+    def test_campus_scoped_teacher_cannot_see_another_campus_even_if_assigned(self):
+        TeacherAssignment.objects.create(tenant=self.school_a, teacher=self.teacher, class_group=self.annex_class, subject=self.subject)
+        Membership.objects.create(tenant=self.school_a, user=self.teacher, role=self.teacher_role, campus=self.main_campus)
+        self.client.force_authenticate(self.teacher)
+        response = self.client.get("/api/v1/academics/class-groups/", **self.headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row["code"] for row in response.data["results"]], ["G8-E"])
+
+    def test_any_class_override_sees_every_class_in_campus_without_assignment(self):
+        override_role = Role.objects.create(
+            tenant=self.school_a, name="Head of Campus", permissions=["attendance.session.manage", "attendance.any_class"],
+        )
+        Membership.objects.create(tenant=self.school_a, user=self.teacher, role=override_role, campus=self.main_campus)
+        self.client.force_authenticate(self.teacher)
+        response = self.client.get("/api/v1/academics/class-groups/", **self.headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sorted(row["code"] for row in response.data["results"]), ["G8-E", "G8-W"])
+
+    def test_tenant_wide_membership_sees_assigned_classes_across_campuses(self):
+        TeacherAssignment.objects.create(tenant=self.school_a, teacher=self.teacher, class_group=self.annex_class, subject=self.subject)
+        Membership.objects.create(tenant=self.school_a, user=self.teacher, role=self.teacher_role, campus=None)
+        self.client.force_authenticate(self.teacher)
+        response = self.client.get("/api/v1/academics/class-groups/", **self.headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sorted(row["code"] for row in response.data["results"]), ["G8-A", "G8-E"])
+
+    def test_unassigned_teacher_sees_no_classes(self):
+        other_teacher = User.objects.create_user(username="other-teacher", password="secret")
+        Membership.objects.create(tenant=self.school_a, user=other_teacher, role=self.teacher_role, campus=self.main_campus)
+        self.client.force_authenticate(other_teacher)
+        response = self.client.get("/api/v1/academics/class-groups/", **self.headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["results"], [])
+
+    def test_class_groups_are_tenant_isolated(self):
+        foreign_campus = Campus.objects.create(tenant=self.school_b, name="Main", code="MAIN")
+        foreign_level = AcademicLevel.objects.create(tenant=self.school_b, name="Grade 8", code="G8", sequence=8)
+        ClassGroup.objects.create(tenant=self.school_b, name="Grade 8", code="G8", academic_level=foreign_level, campus=foreign_campus)
+        override_role = Role.objects.create(
+            tenant=self.school_a, name="Head of Campus", permissions=["attendance.session.manage", "attendance.any_class"],
+        )
+        Membership.objects.create(tenant=self.school_a, user=self.teacher, role=override_role, campus=None)
+        self.client.force_authenticate(self.teacher)
+        response = self.client.get("/api/v1/academics/class-groups/", **self.headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sorted(row["code"] for row in response.data["results"]), ["G8-A", "G8-E", "G8-W"])
+
+    def test_requires_permission(self):
+        role = Role.objects.create(tenant=self.school_a, name="No Access", permissions=[])
+        Membership.objects.create(tenant=self.school_a, user=self.teacher, role=role, campus=self.main_campus)
+        self.client.force_authenticate(self.teacher)
+        response = self.client.get("/api/v1/academics/class-groups/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
+    def test_requires_tenant_context(self):
+        Membership.objects.create(tenant=self.school_a, user=self.teacher, role=self.teacher_role, campus=self.main_campus)
+        self.client.force_authenticate(self.teacher)
+        response = self.client.get("/api/v1/academics/class-groups/")
+        self.assertEqual(response.status_code, 404)
+
+    def test_attendance_module_disabled_blocks_access_even_with_permission(self):
+        from apps.platform.services import set_module_override
+
+        Membership.objects.create(tenant=self.school_a, user=self.teacher, role=self.teacher_role, campus=self.main_campus)
+        self.client.force_authenticate(self.teacher)
+        set_module_override(tenant=self.school_a, module_code="attendance", is_enabled=False)
+        response = self.client.get("/api/v1/academics/class-groups/", **self.headers())
         self.assertEqual(response.status_code, 403)

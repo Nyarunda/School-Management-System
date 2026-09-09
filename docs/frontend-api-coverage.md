@@ -40,9 +40,9 @@ Rows below with exact paths were confirmed by reading the actual backend `urls.p
 | `/finance/mpesa/callbacks/<id>/reject/` | POST | `finance.mpesa.callback.verify` | `CallbackWorkspace` | ✅ | ✅ |
 | `/finance/mpesa/callbacks/<id>/process/` | POST | `finance.mpesa.callback.process` | `CallbackWorkspace` | ✅ | ✅ |
 
-## Attendance — Full (one catalogue gap)
+## Attendance — Full
 
-`/attendance/sessions/` (GET), `/attendance/sessions/<id>/` (GET), `/attendance/sessions/<id>/records/` (POST), `/attendance/sessions/<id>/submit/` (POST) — all in `features/attendance.tsx`. ✅ Connected, ✅ Workflow complete for marking/submitting an already-open register. Session-*opening* has no UI: `ACADEMIC-GAP-01` (no class-group catalogue endpoint to populate the selector). Roster rows show raw student UUIDs: `ACADEMIC-GAP-02`.
+`/attendance/sessions/` (GET), `/attendance/sessions/open/` (POST), `/attendance/sessions/<id>/` (GET), `/attendance/sessions/<id>/records/` (POST), `/attendance/sessions/<id>/submit/` (POST) — all in `features/attendance.tsx`. ✅ Connected, ✅ Workflow complete, including opening a register via `/academics/class-groups/` (GET, `attendance.session.manage`, new — closes `ACADEMIC-GAP-01`; campus/`TeacherAssignment`-filtered to exactly what `open_attendance_session` would accept). Roster rows still show raw student UUIDs: `ACADEMIC-GAP-02`.
 
 ## Assessments — Full (one catalogue gap)
 

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Group, Modal, Select, Stack, Table, Text, TextInput, Tooltip } from "@mantine/core";
+import { Alert, Button, Checkbox, Group, Modal, Select, Stack, Table, Text, TextInput } from "@mantine/core";
 import { api, ApiError, Page } from "../api/client";
 import { useAccess } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
@@ -14,19 +14,34 @@ type Session={id:string;class_group:string;session_date:string;opened_by:string;
 type RecordStatus="NOT_MARKED"|"PRESENT"|"ABSENT"|"LATE"|"EXCUSED"|"SICK"|"SCHOOL_ACTIVITY";
 type AttendanceRecord={id:string;student:string;status:RecordStatus;remarks:string;recorded_by:string|null;updated_at:string};
 type SessionDetail={session:Session;records:AttendanceRecord[]};
+type ClassGroupOption={id:string;name:string;code:string;stream:string;academic_level:string;campus:string};
 const statuses:RecordStatus[]=["NOT_MARKED","PRESENT","ABSENT","LATE","EXCUSED","SICK","SCHOOL_ACTIVITY"];
 const statusOptions=statuses.map(s=>({value:s,label:label(s)}));
 function label(value:string){return value.toLowerCase().replace(/_/g," ").replace(/^./,c=>c.toUpperCase())}
 const when=(value:string|null)=>value?new Intl.DateTimeFormat("en-KE",{dateStyle:"medium",timeStyle:"short"}).format(new Date(value)):"—";
 const errorText=(error:unknown)=>error instanceof ApiError?error.message:error instanceof Error?error.message:"The action failed";
 
+const today=()=>new Date().toISOString().slice(0,10);
+
 export function AttendancePage(){
 	const {can}=useAccess();
+	const qc=useQueryClient();
 	const [page,setPage]=useState(1);
 	const [from,setFrom]=useState("");
 	const [to,setTo]=useState("");
 	const [selected,setSelected]=useState<string|null>(null);
+	const [openDialog,setOpenDialog]=useState(false);
+	const [classGroupId,setClassGroupId]=useState("");
+	const [sessionDate,setSessionDate]=useState(today());
+	const [force,setForce]=useState(false);
+	const canOverrideCalendar=can("attendance.session.override_calendar");
 	const sessions=useQuery({queryKey:["attendance-sessions",page,from,to],queryFn:()=>api<Page<Session>>("/attendance/sessions/",{params:{page,from:from||undefined,to:to||undefined}})});
+	const classGroups=useQuery({queryKey:["attendance-class-groups"],queryFn:()=>api<Page<ClassGroupOption>>("/academics/class-groups/",{params:{page_size:100}}),enabled:openDialog});
+	const openSession=useMutation({
+		mutationFn:()=>api<SessionDetail>("/attendance/sessions/open/",{method:"POST",body:JSON.stringify({class_group:classGroupId,session_date:sessionDate,force})}),
+		onSuccess:detail=>{qc.setQueryData(["attendance-session",detail.session.id],detail);void qc.invalidateQueries({queryKey:["attendance-sessions"]});setOpenDialog(false);setSelected(detail.session.id);notify.success("Attendance register opened")},
+		onError:error=>notify.error("Attendance register could not be opened",error),
+	});
 	const columns:Column<Session>[]=[
 		{key:"date",header:"Date",cell:r=><Text size="sm" fw={600}>{r.session_date}</Text>},
 		{key:"class",header:"Class group",cell:r=><Text size="sm" ff="monospace">{r.class_group}</Text>},
@@ -34,20 +49,15 @@ export function AttendancePage(){
 		{key:"opened",header:"Opened",cell:r=>when(r.opened_at)},
 		{key:"submitted",header:"Last submitted",cell:r=>when(r.last_submitted_at)},
 	];
+	const classGroupData=(classGroups.data?.results??[]).map(c=>({value:c.id,label:`${c.name}${c.stream?` (${c.stream})`:""} · ${c.campus}`}));
 	return <>
 		<WorkspaceHeader
 			eyebrow="Academics · Attendance"
 			title="Attendance registers"
 			description="Open a daily class register, save the full roster, and submit it for the school record."
 			action={can("attendance.session.manage")?
-				<Tooltip label="Requires a class-group catalogue endpoint" multiline w={230}>
-					<Button variant="default" disabled>Open register unavailable</Button>
-				</Tooltip>:undefined}
+				<Button onClick={()=>{setClassGroupId("");setSessionDate(today());setForce(false);setOpenDialog(true)}}>+ Open register</Button>:undefined}
 		/>
-		<Alert color="yellow" variant="light" mb="md">
-			<Text size="sm" fw={600}>Register creation needs backend catalogue support.</Text>
-			<Text size="sm" c="dimmed">The attendance API accepts a class-group ID, but there is no authorised class-group list endpoint for teachers to select from.</Text>
-		</Alert>
 		<DataTable title="Attendance sessions" columns={columns} rows={sessions.data?.results??[]} rowKey={r=>r.id} loading={sessions.isLoading} error={sessions.error} retry={()=>void sessions.refetch()} onRefresh={()=>void sessions.refetch()}
 			count={sessions.data?.count} page={page} previous={!!sessions.data?.previous} next={!!sessions.data?.next} onPage={setPage} onRow={r=>setSelected(r.id)}
 			toolbar={<FilterBar>
@@ -55,6 +65,16 @@ export function AttendancePage(){
 				<TextInput type="date" label="To" size="xs" w={140} value={to} onChange={e=>{setTo(e.currentTarget.value);setPage(1)}}/>
 			</FilterBar>}
 		/>
+		<ActionDialog open={openDialog} title="Open attendance register" description="Opening an existing session for this class and date is safe to repeat -- it returns the same register rather than creating a duplicate." confirmLabel="Open register" busy={openSession.isPending} onClose={()=>setOpenDialog(false)} onSubmit={e=>{e.preventDefault();if(!classGroupId||!sessionDate)return;openSession.mutate()}}>
+			<Stack gap="sm">
+				{openSession.error&&<Alert color="red" variant="light">{errorText(openSession.error)}</Alert>}
+				{classGroups.isError&&<Alert color="red" variant="light">{errorText(classGroups.error)}</Alert>}
+				<Select label="Class group" placeholder={classGroups.isLoading?"Loading…":"Select class group"} required searchable disabled={classGroups.isLoading} data={classGroupData} value={classGroupId} onChange={value=>setClassGroupId(value??"")}/>
+				{!classGroups.isLoading&&!classGroups.isError&&!classGroupData.length&&<Text size="xs" c="dimmed">No class groups are available for your account. Contact an administrator if you should be assigned to one.</Text>}
+				<TextInput type="date" label="Session date" required value={sessionDate} onChange={e=>setSessionDate(e.currentTarget.value)}/>
+				{canOverrideCalendar&&<Checkbox label="Override non-instructional day check" checked={force} onChange={e=>setForce(e.currentTarget.checked)}/>}
+			</Stack>
+		</ActionDialog>
 		{selected&&<RegisterWorkspace id={selected} onClose={()=>setSelected(null)}/>}
 	</>;
 }
