@@ -53,7 +53,7 @@ Rows below with exact paths were confirmed by reading the actual backend `urls.p
 
 ## Students — Partial
 
-`/students/` (list) — `StudentsPage`, Connected but the `search` param is silently ignored server-side (`STUDENT-GAP-02`). No `GET /students/<id>/` retrieve at all (`STUDENT-GAP-01`) — `StudentPage` reads a `sessionStorage` cache from the list click instead. `/students/<id>/documents/` (GET/POST), `/students/<id>/documents/<id>/download/`, `/students/<id>/documents/<id>/` (DELETE) — now ✅/✅ via `features/documents.tsx` `DocumentsPanel` (this slice). Guardians/Activity tabs: honest "not available" stub, zero backend API surface.
+`/students/` (list) — `StudentsPage`, ✅ Connected/✅ Workflow complete for what the endpoint actually offers: pagination only. The Student List Workspace slice removed the dead search box outright rather than leaving it disabled — `list_students` has no search/status filter and campus is derived from the caller's own membership, not a request parameter (`STUDENT-GAP-02`, expanded). No `GET /students/<id>/` retrieve at all (`STUDENT-GAP-01`) — `StudentPage` reads a `sessionStorage` cache from the list click instead. `/students/<id>/documents/` (GET/POST), `/students/<id>/documents/<id>/download/`, `/students/<id>/documents/<id>/` (DELETE) — ✅/✅ via `features/documents.tsx` `DocumentsPanel`. Guardians/Activity tabs: honest "not available" stub, zero backend API surface.
 
 ## Staff — Partial
 

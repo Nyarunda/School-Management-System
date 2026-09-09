@@ -5,11 +5,13 @@ import { api, Page } from "../api/client";
 import { useAccess, useAuth } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
 import { DocumentsPanel } from "../features/documents";
+import { Column, DataTable } from "../components/DataTable";
 import { KeyValueGrid, KeyValueItem, KeyValueSection } from "../components/KeyValueGrid";
 import { notify } from "../components/notifications/notify";
 import { RecordHeader } from "../components/RecordHeader";
 import { RecordTabs } from "../components/RecordTabs";
 import { Empty, ErrorState, go, Icon, Loading, PageHeader, StatusBadge } from "../components/ui";
+import { WorkspaceHeader } from "../components/WorkspaceHeader";
 
 type Row=Record<string,unknown>;
 const money=new Intl.NumberFormat("en-KE",{style:"currency",currency:"KES",maximumFractionDigits:0});
@@ -29,7 +31,23 @@ function MiniRows({rows,primary,secondary,value}:{rows:Row[];primary:string;seco
 export type ResourceConfig={title:string;description:string;endpoint:string;permission?:string;columns:string[];eyebrow?:string;actionLabel?:string};
 export function ResourcePage({config}:{config:ResourceConfig}){const [page,setPage]=useState(1);const [search,setSearch]=useState("");const query=useQuery({queryKey:[config.endpoint,page,search],queryFn:()=>api<Page<Row>|Row[]>(config.endpoint,{params:{page,search:search||undefined}})});const data=Array.isArray(query.data)?query.data:query.data?.results??[];const count=Array.isArray(query.data)?query.data.length:query.data?.count??0;return <><PageHeader eyebrow={config.eyebrow} title={config.title} description={config.description} action={config.actionLabel?<button className="button primary">+ {config.actionLabel}</button>:undefined}/><section className="card data-card"><div className="table-tools"><label className="search-field"><Icon name="search"/><input placeholder={`Search ${config.title.toLowerCase()}`} value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}}/></label><span>{count.toLocaleString()} records</span></div>{query.isLoading?<Loading/>:query.isError?<ErrorState error={query.error} retry={()=>void query.refetch()}/>:!data.length?<Empty/>:<div className="table-scroll"><table><thead><tr>{config.columns.map(column=><th key={column}>{pretty(column)}</th>)}</tr></thead><tbody>{data.map((row,index)=><tr key={String(row.id??index)}>{config.columns.map(column=><td key={column}>{display(row[column])}</td>)}</tr>)}</tbody></table></div>} {!Array.isArray(query.data)&&query.data&&<div className="pagination"><button disabled={!query.data.previous} onClick={()=>setPage(p=>p-1)}>Previous</button><span>Page {page}</span><button disabled={!query.data.next} onClick={()=>setPage(p=>p+1)}>Next</button></div>}</section></>}
 
-export function StudentsPage(){const [page,setPage]=useState(1);const [search,setSearch]=useState("");const query=useQuery({queryKey:["students",page,search],queryFn:()=>api<Page<Row>>("/students/",{params:{page,search:search||undefined}})});return <><PageHeader eyebrow="Student records" title="Students" description="Find a learner and open their complete school record."/><section className="card data-card"><div className="table-tools"><label className="search-field"><Icon name="search"/><input placeholder="Search by name or admission number" value={search} onChange={e=>setSearch(e.target.value)}/></label><span>{query.data?.count??0} students</span></div>{query.isLoading?<Loading/>:query.isError?<ErrorState error={query.error}/>:!query.data?.results.length?<Empty title="No students found"/>:<div className="student-cards">{query.data.results.map(student=><button key={String(student.id)} onClick={()=>{sessionStorage.setItem(`student:${student.id}`,JSON.stringify(student));go(`/students/${student.id}`)}}><span className="student-avatar">{String(student.full_name??"ST").split(" ").map(x=>x[0]).join("").slice(0,2)}</span><span><strong>{display(student.full_name)}</strong><small>{display(student.admission_number)} · {display(student.campus)}</small></span><StatusBadge value={String(student.status??"Active")}/><b>›</b></button>)}</div>}<div className="pagination"><button disabled={!query.data?.previous} onClick={()=>setPage(p=>p-1)}>Previous</button><span>Page {page}</span><button disabled={!query.data?.next} onClick={()=>setPage(p=>p+1)}>Next</button></div></section></>}
+export function StudentsPage(){
+ const [page,setPage]=useState(1);
+ const query=useQuery({queryKey:["students",page],queryFn:()=>api<Page<Row>>("/students/",{params:{page}})});
+ const columns:Column<Row>[]=[
+  {key:"admission_number",header:"Admission No.",cell:r=>display(r.admission_number)},
+  {key:"full_name",header:"Student",cell:r=>display(r.full_name)},
+  {key:"campus",header:"Campus",cell:r=>display(r.campus)},
+  {key:"status",header:"Status",cell:r=>display(r.status)},
+ ];
+ return <>
+  <WorkspaceHeader eyebrow="Student records" title="Student Directory" description="Manage enrolled students and open their complete student record."/>
+  <DataTable title="Students" columns={columns} rows={query.data?.results??[]} rowKey={r=>String(r.id)}
+   loading={query.isLoading} error={query.error} retry={()=>query.refetch()} onRefresh={()=>query.refetch()}
+   onRow={student=>{sessionStorage.setItem(`student:${student.id}`,JSON.stringify(student));go(`/students/${student.id}`)}}
+   page={page} count={query.data?.count} previous={Boolean(query.data?.previous)} next={Boolean(query.data?.next)} onPage={setPage}/>
+ </>;
+}
 
 export function StudentPage({id}:{id:string}){const student=JSON.parse(sessionStorage.getItem(`student:${id}`)??"{}") as Row;const {can,moduleEnabled}=useAccess();const tabs=["Overview",...(moduleEnabled("finance")&&can("finance.student_account.view")?["Fees"]:[]),...(moduleEnabled("attendance")&&can("attendance.record.view")?["Attendance"]:[]),...(moduleEnabled("assessments")&&can("assessment.record.view")?["Assessments"]:[]),...(moduleEnabled("documents")&&can("students.document.view")?["Documents"]:[]),"Guardians","Activity"];const [tab,setTab]=useState("Overview");const finance=useQuery({queryKey:["student-finance",id],queryFn:()=>api<Row>(`/finance/students/${id}/finance/`),enabled:tab==="Fees"});const attendance=useQuery({queryKey:["student-attendance",id],queryFn:()=>api<Row>(`/attendance/students/${id}/summary/`),enabled:tab==="Attendance"});const assessments=useQuery({queryKey:["student-assessment",id],queryFn:()=>api<Row>(`/assessments/students/${id}/summary/`),enabled:tab==="Assessments"});return <>
  <RecordHeader backLabel="Student directory" onBack={()=>go("/students")}

@@ -87,7 +87,7 @@ export function DocumentsPanel({ basePath, ownerId, viewPermission, managePermis
 
 	return <Stack gap="sm">
 		<Stack gap={0} align="flex-end"><Button size="xs" disabled={!canManage} onClick={openUpload}>+ Upload document</Button></Stack>
-		<DataTable columns={columns} rows={q.data?.results ?? []} rowKey={r => r.id} loading={q.isLoading} error={q.error} retry={() => void q.refetch()} count={q.data?.count} />
+		<DataTable columns={columns} rows={q.data?.results ?? []} rowKey={r => r.id} loading={q.isLoading} error={q.error} retry={() => void q.refetch()} count={q.data?.count} showDensityToggle={false} />
 
 		<ActionDialog open={uploadOpen} title="Upload document" confirmLabel="Upload" busy={upload.isPending} onClose={() => setUploadOpen(false)} onSubmit={e => { e.preventDefault(); submitUpload(); }}>
 			<Failure error={uploadError ? new Error(uploadError) : upload.error} />
