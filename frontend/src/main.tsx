@@ -76,7 +76,7 @@ const theme = createTheme({
     Table: Table.extend({ defaultProps: { verticalSpacing: "sm", horizontalSpacing: "md" } }),
     Modal: Modal.extend({ defaultProps: { radius: "md", centered: true, overlayProps: { backgroundOpacity: 0.35, blur: 2 } } }),
     Drawer: Drawer.extend({ defaultProps: { padding: "lg" } }),
-    Tabs: Tabs.extend({ defaultProps: { variant: "outline" } }),
+    Tabs: Tabs.extend({ defaultProps: { variant: "default" } }),
     Menu: Menu.extend({ defaultProps: { radius: "md", shadow: "md" } }),
     Pagination: Pagination.extend({ defaultProps: { size: "sm" } }),
     Tooltip: Tooltip.extend({ defaultProps: { openDelay: 200, radius: "sm" } }),
