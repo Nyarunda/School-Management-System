@@ -17,12 +17,17 @@ PERMISSION_CATALOGUE = {
     "tenancy.role.view": "View roles and permissions",
     "tenancy.role.manage": "Create, edit, and delete roles",
 
+    # Admissions
+    "admissions.document.manage": "Upload and delete application documents",
+    "admissions.enroll": "Enroll an accepted application into a Student with an academic placement",
+
     # Students
     "students.view": "View students",
     "students.document.view": "View student documents",
     "students.document.manage": "Upload and delete student documents",
 
     # Academics / assessments
+    "academics.students.enroll": "Place a student into a class/section for an academic year",
     "assessment.manage": "Open, mark, submit, and manage assessments",
     "assessment.record.view": "View assessment records and results",
     "assessment.setup.view": "View grading schemes",

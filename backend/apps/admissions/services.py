@@ -2,6 +2,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
+from apps.academics.services import enroll_student
 from apps.activity.services import record_activity
 from apps.documents.services import delete_document, upload_document
 from apps.students.models import Student
@@ -37,37 +38,75 @@ def transition_application(*, application, status, reviewer=None):
 
 
 @transaction.atomic
-def enroll_application(*, application, admission_number, campus=None, actor=None):
-    if application.status != ApplicationStatus.ACCEPTED:
+def enroll_application(*, user, tenant, application, admission_number, academic_year, class_group, term=None, campus=None, actor=None):
+    """The single authoritative Application -> Student -> academic
+    placement orchestration -- closes the RC Area 3 critical journey gap
+    where an "ENROLLED" application previously produced a Student with no
+    class/section/academic-year placement. Reuses
+    apps.academics.services.enroll_student's own validation/IntegrityError
+    handling for the placement half rather than duplicating it, so the
+    acting user needs both "admissions.enroll" and
+    "academics.students.enroll" -- a role-configuration detail, not a new
+    permission-chaining mechanism.
+    """
+    membership = require_permission(user=user, tenant=tenant, permission="admissions.enroll")
+    require_same_tenant(tenant=tenant, application=application)
+
+    locked_application = Application.objects.select_for_update().get(tenant=tenant, pk=application.pk)
+    if locked_application.status != ApplicationStatus.ACCEPTED:
         raise ValidationError("Only accepted applications can be enrolled")
-    if application.campus is not None:
-        require_same_tenant(tenant=application.tenant, campus=application.campus)
+
+    require_same_tenant(tenant=tenant, academic_year=academic_year, class_group=class_group)
+    if term is not None:
+        require_same_tenant(tenant=tenant, term=term)
     if campus is not None:
-        require_same_tenant(tenant=application.tenant, campus=campus)
+        require_same_tenant(tenant=tenant, campus=campus)
+    if locked_application.campus is not None:
+        require_same_tenant(tenant=tenant, campus=locked_application.campus)
+
+    resolved_campus = campus or locked_application.campus or class_group.campus
+    if resolved_campus.id != class_group.campus_id:
+        raise ValidationError("Class must belong to the selected campus")
+
+    if membership.campus_id is not None:
+        campuses_in_play = {
+            c.id for c in (locked_application.campus, campus, class_group.campus) if c is not None
+        }
+        if campuses_in_play - {membership.campus_id}:
+            raise ValidationError("User is not authorized for this campus")
+
     student = Student.objects.create(
-        tenant=application.tenant,
+        tenant=tenant,
         admission_number=admission_number,
-        first_name=application.first_name,
-        last_name=application.last_name,
-        date_of_birth=application.date_of_birth,
-        campus=campus or application.campus,
+        first_name=locked_application.first_name,
+        last_name=locked_application.last_name,
+        date_of_birth=locked_application.date_of_birth,
+        campus=resolved_campus,
     )
-    application.status = ApplicationStatus.ENROLLED
-    application.save(update_fields=["status"])
+
+    enrollment = enroll_student(
+        user=user, tenant=tenant, student=student, academic_year=academic_year,
+        academic_level=class_group.academic_level, class_group=class_group,
+        campus=resolved_campus, term=term,
+    )
+
+    locked_application.status = ApplicationStatus.ENROLLED
+    locked_application.save(update_fields=["status"])
     record_activity(
-        tenant=application.tenant,
-        actor=actor,
-        action="student.enrolled",
-        resource_type="student",
-        resource_id=str(student.id),
-        metadata={"application_id": str(application.id)},
+        tenant=tenant,
+        actor=actor or user,
+        action="application.enrolled",
+        resource_type="application",
+        resource_id=str(locked_application.id),
+        metadata={"student_id": str(student.id), "enrollment_id": str(enrollment.id)},
     )
-    return student
+    return student, enrollment
 
 
 def add_application_document(*, user, tenant, application, document_type, file_obj, original_filename, content_type, actor=None):
-    """Service-layer only -- Admissions has no API layer, consistent with
-    the rest of this app.
+    """Service-layer only -- application review/document management has no
+    API layer of its own (only enroll_application is exposed, via
+    apps.admissions.api).
     """
     require_permission(user=user, tenant=tenant, permission="admissions.document.manage")
     require_same_tenant(tenant=tenant, application=application)

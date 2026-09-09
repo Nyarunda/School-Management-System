@@ -16,17 +16,19 @@ class StudentLifecycleTests(TemporaryDocumentStorageMixin, TestCase):
         self.school_b = Tenant.objects.create(name="School B", slug="school-b")
         self.campus_a = Campus.objects.create(tenant=self.school_a, name="Main", code="MAIN")
         self.campus_b = Campus.objects.create(tenant=self.school_b, name="Main", code="MAIN")
+        self.campus_a2 = Campus.objects.create(tenant=self.school_a, name="Annex", code="ANNEX")
         self.student = Student.objects.create(
             tenant=self.school_a,
             admission_number="ADM-001",
             first_name="Amina",
             last_name="Otieno",
+            campus=self.campus_a,
         )
         self.admin = User.objects.create_user(username="admin", password="secret")
         role = Role.objects.create(
             tenant=self.school_a, name="Registrar", permissions=["students.document.view", "students.document.manage"],
         )
-        Membership.objects.create(tenant=self.school_a, user=self.admin, role=role)
+        self.membership = Membership.objects.create(tenant=self.school_a, user=self.admin, role=role)
 
     def test_terminal_student_states_cannot_be_reopened(self):
         change_student_status(student=self.student, status=StudentStatus.GRADUATED)
@@ -39,7 +41,7 @@ class StudentLifecycleTests(TemporaryDocumentStorageMixin, TestCase):
             place_student(student=self.student, campus=self.campus_b)
 
         self.student.refresh_from_db()
-        self.assertIsNone(self.student.campus)
+        self.assertEqual(self.student.campus, self.campus_a)
 
     def test_document_is_created_through_student_tenant_boundary(self):
         document = add_student_document(
@@ -63,6 +65,25 @@ class StudentLifecycleTests(TemporaryDocumentStorageMixin, TestCase):
         )
         delete_student_document(user=self.admin, tenant=self.school_a, student_document=document)
         self.assertEqual(self.student.documents.count(), 0)
+
+    def test_document_upload_is_rejected_for_a_campus_scoped_registrar_outside_the_students_campus(self):
+        self.membership.campus = self.campus_a2
+        self.membership.save(update_fields=["campus"])
+        with self.assertRaisesMessage(ValidationError, "not authorized for this campus"):
+            add_student_document(
+                user=self.admin, tenant=self.school_a, student=self.student, document_type="Birth certificate",
+                file_obj=make_upload(), original_filename="birth-certificate.pdf", content_type="application/pdf",
+            )
+
+    def test_document_delete_is_rejected_for_a_campus_scoped_registrar_outside_the_students_campus(self):
+        document = add_student_document(
+            user=self.admin, tenant=self.school_a, student=self.student, document_type="Birth certificate",
+            file_obj=make_upload(), original_filename="birth-certificate.pdf", content_type="application/pdf",
+        )
+        self.membership.campus = self.campus_a2
+        self.membership.save(update_fields=["campus"])
+        with self.assertRaisesMessage(ValidationError, "not authorized for this campus"):
+            delete_student_document(user=self.admin, tenant=self.school_a, student_document=document)
 
     def test_document_upload_requires_permission(self):
         outsider = User.objects.create_user(username="outsider", password="secret")

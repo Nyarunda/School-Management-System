@@ -10,7 +10,7 @@ from apps.academics.models import AcademicLevel, AcademicYear
 from apps.students.models import Student
 from apps.tenancy.models import Membership, Role, Tenant, User
 
-from .models import FeeCategory, FeeItem, MpesaCallbackLog, NumberSeries, TenantMpesaConfiguration
+from .models import FeeCategory, FeeItem, IncomingPayment, MpesaCallbackLog, NumberSeries, Payment, Receipt, TenantMpesaConfiguration
 from .services import (
     add_fee_structure_line,
     approve_fee_structure,
@@ -199,6 +199,35 @@ class MpesaApiTests(TestCase):
             response = self.client.post(f"/api/v1/finance/mpesa/{config['callback_token']}/{path}/", [], format="json")
             self.assertEqual(response.status_code, 200)
         self.assertEqual(MpesaCallbackLog.objects.filter(status="RECEIVED").count(), 2)
+
+    def test_duplicate_webhook_deliveries_never_create_financial_records_on_their_own(self):
+        """RC Area 3: the public AllowAny webhook must only ever create
+        durable MpesaCallbackLog evidence, never IncomingPayment/Payment/
+        Receipt directly -- that's the whole point of the verify->process
+        boundary (mpesa_services.process_mpesa_callback). Concurrency isn't
+        actually load-bearing here: MpesaC2BConfirmationView/
+        MpesaStkCallbackView unconditionally log-then-ACK with no
+        check-then-act logic in between, so two duplicate deliveries prove
+        the same guarantee two truly concurrent ones would -- there's no
+        code path in this view that could behave differently under overlap.
+        Duplicate-delivery replay safety for the *authenticated* verify/
+        process pipeline itself is already covered by
+        test_mpesa_concurrency.py and test_mpesa_recovery.py.
+        """
+        self._issued_invoice()
+        config = self._configure()
+        payload = {"TransID": "QGH500", "TransAmount": "50000", "BillRefNumber": self.student.admission_number}
+
+        for _ in range(2):
+            response = self.client.post(
+                f"/api/v1/finance/mpesa/{config['callback_token']}/c2b/confirmation/", payload, format="json",
+            )
+            self.assertEqual(response.status_code, 200)
+
+        self.assertEqual(MpesaCallbackLog.objects.filter(status="RECEIVED").count(), 2)
+        self.assertEqual(IncomingPayment.objects.count(), 0)
+        self.assertEqual(Payment.objects.count(), 0)
+        self.assertEqual(Receipt.objects.count(), 0)
 
     def test_webhook_views_are_throttled_on_their_own_scope(self):
         from apps.finance.mpesa_api import MpesaC2BConfirmationView, MpesaC2BValidationView, MpesaStkCallbackView

@@ -1,13 +1,16 @@
 from .models import Student
 
 
-def list_students(*, tenant):
-    return (
+def list_students(*, tenant, campus_id=None):
+    queryset = (
         Student.objects.for_tenant(tenant)
         .select_related("campus")
         .only("id", "tenant", "admission_number", "first_name", "last_name", "status", "campus__name")
         .order_by("admission_number")
     )
+    if campus_id is not None:
+        queryset = queryset.filter(campus_id=campus_id)
+    return queryset
 
 
 def enrollment_register_rows(*, tenant, campus_id=None, status=None, limit=None):

@@ -1,4 +1,5 @@
 import os
+import time
 from pathlib import Path
 
 from django.conf import settings
@@ -47,6 +48,10 @@ class LocalFilesystemBackend(DocumentStorageBackend):
         path = self._resolve_path(tenant=tenant, key=key)
         path.unlink(missing_ok=True)
 
-    def list_keys(self, *, tenant):
+    def list_keys(self, *, tenant, min_age_seconds=0):
         root = self._tenant_root(tenant)
-        return [item.name for item in root.iterdir() if item.is_file() and not item.name.endswith(".partial")]
+        cutoff = time.time() - min_age_seconds
+        return [
+            item.name for item in root.iterdir()
+            if item.is_file() and not item.name.endswith(".partial") and item.stat().st_mtime <= cutoff
+        ]

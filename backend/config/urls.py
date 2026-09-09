@@ -20,3 +20,4 @@ urlpatterns += [path("api/v1/notifications/", include("apps.notifications.urls")
 urlpatterns += [path("api/v1/documents/", include("apps.documents.urls"))]
 urlpatterns += [path("api/v1/reports/", include("apps.reporting.urls"))]
 urlpatterns += [path("api/v1/platform/", include("apps.platform.urls"))]
+urlpatterns += [path("api/v1/admissions/", include("apps.admissions.urls"))]

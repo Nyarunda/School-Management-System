@@ -201,6 +201,65 @@ class AuthorizationTests(AssessmentFoundationTests):
             self.open_assessment(user=self.admin, class_group=other_campus_class)
 
 
+class TransitionCampusScopeTests(AssessmentFoundationTests):
+    """RC Area 3: reject/approve/reopen/publish previously enforced no
+    campus scope at all -- a tenant-wide assessment.approve/publish holder
+    could act on any campus's assessment. _require_assessment_campus_scope
+    closes that; submit_assessment_for_approval already had the full
+    _require_subject_class_authorization check (same permission as
+    marks-entry) so it needs no separate test here.
+    """
+
+    def restrict_admin_to_other_campus(self):
+        Membership.objects.filter(tenant=self.school_a, user=self.admin).update(campus=self.other_campus)
+
+    def submitted_assessment(self):
+        assessment, _ = self.open_assessment()
+        self.mark_all(assessment)
+        return submit_assessment_for_approval(user=self.teacher, tenant=self.school_a, assessment=assessment)
+
+    def mark_all(self, assessment, score=Decimal("70")):
+        record_assessment_marks(
+            user=self.teacher, tenant=self.school_a, assessment=assessment,
+            entries=[
+                {"student": self.student, "mark_status": MarkStatus.SCORED, "score": score},
+                {"student": self.other_student, "mark_status": MarkStatus.SCORED, "score": score},
+            ],
+        )
+
+    def test_reject_is_rejected_for_a_campus_scoped_admin_outside_the_class_campus(self):
+        submitted = self.submitted_assessment()
+        self.restrict_admin_to_other_campus()
+        with self.assertRaisesMessage(ValidationError, "not authorized for this campus"):
+            reject_assessment_submission(user=self.admin, tenant=self.school_a, assessment=submitted, reason="x")
+
+    def test_approve_is_rejected_for_a_campus_scoped_admin_outside_the_class_campus(self):
+        submitted = self.submitted_assessment()
+        self.restrict_admin_to_other_campus()
+        with self.assertRaisesMessage(ValidationError, "not authorized for this campus"):
+            approve_assessment(user=self.admin, tenant=self.school_a, assessment=submitted)
+
+    def test_reopen_is_rejected_for_a_campus_scoped_admin_outside_the_class_campus(self):
+        submitted = self.submitted_assessment()
+        approved = approve_assessment(user=self.admin, tenant=self.school_a, assessment=submitted)
+        self.restrict_admin_to_other_campus()
+        with self.assertRaisesMessage(ValidationError, "not authorized for this campus"):
+            reopen_approved_assessment(user=self.admin, tenant=self.school_a, assessment=approved, reason="x")
+
+    def test_publish_is_rejected_for_a_campus_scoped_admin_outside_the_class_campus(self):
+        submitted = self.submitted_assessment()
+        approved = approve_assessment(user=self.admin, tenant=self.school_a, assessment=submitted)
+        self.restrict_admin_to_other_campus()
+        with self.assertRaisesMessage(ValidationError, "not authorized for this campus"):
+            publish_assessment(user=self.admin, tenant=self.school_a, assessment=approved)
+
+    def test_approve_succeeds_for_an_admin_scoped_to_the_matching_campus(self):
+        submitted = self.submitted_assessment()
+        Membership.objects.filter(tenant=self.school_a, user=self.admin).update(campus=self.campus)
+        approved = approve_assessment(user=self.admin, tenant=self.school_a, assessment=submitted)
+        self.assertEqual(approved.status, AssessmentStatus.APPROVED)
+
+
 class MarksEntryValidationTests(AssessmentFoundationTests):
     def test_score_out_of_bounds_is_rejected(self):
         assessment, _ = self.open_assessment()

@@ -16,6 +16,10 @@ class DocumentStorageBackend:
         """Idempotent -- deleting a missing key is not an error."""
         raise NotImplementedError
 
-    def list_keys(self, *, tenant):
-        """For orphan reconciliation (apps.documents.services.find_orphaned_storage_keys)."""
+    def list_keys(self, *, tenant, min_age_seconds=0):
+        """For orphan reconciliation (apps.documents.services.find_orphaned_storage_keys).
+        min_age_seconds excludes anything written more recently than that --
+        required so an unattended/scheduled sweep can never race a legitimate
+        in-flight upload (file written, its Document row not committed yet).
+        """
         raise NotImplementedError

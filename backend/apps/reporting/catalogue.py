@@ -6,6 +6,7 @@ from typing import Callable, Optional
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 
+from apps.academics.models import ClassGroup
 from apps.assessments import selectors as assessments_selectors
 from apps.attendance import selectors as attendance_selectors
 from apps.finance import selectors as finance_selectors
@@ -54,6 +55,28 @@ def require_campus_scope(*, membership, params):
     """
     campus_id = params.get("campus_id")
     if campus_id and membership.campus_id is not None and str(membership.campus_id) != str(campus_id):
+        raise ValidationError("User is not authorized for this campus")
+
+
+def require_assessment_class_campus_scope(*, membership, params):
+    """RC Area 3: assessments.results_sheet had no authorize hook at all,
+    even though the underlying Assessments domain enforces campus scope on
+    the same class_group (assessments.services._require_assessment_campus_scope,
+    added this same area) -- without this, a tenant-wide
+    reports.assessments.export holder could pull any class's results,
+    bypassing the scope that gates direct access to the same data. Same
+    semantics as require_campus_scope above; resolves the campus from
+    class_group_id since this report has no campus_id param of its own.
+    Not-found and wrong-campus are deliberately indistinguishable to the
+    caller (both raise the same message) -- anti-enumeration, matching
+    resolve_tenant_object's get_object_or_404 shape elsewhere.
+    """
+    if membership.campus_id is None:
+        return
+    class_group = ClassGroup.objects.filter(
+        tenant_id=membership.tenant_id, pk=params["class_group_id"],
+    ).only("campus_id").first()
+    if class_group is None or class_group.campus_id != membership.campus_id:
         raise ValidationError("User is not authorized for this campus")
 
 
@@ -147,6 +170,7 @@ REPORT_CATALOGUE = {
             ("assessment", "Assessment"), ("mark_status", "Status"), ("score", "Score"), ("grade", "Grade"),
         ],
         query=assessments_selectors.results_sheet_rows, max_rows=20000,
+        authorize=require_assessment_class_campus_scope,
     ),
     "staff.employee_register": ReportDefinition(
         label="Employee Register", permission_group="staff", module_code="staff_hr",

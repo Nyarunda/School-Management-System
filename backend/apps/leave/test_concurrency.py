@@ -11,9 +11,10 @@ from django.test import TransactionTestCase
 from apps.staff.services import create_employee
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 
-from .models import LeaveLedgerEntry, LeaveRequest, LeaveRequestApprovalStatus, LeaveRequestStatus
+from .models import LeaveLedgerEntry, LeaveLedgerEntryType, LeaveRequest, LeaveRequestApprovalStatus, LeaveRequestStatus
 from .services import (
     add_workflow_stage,
+    cancel_approved_leave_request,
     create_leave_type,
     create_leave_workflow,
     decide_leave_request_stage,
@@ -141,3 +142,47 @@ class LeaveConcurrencyTests(TransactionTestCase):
         request.refresh_from_db()
         self.assertEqual(request.status, LeaveRequestStatus.APPROVED)
         self.assertEqual(sorted(outcomes), sorted(["approved", "Only submitted requests can be decided"]))
+
+    def _attempt_cancellation(self, *, request_id, barrier):
+        # RC Area 3 verification gap: cancel_approved_leave_request already
+        # locks the LeaveRequest (and, when balance-bearing, the Employee)
+        # row -- this proves that locking actually serializes two
+        # concurrent cancellations of the same approved request, mirroring
+        # the same-stage-decision race above.
+        connections.close_all()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET statement_timeout = '8s'")
+                cursor.execute("SET lock_timeout = '6s'")
+            barrier.wait(timeout=6)
+            leave_request = LeaveRequest.objects.get(pk=request_id)
+            try:
+                cancel_approved_leave_request(user=self.admin, tenant=self.tenant, leave_request=leave_request)
+                return "cancelled"
+            except ValidationError as error:
+                return " ".join(error.messages)
+        finally:
+            connections.close_all()
+
+    def test_competing_cancellations_of_the_same_request_serialize_and_reverse_exactly_once(self):
+        request = self._submit(start_date=date(2026, 4, 6), end_date=date(2026, 4, 10))
+        decide_leave_request_stage(
+            user=self.supervisor, tenant=self.tenant, leave_request=request, decision=LeaveRequestApprovalStatus.APPROVED,
+        )
+
+        barrier = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [
+                pool.submit(self._attempt_cancellation, request_id=request.id, barrier=barrier),
+                pool.submit(self._attempt_cancellation, request_id=request.id, barrier=barrier),
+            ]
+            outcomes = [future.result(timeout=15) for future in futures]
+
+        request.refresh_from_db()
+        self.assertEqual(request.status, LeaveRequestStatus.CANCELLED)
+        self.assertEqual(sorted(outcomes), sorted(["cancelled", "Only approved requests can be cancelled"]))
+        reversals = LeaveLedgerEntry.objects.filter(
+            tenant=self.tenant, employee=self.employee, leave_type=self.leave_type, entry_type=LeaveLedgerEntryType.REVERSAL,
+        )
+        self.assertEqual(reversals.count(), 1)
+        self.assertEqual(reversals.first().days, request.requested_days)

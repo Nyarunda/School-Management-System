@@ -1,9 +1,12 @@
 import dataclasses
+from datetime import date
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 
+from apps.academics.models import AcademicLevel, ClassGroup
+from apps.activity.models import ActivityEvent
 from apps.documents.testing import TemporaryDocumentStorageMixin
 from apps.students.models import Student
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
@@ -203,6 +206,32 @@ class GenerateReportExportTests(ReportingFoundationTests):
         self.assertNotIn("\n=2+2", content)
 
 
+class ReportExportAuditTests(ReportingFoundationTests):
+    """RC Area 3: export request/download previously had no audit trail at
+    all, unlike Finance/Leave/Assessments/Attendance. Generation (a worker
+    event) is deliberately not what's asserted here -- request and download
+    are the security-relevant user actions.
+    """
+
+    def test_request_report_export_records_one_activity_event(self):
+        job = request_report_export(user=self.admin, tenant=self.tenant, report_code="students.enrollment_register", params={})
+        event = ActivityEvent.objects.get(action="report.export.requested")
+        self.assertEqual(event.metadata["job_id"], str(job.id))
+        self.assertEqual(event.metadata["report_code"], "students.enrollment_register")
+        self.assertNotIn("params", event.metadata)
+
+    def test_idempotent_replay_still_records_a_request_event_each_time(self):
+        request_report_export(
+            user=self.admin, tenant=self.tenant, report_code="students.enrollment_register",
+            params={}, idempotency_key="click-1",
+        )
+        request_report_export(
+            user=self.admin, tenant=self.tenant, report_code="students.enrollment_register",
+            params={}, idempotency_key="click-1",
+        )
+        self.assertEqual(ActivityEvent.objects.filter(action="report.export.requested").count(), 2)
+
+
 class ReportExportIdempotencyTests(ReportingFoundationTests):
     def test_repeat_request_with_the_same_key_returns_the_same_job(self):
         first = request_report_export(
@@ -245,11 +274,15 @@ class CampusScopeAuthorizationTests(TestCase):
         self.campus_b = Campus.objects.create(tenant=self.tenant, name="Annex", code="ANNEX")
         self.role = Role.objects.create(
             tenant=self.tenant, name="Campus Admin",
-            permissions=["reports.students.view", "reports.attendance.view", "reports.staff.view"],
+            permissions=["reports.students.view", "reports.attendance.view", "reports.staff.view", "reports.assessments.view"],
         )
         self.campus_user = User.objects.create_user(username="campus-admin", password="secret")
         Membership.objects.create(tenant=self.tenant, user=self.campus_user, role=self.role, campus=self.campus_a)
         Student.objects.create(tenant=self.tenant, admission_number="ADM-100", first_name="A", last_name="B", campus=self.campus_b)
+
+        self.level = AcademicLevel.objects.create(tenant=self.tenant, name="Grade 8", code="G8", sequence=8)
+        self.class_campus_a = ClassGroup.objects.create(tenant=self.tenant, name="Main G8", code="MAIN-G8", academic_level=self.level, campus=self.campus_a)
+        self.class_campus_b = ClassGroup.objects.create(tenant=self.tenant, name="Annex G8", code="ANNEX-G8", academic_level=self.level, campus=self.campus_b)
 
     def test_enrollment_register_rejects_a_different_campus(self):
         with self.assertRaises(ValidationError):
@@ -278,6 +311,20 @@ class CampusScopeAuthorizationTests(TestCase):
                 user=self.campus_user, tenant=self.tenant, report_code="staff.employee_register",
                 params={"campus_id": str(self.campus_b.id)},
             )
+
+    def test_results_sheet_rejects_a_different_campus(self):
+        with self.assertRaisesMessage(ValidationError, "not authorized for this campus"):
+            run_report_preview(
+                user=self.campus_user, tenant=self.tenant, report_code="assessments.results_sheet",
+                params={"class_group_id": str(self.class_campus_b.id), "term_id": "00000000-0000-0000-0000-000000000000"},
+            )
+
+    def test_results_sheet_allows_the_user_s_own_campus(self):
+        result = run_report_preview(
+            user=self.campus_user, tenant=self.tenant, report_code="assessments.results_sheet",
+            params={"class_group_id": str(self.class_campus_a.id), "term_id": "00000000-0000-0000-0000-000000000000"},
+        )
+        self.assertEqual(result["rows"], [])
 
     def test_a_tenant_wide_user_may_query_any_campus(self):
         hq_user = User.objects.create_user(username="hq-admin", password="secret")

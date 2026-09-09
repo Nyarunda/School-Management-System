@@ -9,6 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.activity.services import record_activity
+from apps.tenancy.models import Tenant
 from apps.tenancy.services import require_permission
 
 from .models import Document, DocumentSetup
@@ -179,7 +180,10 @@ def purge_expired_documents(*, limit=200):
     return purged
 
 
-def find_orphaned_storage_keys(*, tenant):
+ORPHAN_MIN_AGE_SECONDS = 3600  # RC Area 3: required before this could ever run unattended -- see purge_orphaned_documents_task
+
+
+def find_orphaned_storage_keys(*, tenant, min_age_seconds=ORPHAN_MIN_AGE_SECONDS):
     """The filesystem/DB dual-write gap that can't be solved
     transactionally: a physical file can be written by upload_document
     just before the OUTER domain-attachment transaction (e.g.
@@ -188,7 +192,27 @@ def find_orphaned_storage_keys(*, tenant):
     purge_orphaned_documents management command, run manually/on a
     schedule -- not solved transactionally, only reconciled after the
     fact.
+
+    min_age_seconds (default 1 hour) skips any key written more recently
+    than that, so a legitimate in-flight upload (file fully written, its
+    Document row not committed yet) is never mistaken for an orphan.
     """
     backend = resolve_storage_backend()
     known_keys = set(Document.objects.filter(tenant=tenant).values_list("storage_key", flat=True))
-    return [key for key in backend.list_keys(tenant=tenant) if key not in known_keys]
+    return [key for key in backend.list_keys(tenant=tenant, min_age_seconds=min_age_seconds) if key not in known_keys]
+
+
+def purge_orphaned_documents(*, min_age_seconds=ORPHAN_MIN_AGE_SECONDS):
+    """The automatable half of the purge_orphaned_documents management
+    command's logic -- shared so apps.documents.tasks.purge_orphaned_documents_task
+    (scheduled, RC Area 3) and the command's non-dry-run path don't
+    duplicate the tenant-loop/delete logic. Returns the number of files
+    removed.
+    """
+    backend = resolve_storage_backend()
+    total = 0
+    for tenant in Tenant.objects.all():
+        for key in find_orphaned_storage_keys(tenant=tenant, min_age_seconds=min_age_seconds):
+            backend.delete(tenant=tenant, key=key)
+            total += 1
+    return total

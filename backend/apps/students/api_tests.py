@@ -79,6 +79,18 @@ class StudentApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
 
+    def test_campus_scoped_user_only_sees_their_own_campus(self):
+        annex_campus = Campus.objects.create(tenant=self.school_a, name="Annex", code="ANNEX")
+        other_campus_student = Student.objects.create(
+            tenant=self.school_a, admission_number="ADM-100", first_name="Grace", last_name="Wanjiru", campus=annex_campus,
+        )
+        Membership.objects.filter(tenant=self.school_a, user=self.user).update(campus=self.campus_a)
+        response = self.client.get("/api/v1/students/", HTTP_X_TENANT_SLUG="school-a")
+        self.assertEqual(response.status_code, 200)
+        admission_numbers = [row["admission_number"] for row in response.data["results"]]
+        self.assertEqual(admission_numbers, ["ADM-001"])
+        self.assertNotIn(other_campus_student.admission_number, admission_numbers)
+
 
 class StudentDocumentApiTests(TemporaryDocumentStorageMixin, TestCase):
     def setUp(self):
@@ -89,8 +101,12 @@ class StudentDocumentApiTests(TemporaryDocumentStorageMixin, TestCase):
         self.role = Role.objects.create(
             tenant=self.school_a, name="Registrar", permissions=["students.document.view", "students.document.manage"],
         )
-        Membership.objects.create(tenant=self.school_a, user=self.admin, role=self.role)
-        self.student = Student.objects.create(tenant=self.school_a, admission_number="ADM-001", first_name="Amina", last_name="Otieno")
+        self.membership = Membership.objects.create(tenant=self.school_a, user=self.admin, role=self.role)
+        self.campus_a = Campus.objects.create(tenant=self.school_a, name="Main", code="MAIN")
+        self.campus_a2 = Campus.objects.create(tenant=self.school_a, name="Annex", code="ANNEX")
+        self.student = Student.objects.create(
+            tenant=self.school_a, admission_number="ADM-001", first_name="Amina", last_name="Otieno", campus=self.campus_a,
+        )
         self.client.force_authenticate(self.admin)
 
     def headers(self):
@@ -139,6 +155,30 @@ class StudentDocumentApiTests(TemporaryDocumentStorageMixin, TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["count"], 3)
+
+    def test_documents_404_for_a_campus_scoped_registrar_outside_the_students_campus(self):
+        upload_response = self.client.post(
+            f"/api/v1/students/{self.student.id}/documents/",
+            {"document_type": "Birth certificate", "file": make_upload(name="birth.pdf")},
+            format="multipart", **self.headers(),
+        )
+        document_id = upload_response.data["id"]
+
+        self.membership.campus = self.campus_a2
+        self.membership.save(update_fields=["campus"])
+
+        list_response = self.client.get(f"/api/v1/students/{self.student.id}/documents/", **self.headers())
+        self.assertEqual(list_response.status_code, 404)
+
+        download_response = self.client.get(
+            f"/api/v1/students/{self.student.id}/documents/{document_id}/download/", **self.headers(),
+        )
+        self.assertEqual(download_response.status_code, 404)
+
+        delete_response = self.client.delete(
+            f"/api/v1/students/{self.student.id}/documents/{document_id}/", **self.headers(),
+        )
+        self.assertEqual(delete_response.status_code, 404)
 
     def test_viewer_only_role_cannot_upload(self):
         viewer = User.objects.create_user(username="viewer", password="secret")

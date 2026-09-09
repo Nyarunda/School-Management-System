@@ -1,6 +1,7 @@
 from django.test import TestCase
 from rest_framework.test import APIClient
 
+from apps.activity.models import ActivityEvent
 from apps.documents.testing import TemporaryDocumentStorageMixin
 from apps.students.models import Student
 from apps.tenancy.models import Membership, Role, Tenant, User
@@ -105,6 +106,29 @@ class ReportingApiTests(TemporaryDocumentStorageMixin, TestCase):
         self.assertEqual(download_response.status_code, 200)
         content = b"".join(download_response.streaming_content).decode("utf-8")
         self.assertIn("ADM-001", content)
+
+    def test_successful_download_records_one_activity_event(self):
+        create_response = self.client.post(
+            "/api/v1/reports/students.enrollment_register/export/", {}, format="json", **self.headers(),
+        )
+        job = ReportExportJob.objects.get(pk=create_response.data["id"])
+        generate_report_export(job=job)
+
+        self.client.get(f"/api/v1/reports/exports/{job.id}/download/", **self.headers())
+        event = ActivityEvent.objects.get(action="report.export.downloaded")
+        self.assertEqual(event.metadata["job_id"], str(job.id))
+        self.assertEqual(event.metadata["document_id"], str(job.document_id))
+
+    def test_denied_download_records_no_activity_event(self):
+        create_response = self.client.post(
+            "/api/v1/reports/students.enrollment_register/export/", {}, format="json", **self.headers(),
+        )
+        job = ReportExportJob.objects.get(pk=create_response.data["id"])
+        generate_report_export(job=job)
+
+        self.client.force_authenticate(self.viewer)
+        self.client.get(f"/api/v1/reports/exports/{job.id}/download/", **self.headers())
+        self.assertFalse(ActivityEvent.objects.filter(action="report.export.downloaded").exists())
 
     def test_viewer_cannot_download(self):
         create_response = self.client.post(

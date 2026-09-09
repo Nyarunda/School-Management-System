@@ -234,6 +234,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.documents.tasks.purge_expired_documents_task",
         "schedule": 3600.0,
     },
+    "documents-purge-orphaned": {
+        "task": "apps.documents.tasks.purge_orphaned_documents_task",
+        "schedule": 86400.0,
+    },
     "reports-generate-pending-exports": {
         "task": "apps.reporting.tasks.generate_pending_report_exports",
         "schedule": 60.0,

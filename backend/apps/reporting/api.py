@@ -8,6 +8,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.activity.durable_work import DurableWorkStatus
+from apps.activity.services import record_activity
 from apps.documents.services import open_document_stream
 from apps.platform.services import require_module_enabled
 from apps.tenancy.services import require_membership, require_permission
@@ -162,6 +163,14 @@ class ReportExportDownloadView(APIView):
             if job.status == DurableWorkStatus.PROCESSED:
                 raise NotFound("This export has expired; request a new one")
             raise NotFound("This export is not ready yet")
+        # Audits only successful access -- a denied attempt (403/404 above)
+        # is a security-monitoring concern for a future hardening pass, not
+        # a "download" to log now. Bounded, non-sensitive metadata only.
+        record_activity(
+            tenant=tenant, actor=request.user, action="report.export.downloaded",
+            resource_type="report_export_job", resource_id=str(job.id),
+            metadata={"job_id": str(job.id), "report_code": job.report_code, "document_id": str(job.document_id), "row_count": job.row_count},
+        )
         stream = open_document_stream(document=job.document)
         response = FileResponse(stream, content_type="text/csv")
         safe_name = job.document.original_filename.replace('"', "")

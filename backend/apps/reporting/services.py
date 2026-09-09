@@ -5,6 +5,7 @@ from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
 
+from apps.activity.services import record_activity
 from apps.documents.services import upload_document
 from apps.tenancy.services import require_permission
 
@@ -98,18 +99,36 @@ def request_report_export(*, user, tenant, report_code, params, idempotency_key=
     if key:
         existing = ReportExportJob.objects.filter(tenant=tenant, idempotency_key=key).first()
         if existing is not None:
-            return _matching_export_replay(existing=existing, report_code=report_code, params=serialized)
+            job = _matching_export_replay(existing=existing, report_code=report_code, params=serialized)
+            _record_export_requested(tenant=tenant, user=user, job=job)
+            return job
     try:
-        return ReportExportJob.objects.create(
+        job = ReportExportJob.objects.create(
             tenant=tenant, report_code=report_code, params=serialized, requested_by=user, idempotency_key=key,
         )
     except IntegrityError:
         if not key:
             raise
         replay = ReportExportJob.objects.filter(tenant=tenant, idempotency_key=key).first()
-        if replay is not None:
-            return _matching_export_replay(existing=replay, report_code=report_code, params=serialized)
-        raise
+        if replay is None:
+            raise
+        job = _matching_export_replay(existing=replay, report_code=report_code, params=serialized)
+    _record_export_requested(tenant=tenant, user=user, job=job)
+    return job
+
+
+def _record_export_requested(*, tenant, user, job):
+    """Audits the security-relevant action (a user requested this export),
+    not job generation (a worker/internal event) -- see generate_report_export.
+    Bounded, non-sensitive metadata only: never the report's own params
+    (student_id, campus filters, date ranges, etc. can themselves be
+    sensitive).
+    """
+    record_activity(
+        tenant=tenant, actor=user, action="report.export.requested",
+        resource_type="report_export_job", resource_id=str(job.id),
+        metadata={"job_id": str(job.id), "report_code": job.report_code},
+    )
 
 
 def _matching_export_replay(*, existing, report_code, params):

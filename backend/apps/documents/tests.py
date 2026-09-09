@@ -1,4 +1,7 @@
 import hashlib
+import os
+import time
+from pathlib import Path
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
@@ -16,6 +19,7 @@ from .services import (
     find_orphaned_storage_keys,
     open_document_stream,
     purge_expired_documents,
+    purge_orphaned_documents,
     upload_document,
 )
 from .storage import resolve_storage_backend
@@ -224,14 +228,57 @@ class PurgeExpiredDocumentsTests(DocumentFoundationTests):
 
 
 class FindOrphanedStorageKeysTests(DocumentFoundationTests):
+    def backdate(self, key, seconds):
+        path = Path(self._document_storage_dir) / str(self.tenant.id) / key
+        old = time.time() - seconds
+        os.utime(path, (old, old))
+
     def test_a_file_with_no_matching_row_is_reported_as_orphaned(self):
         backend = resolve_storage_backend()
         backend.save(tenant=self.tenant, key="orphan.pdf", chunks=[b"orphan bytes"])
-        self.assertEqual(find_orphaned_storage_keys(tenant=self.tenant), ["orphan.pdf"])
+        self.assertEqual(find_orphaned_storage_keys(tenant=self.tenant, min_age_seconds=0), ["orphan.pdf"])
 
     def test_a_file_with_a_matching_row_is_not_reported(self):
         upload_document(
             tenant=self.tenant, uploaded_by=self.admin, file_obj=make_upload(),
             original_filename="doc.pdf", content_type="application/pdf",
         )
+        self.assertEqual(find_orphaned_storage_keys(tenant=self.tenant, min_age_seconds=0), [])
+
+    def test_a_recently_written_orphan_is_not_reported_under_the_default_age_guard(self):
+        # RC Area 3: required before this could ever run unattended -- a
+        # file this fresh might still belong to an in-flight upload whose
+        # Document row hasn't committed yet.
+        backend = resolve_storage_backend()
+        backend.save(tenant=self.tenant, key="orphan.pdf", chunks=[b"orphan bytes"])
         self.assertEqual(find_orphaned_storage_keys(tenant=self.tenant), [])
+
+    def test_an_orphan_older_than_the_age_guard_is_reported_under_the_default(self):
+        backend = resolve_storage_backend()
+        backend.save(tenant=self.tenant, key="orphan.pdf", chunks=[b"orphan bytes"])
+        self.backdate("orphan.pdf", seconds=3601)
+        self.assertEqual(find_orphaned_storage_keys(tenant=self.tenant), ["orphan.pdf"])
+
+
+class PurgeOrphanedDocumentsTests(DocumentFoundationTests):
+    def test_purge_deletes_aged_orphans_across_tenants_and_returns_the_count(self):
+        backend = resolve_storage_backend()
+        backend.save(tenant=self.tenant, key="orphan-a.pdf", chunks=[b"a"])
+        backend.save(tenant=self.other_tenant, key="orphan-b.pdf", chunks=[b"b"])
+        for tenant, key in ((self.tenant, "orphan-a.pdf"), (self.other_tenant, "orphan-b.pdf")):
+            path = Path(self._document_storage_dir) / str(tenant.id) / key
+            old = time.time() - 3601
+            os.utime(path, (old, old))
+
+        removed = purge_orphaned_documents()
+
+        self.assertEqual(removed, 2)
+        self.assertEqual(find_orphaned_storage_keys(tenant=self.tenant, min_age_seconds=0), [])
+        self.assertEqual(find_orphaned_storage_keys(tenant=self.other_tenant, min_age_seconds=0), [])
+
+    def test_purge_leaves_recently_written_orphans_alone(self):
+        backend = resolve_storage_backend()
+        backend.save(tenant=self.tenant, key="orphan.pdf", chunks=[b"orphan bytes"])
+        removed = purge_orphaned_documents()
+        self.assertEqual(removed, 0)
+        self.assertEqual(find_orphaned_storage_keys(tenant=self.tenant, min_age_seconds=0), ["orphan.pdf"])

@@ -45,6 +45,20 @@ def _require_subject_class_authorization(*, user, tenant, membership, class_grou
         raise ValidationError("User is not assigned to this class and subject")
 
 
+def _require_assessment_campus_scope(*, membership, assessment):
+    """RC Area 3: submit/reject/approve/reopen/publish previously enforced
+    no campus scope at all, unlike create/mark-entry's
+    _require_subject_class_authorization -- a tenant-wide holder of
+    assessment.approve/publish could act on any campus's assessment.
+    Deliberately campus-only, not the full TeacherAssignment check: an
+    approver/publisher is a supervisory role, not expected to hold a
+    TeacherAssignment for the class. Same semantics as
+    apps.reporting.catalogue.require_campus_scope.
+    """
+    if membership.campus_id is not None and assessment.class_group.campus_id != membership.campus_id:
+        raise ValidationError("User is not authorized for this campus")
+
+
 def _resolve_active_grading_scheme(*, tenant, academic_level):
     """unique_active_grading_scheme_per_level (a conditional unique
     constraint on GradingScheme) guarantees at most one row can ever match,
@@ -235,9 +249,10 @@ def submit_assessment_for_approval(*, user, tenant, assessment):
 
 @transaction.atomic
 def reject_assessment_submission(*, user, tenant, assessment, reason):
-    require_permission(user=user, tenant=tenant, permission="assessment.approve")
+    membership = require_permission(user=user, tenant=tenant, permission="assessment.approve")
     require_same_tenant(tenant=tenant, assessment=assessment)
     locked_assessment = Assessment.objects.select_for_update().get(tenant=tenant, pk=assessment.pk)
+    _require_assessment_campus_scope(membership=membership, assessment=locked_assessment)
     if locked_assessment.status != AssessmentStatus.SUBMITTED:
         raise ValidationError("Only submitted assessments can be rejected")
 
@@ -253,9 +268,10 @@ def reject_assessment_submission(*, user, tenant, assessment, reason):
 
 @transaction.atomic
 def approve_assessment(*, user, tenant, assessment):
-    require_permission(user=user, tenant=tenant, permission="assessment.approve")
+    membership = require_permission(user=user, tenant=tenant, permission="assessment.approve")
     require_same_tenant(tenant=tenant, assessment=assessment)
     locked_assessment = Assessment.objects.select_for_update().get(tenant=tenant, pk=assessment.pk)
+    _require_assessment_campus_scope(membership=membership, assessment=locked_assessment)
     if locked_assessment.status != AssessmentStatus.SUBMITTED:
         raise ValidationError("Only submitted assessments can be approved")
     _require_no_unmarked_results(tenant=tenant, assessment=locked_assessment)
@@ -272,9 +288,10 @@ def approve_assessment(*, user, tenant, assessment):
 
 @transaction.atomic
 def reopen_approved_assessment(*, user, tenant, assessment, reason):
-    require_permission(user=user, tenant=tenant, permission="assessment.approve")
+    membership = require_permission(user=user, tenant=tenant, permission="assessment.approve")
     require_same_tenant(tenant=tenant, assessment=assessment)
     locked_assessment = Assessment.objects.select_for_update().get(tenant=tenant, pk=assessment.pk)
+    _require_assessment_campus_scope(membership=membership, assessment=locked_assessment)
     if locked_assessment.status != AssessmentStatus.APPROVED:
         raise ValidationError("Only approved assessments can be reopened")
 
@@ -291,9 +308,10 @@ def reopen_approved_assessment(*, user, tenant, assessment, reason):
 
 @transaction.atomic
 def publish_assessment(*, user, tenant, assessment):
-    require_permission(user=user, tenant=tenant, permission="assessment.publish")
+    membership = require_permission(user=user, tenant=tenant, permission="assessment.publish")
     require_same_tenant(tenant=tenant, assessment=assessment)
     locked_assessment = Assessment.objects.select_for_update().get(tenant=tenant, pk=assessment.pk)
+    _require_assessment_campus_scope(membership=membership, assessment=locked_assessment)
     if locked_assessment.status != AssessmentStatus.APPROVED:
         raise ValidationError("Only approved assessments can be published")
     _require_no_unmarked_results(tenant=tenant, assessment=locked_assessment)

@@ -72,8 +72,62 @@ Grounding: a retroactive review of Milestone 22.4, verified claim-by-claim again
 ### Full test suite (SQLite + PostgreSQL 17)
 SQLite: 779 tests, OK (41 skipped — Postgres-only cases). PostgreSQL 17 (`postgres:17-alpine`, disposable container): 779 tests, OK (0 skipped).
 
-## Area 3 — Critical business journeys
-*Not started.*
+## Area 3 — Critical business journeys ✅ CLOSED
+
+**Baseline under test:** `b085030` (RC Area 2 close). **Date:** 2026-09-09.
+Scope: end-to-end verification of the nine named business journeys (Student lifecycle, Finance, M-Pesa, Attendance, Assessments, Staff & Leave, Notifications, Documents, Reporting) across the frozen backend — not re-testing individual services in isolation. Grounded via direct reading of every service/API file involved before proposing any fix (`admissions/services.py`, `assessments/services.py` all five transition functions, `students/services.py` + `api.py` in full, `reporting/catalogue.py` in full, `CELERY_BEAT_SCHEDULE`, plus a repo-wide grep for the `_require_campus_scope` convention). Full scoping plan reviewed and approved in two rounds before any code was written.
+
+### Findings
+
+| Journey | Finding | Classification | Resolution |
+|---|---|---|---|
+| 1. Admission → Student → Placement | `enroll_application()` created a `Student` but never a `StudentEnrollment`; no permission check; no API existed for Admissions at all — the declared journey had no reachable entry point | **BLOCKER, fixed this area** | New `POST /api/v1/admissions/applications/{id}/enroll/`, gated on `admissions.enroll` (+ `academics.students.enroll` for the placement half). `enroll_application()` rewritten as one `@transaction.atomic` orchestration: locks the `Application` (`select_for_update`), requires `ACCEPTED` status, validates campus consistency across the application/class/actor-membership *before* any write, creates `Student` + `StudentEnrollment` in one transaction (reusing `academics.services.enroll_student`'s own validation), then transitions `Application → ENROLLED`. Concurrent double-enrollment: the lock serializes the two requests: the loser re-reads `status == ENROLLED` and gets a clean `400 ValidationError`, zero extra rows. Verified live under PostgreSQL 17 (`apps/admissions/test_concurrency.py`). |
+| 5. Assessments approval chain | `_require_subject_class_authorization` (full `TeacherAssignment` scope) was enforced for create/mark-entry, but **no campus scope at all** was enforced for submit/reject/approve/reopen/publish — confirmed not mitigated elsewhere (`AssessmentDetailView.get_queryset` filters by tenant only) | **DEFECT, fixed this area** | New `_require_assessment_campus_scope(*, membership, assessment)` helper (same semantics as `reporting.catalogue.require_campus_scope`), called from `reject_assessment_submission`, `approve_assessment`, `reopen_approved_assessment`, `publish_assessment`. `submit_assessment_for_approval` was left unchanged — it already has the full `_require_subject_class_authorization` check. |
+| 8. Documents / Students | `apps.students`'s entire real surface (list, document list/create/download/delete) filtered by **tenant only** — the one app that owns `Student.campus` was the one domain in the codebase not enforcing it, unlike every downstream consumer (Attendance, Assessments, Staff, Leave, Timetable, Reporting) | **DEFECT, fixed this area** | Query-time campus scoping added to `StudentListView.get_queryset` and the student/document lookups backing document list/create/download/delete (cross-campus resources 404, preserving anti-enumeration behaviour), plus a matching service-layer `_require_campus_scope` check in `add_student_document`/`delete_student_document`. `change_student_status`/`place_student` deliberately left unchanged — confirmed to have zero permission checks and zero callers outside tests (no API), so adding campus scope there would mean adding new authorization, not fixing a demonstrated gap. |
+| 9. Reporting authorization | `assessments.results_sheet` had no `authorize` hook — a tenant-wide `reports.assessments.export` holder could pull any class's results, bypassing the scope the same data enforces via direct access | **DEFECT, fixed this area** | New `require_assessment_class_campus_scope` in `reporting/catalogue.py`, same campus-scope semantics as the Assessments fix above, wired as `authorize=` on the `assessments.results_sheet` catalogue entry. |
+| 9. Reporting audit trail | No audit trail for report export request or download — only report *generation* is otherwise observable | **DEFECT, fixed this area** | `report.export.requested` recorded in `request_report_export` (all success paths: fresh job, replay, race-then-replay) and `report.export.downloaded` recorded in `ReportExportDownloadView`, only after authorization and document-availability both succeed. Bounded, non-sensitive metadata only (`job_id`, `report_code`, `document_id`, `row_count`) — never raw report parameters. Denied download attempts are deliberately not audited here (a future security-monitoring concern, not part of this fix). |
+| 3. M-Pesa callback boundary | No HTTP-level test proved the public, unauthenticated webhook endpoints never create financial records directly | **RC VERIFICATION GAP, closed this area** | Added `test_duplicate_webhook_deliveries_never_create_financial_records_on_their_own` (`apps/finance/mpesa_api_tests.py`): two webhook deliveries with the same `TransID` produce two `MpesaCallbackLog` rows and **zero** `IncomingPayment`/`Payment`/`Receipt` rows — proving the verify → process boundary cannot be bypassed by the public endpoint alone, before the existing authenticated verify/process pipeline ever runs. Test passed on first write — no code change required. |
+| 6. Leave cancellation | No concurrency test existed for `cancel_approved_leave_request`, despite the function correctly locking the `LeaveRequest`/`Employee` rows | **RC VERIFICATION GAP, closed this area** | Added `test_competing_cancellations_of_the_same_request_serialize_and_reverse_exactly_once` (`apps/leave/test_concurrency.py`), mirroring the existing approval-race pattern. Passed on first write under PostgreSQL 17 — confirms the existing locking was already correct. |
+| 8. Orphaned-document reconciliation | `find_orphaned_storage_keys` had no minimum-age guard (a file could be flagged the instant it's written, before its owning transaction commits), and was only reachable via a manual management command — no Celery task existed | **Operational hardening, done this area** | `list_keys`/`find_orphaned_storage_keys` now take `min_age_seconds` (default 1 hour); new `purge_orphaned_documents()` service function shared by the management command and a new `purge_orphaned_documents_task` (`apps/documents/tasks.py`), scheduled daily via `CELERY_BEAT_SCHEDULE`. |
+
+### Go-live acceptance decisions requiring sign-off
+
+These are business/product-readiness questions, not code defects — carried forward to Area 8 for explicit sign-off, not buried as ordinary accepted risks.
+
+| Decision | Detail |
+|---|---|
+| **SMS/Email delivery** | Configured SMS and Email notification channels are stub-only — they do not send to a real external provider. `IN_APP` delivery is real. If real external delivery is a declared launch requirement, provider integration is required before go-live; otherwise this ships as a known, accepted limitation. |
+| **Finance organizational scope** | Finance (`fee_statement`, `collections_summary` reports; and the Finance domain generally) has no campus dimension — it is tenant-wide by design today, with no evidence that's wrong. Open question: are finance/bursar users ever campus-restricted in practice? If yes, the fix belongs in Finance's own authorization model (an Area 4 concern), not a Reporting-only patch — patching Reporting alone ahead of this decision would create a false sense of scoping while the underlying Finance APIs stayed tenant-wide, so no such patch was made this area. |
+
+### Accepted risks (ordinary, recorded, no code change)
+
+- **M-Pesa webhook auth** relies on a URL-embedded callback token plus mandatory human verification before any financial record is created — no HMAC signature or IP allowlist. Compensating control: `process_mpesa_callback()` hard-requires the permissioned `verify_mpesa_callback()` attestation, so a forged callback alone cannot manufacture a financial record (now also proven at the HTTP layer — see above). Stronger provider-side auth is backlog.
+- **Assessment approval chain** has no software-enforced segregation of duties between submit/approve/publish — organizations can segregate these responsibilities through role configuration, but the backend does not enforce that the three actors must be distinct users.
+
+### Not a defect (recorded so they aren't re-litigated)
+
+Finance: `InvoiceStatus.VOID` unused (`issue_credit_note` is the documented correction path); no campus scoping in Finance (deliberate, no `Campus` FK on any Finance model); reversals audited via `ActivityEvent` (consistent with Milestone 22.2 precedent). M-Pesa: human-attested verification is deliberate; duplicate `MpesaCallbackLog` rows on retry are harmless; ack-before-process design is deliberate and already tested. Attendance: post-submit session edits and the shared mark/submit permission are both deliberate, documented design. Assessments: correction-audit scoping is correct as-is; "Milestone 7.1" naming is a documentation nit, not a defect. Leave: unlocked draft edits are low-stakes, last-write-wins is acceptable pre-submission. Notifications: manual-only retry is a deliberate dead-letter/human-review pattern; the single `invite_user` notification-bypass caller is unchanged existing precedent. Documents: the Documents-primitives-don't-self-audit design is intentional (Students/Staff audit at their own layer).
+
+### Post-go-live (backlog, no action this area)
+
+Journey 1 enrollment capacity/date-window validation; Journey 2 formal credit-note reversal/self-service workflow (an unimplemented capability with an existing manual-escalation workaround, not a conscious risk); Journey 6 no notification on leave cancel/withdraw; Journey 7 no delivery-confirmation webhook (`DELIVERED` status modeled but never set).
+
+### Journey evidence matrix
+
+| Journey | E2E | Tenant/campus scope | Idempotency/concurrency | Failure/retry | Result |
+|---|---|---|---|---|---|
+| 1. Admission → Student → Placement | Fixed this area (new endpoint) | Fixed this area | PostgreSQL-verified (`apps/admissions/test_concurrency.py`) | Locked/replay-safe by design | ✅ |
+| 2. Finance lifecycle | Pre-existing, re-verified | Deliberate no campus scope | PostgreSQL-verified (`finance/test_concurrency.py`, 11 tests) | Pre-existing, re-verified | ✅ |
+| 3. M-Pesa callback → payment | Pre-existing, re-verified | N/A | New HTTP-boundary test + existing service-level suites (`test_mpesa_concurrency.py`, `test_mpesa_recovery.py`) | Pre-existing, re-verified | ✅ |
+| 4. Attendance | Pre-existing, re-verified | N/A (no campus concept in this journey) | PostgreSQL-verified (`attendance/test_concurrency.py`) | Pre-existing, re-verified | ✅ |
+| 5. Assessments | Pre-existing, re-verified | Fixed this area (4 transition functions) | PostgreSQL-verified (`assessments/test_concurrency.py`) | Pre-existing, re-verified | ✅ |
+| 6. Staff & Leave | Pre-existing, re-verified | Pre-existing | New cancellation-race test added, PostgreSQL-verified | Pre-existing, re-verified | ✅ |
+| 7. Notifications | Pre-existing, re-verified | N/A | PostgreSQL-verified (`notifications/test_concurrency.py`) | Manual retry (accepted design) | ✅ (see go-live decision on SMS/Email) |
+| 8. Documents / Students | Fixed this area (Students campus scope; orphan-purge hardened) | Fixed this area | PostgreSQL-verified (`documents/test_concurrency.py`) | Pre-existing, re-verified | ✅ |
+| 9. Reporting | Fixed this area (results-sheet scope; audit trail) | Fixed this area | PostgreSQL-verified (`reporting/test_concurrency.py`) | Pre-existing, re-verified | ✅ (see go-live decision on finance scope) |
+
+### Full test suite (SQLite + PostgreSQL 17)
+SQLite: 822 tests, OK (44 skipped — Postgres-only cases). PostgreSQL 17 (`postgres:17`, disposable container `school-rc-area3-pg`): 822 tests, OK (0 skipped), including every existing Postgres-only concurrency suite re-run as this area's evidence and the two new concurrency tests (Journey 1 enrollment race, Journey 6 cancellation race). No schema changes — `makemigrations --check --dry-run` clean.
 
 ## Area 4 — Finance & M-Pesa integrity
 *Not started.*
