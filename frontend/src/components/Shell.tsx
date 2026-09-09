@@ -1,31 +1,202 @@
-import { useMemo, useState } from "react";
-import { IconVolume, IconVolumeOff } from "@tabler/icons-react";
+import { Fragment, useMemo, useState } from "react";
+import {
+  ActionIcon, Avatar, Badge, Box, Burger, Group, Menu, NavLink, ScrollArea, Select, Text,
+  Tooltip, UnstyledButton, AppShell as MantineAppShell, useMantineTheme,
+} from "@mantine/core";
+import {
+  IconArrowLeft, IconBell, IconLayoutDashboard, IconLayoutSidebarLeftCollapse, IconLayoutSidebarLeftExpand,
+  IconLogout, IconReportAnalytics, IconShieldCheck, IconStack2, IconVolume, IconVolumeOff,
+} from "@tabler/icons-react";
 import { useAuth, useAccess } from "../app/auth";
+import { useDensity } from "../app/density";
 import { navigation, NavItem } from "../app/navigation";
 import { isSoundEnabled, setSoundEnabled } from "./notifications/notificationSound";
-import { go, Icon, usePath } from "./ui";
+import { go, usePath } from "./ui";
 
-function permitted(item:NavItem,canAny:(p?:string[])=>boolean,moduleEnabled:(m?:string)=>boolean){return moduleEnabled(item.module)&&canAny(item.permissions)}
-
-export function AppShell({children}:{children:React.ReactNode}){
- const {session,logout,selectTenant,platformAccess}=useAuth();const {canAccess}=useAccess();const path=usePath();const [mobile,setMobile]=useState(false);const [collapsed,setCollapsed]=useState(false);const [density,setDensity]=useState<"comfortable"|"compact">(()=>localStorage.getItem("school-erp-density")==="compact"?"compact":"comfortable");const [soundOn,setSoundOn]=useState(()=>isSoundEnabled());
- const groups=useMemo(()=>navigation.map(item=>item.children?{...item,children:item.children.filter(child=>canAccess({module:child.module,anyPermissions:child.permissions}))}:item).filter(item=>canAccess({module:item.module,anyPermissions:item.permissions})&&(!item.children||item.children.length)),[session]);
- const current=groups.flatMap(item=>item.children??[item]).find(item=>item.path===path);
- function link(item:NavItem){if(!item.path)return null;const active=path===item.path||item.path!=="/"&&path.startsWith(item.path+"/");return <button key={item.path} className={`nav-link ${active?"active":""}`} onClick={()=>{go(item.path!);setMobile(false)}} title={item.label}><Icon name={item.glyph}/><span>{item.label}</span></button>}
- function toggleDensity(){const next=density==="comfortable"?"compact":"comfortable";localStorage.setItem("school-erp-density",next);setDensity(next)}
- function toggleSound(){const next=!soundOn;setSoundEnabled(next);setSoundOn(next)}
- return <div className={`app-frame ${collapsed?"is-compact":""} density-${density} ${mobile?"mobile-open":""}`}>
-  <aside className="sidebar">
-   <div className="brand"><div className="brand-mark">S</div><div><strong>Scholaris</strong><small>School ERP</small></div></div>
-   <nav className="nav" aria-label="Primary navigation">{groups.map(item=>item.children?<section className="nav-group" key={item.label}><p>{item.label}</p>{item.children.map(link)}</section>:link(item))}</nav>
-   <div className="sidebar-foot">{platformAccess&&<button className="nav-link platform-link" onClick={()=>go("/platform")}><Icon name="shield"/><span>Platform console</span></button>}<button className="collapse-button" onClick={toggleDensity}><Icon name="layers"/><span>{density==="compact"?"Comfortable density":"Compact density"}</span></button><button className="collapse-button" onClick={toggleSound}>{soundOn?<IconVolume size={18}/>:<IconVolumeOff size={18}/>}<span>{soundOn?"Sound on":"Sound off"}</span></button><button className="collapse-button" onClick={()=>setCollapsed(!collapsed)}><span>{collapsed?"›":"‹"}</span><span>Collapse menu</span></button></div>
-  </aside>
-  {mobile&&<button className="scrim" aria-label="Close navigation" onClick={()=>setMobile(false)}/>} 
-  <div className="app-main">
-   <header className="topbar"><button className="icon-button menu-button" onClick={()=>setMobile(true)} aria-label="Open navigation"><Icon name="menu"/></button><div className="crumb"><span>{current?.label??"Dashboard"}</span></div><button className="icon-button" aria-label="Notifications" onClick={()=>go("/communications/inbox")}><Icon name="bell"/></button><select className="tenant-select" aria-label="Active school" value={session?.active_tenant?.slug??""} onChange={e=>void selectTenant(e.target.value)}>{session?.memberships.map(item=><option value={item.tenant.slug} key={item.tenant.id}>{item.tenant.name}</option>)}</select><div className="account"><span className="avatar">{session?.user.name.slice(0,2).toUpperCase()}</span><div><strong>{session?.user.name}</strong><small>{session?.memberships.find(m=>m.tenant.slug===session.active_tenant?.slug)?.role}</small></div><button className="text-button" onClick={()=>void logout()}>Sign out</button></div></header>
-   <main className="content">{children}</main>
-  </div>
- </div>
+function NavButton({ item, path, collapsed, onNavigate }: { item: NavItem; path: string; collapsed: boolean; onNavigate: () => void }) {
+  const theme = useMantineTheme();
+  if (!item.path) return null;
+  const active = path === item.path || (item.path !== "/" && path.startsWith(item.path + "/"));
+  const ItemIcon = item.icon;
+  const link = (
+    <NavLink
+      component="button"
+      type="button"
+      active={active}
+      variant="subtle"
+      label={collapsed ? undefined : item.label}
+      leftSection={<ItemIcon size={18} stroke={1.75} />}
+      onClick={() => { go(item.path!); onNavigate(); }}
+      c={active ? theme.other.sidebarActiveForeground : theme.other.sidebarForeground}
+      bg={active ? theme.other.sidebarActive : undefined}
+      style={{ borderLeft: `3px solid ${active ? theme.colors.indigo[6] : "transparent"}`, borderRadius: 6 }}
+    />
+  );
+  return collapsed ? <Tooltip label={item.label} position="right" key={item.path}>{link}</Tooltip> : <Box key={item.path}>{link}</Box>;
 }
 
-export function PlatformShell({children}:{children:React.ReactNode}){const {session,logout}=useAuth();const path=usePath();return <div className="platform-frame"><aside className="platform-sidebar"><div className="brand"><div className="brand-mark platform-mark">P</div><div><strong>Scholaris Platform</strong><small>Super administration</small></div></div><nav className="nav"><button className={`nav-link ${path==="/platform"?"active":""}`} onClick={()=>go("/platform")}><Icon name="grid"/><span>Overview</span></button><button className={`nav-link ${path==="/platform/plans"?"active":""}`} onClick={()=>go("/platform/plans")}><Icon name="layers"/><span>Plans</span></button><button className={`nav-link ${path==="/platform/audit"?"active":""}`} onClick={()=>go("/platform/audit")}><Icon name="report"/><span>Audit trail</span></button></nav><button className="back-school" onClick={()=>go("/")}>← Return to school ERP</button></aside><div className="app-main"><header className="topbar platform-topbar"><div><span className="platform-label">Platform scope</span></div><div className="account"><span className="avatar">{session?.user.name.slice(0,2).toUpperCase()}</span><strong>{session?.user.name}</strong><button className="text-button" onClick={()=>void logout()}>Sign out</button></div></header><main className="content">{children}</main></div></div>}
+export function AppShell({ children }: { children: React.ReactNode }) {
+  const { session, logout, selectTenant, platformAccess } = useAuth();
+  const { canAccess } = useAccess();
+  const theme = useMantineTheme();
+  const path = usePath();
+  const { density, toggleDensity } = useDensity();
+  const [mobileOpened, setMobileOpened] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  const [soundOn, setSoundOn] = useState(() => isSoundEnabled());
+
+  const groups = useMemo(
+    () => navigation
+      .map(item => item.children ? { ...item, children: item.children.filter(child => canAccess({ module: child.module, anyPermissions: child.permissions })) } : item)
+      .filter(item => canAccess({ module: item.module, anyPermissions: item.permissions }) && (!item.children || item.children.length)),
+    [session],
+  );
+  const current = groups.flatMap(item => item.children ?? [item]).find(item => item.path === path);
+  const activeRole = session?.memberships?.find(m => m.tenant.slug === session.active_tenant?.slug)?.role;
+  const initials = session?.user?.name?.slice(0, 2).toUpperCase();
+
+  function toggleSound() { const next = !soundOn; setSoundEnabled(next); setSoundOn(next); }
+
+  return (
+    <MantineAppShell
+      header={{ height: 64 }}
+      navbar={{ width: collapsed ? 76 : 260, breakpoint: "sm", collapsed: { mobile: !mobileOpened } }}
+      padding="md"
+    >
+      <MantineAppShell.Header>
+        <Group h="100%" px="md" justify="space-between" wrap="nowrap">
+          <Group gap="sm" wrap="nowrap">
+            <Burger opened={mobileOpened} onClick={() => setMobileOpened(o => !o)} hiddenFrom="sm" size="sm" />
+            <ActionIcon variant="subtle" color="gray" visibleFrom="sm" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={() => setCollapsed(!collapsed)}>
+              {collapsed ? <IconLayoutSidebarLeftExpand size={18} /> : <IconLayoutSidebarLeftCollapse size={18} />}
+            </ActionIcon>
+            <Text fw={600} size="sm" c={theme.other.textPrimary}>{current?.label ?? "Dashboard"}</Text>
+          </Group>
+          <Group gap="sm" wrap="nowrap">
+            <ActionIcon variant="subtle" color="gray" aria-label="Notifications" onClick={() => go("/communications/inbox")}><IconBell size={18} /></ActionIcon>
+            <Select
+              aria-label="Active school"
+              data={(session?.memberships ?? []).map(item => ({ value: item.tenant.slug, label: item.tenant.name }))}
+              value={session?.active_tenant?.slug ?? null}
+              onChange={value => { if (value) void selectTenant(value); }}
+              w={180}
+              allowDeselect={false}
+            />
+            <Menu position="bottom-end" width={200}>
+              <Menu.Target>
+                <UnstyledButton>
+                  <Group gap={8} wrap="nowrap">
+                    <Avatar radius="xl" size={34} color="indigo">{initials}</Avatar>
+                    <Box visibleFrom="sm" style={{ textAlign: "left" }}>
+                      <Text size="sm" fw={600} lineClamp={1}>{session?.user?.name}</Text>
+                      <Text size="xs" c="dimmed" lineClamp={1}>{activeRole}</Text>
+                    </Box>
+                  </Group>
+                </UnstyledButton>
+              </Menu.Target>
+              <Menu.Dropdown>
+                <Menu.Item leftSection={<IconLogout size={14} />} onClick={() => void logout()}>Sign out</Menu.Item>
+              </Menu.Dropdown>
+            </Menu>
+          </Group>
+        </Group>
+      </MantineAppShell.Header>
+
+      <MantineAppShell.Navbar className="app-shell-navbar" style={{ background: theme.other.sidebarBg, borderRight: `1px solid ${theme.other.sidebarBorder}` }}>
+        <MantineAppShell.Section p="md">
+          <Group gap={11} wrap="nowrap">
+            <Box style={{ width: 34, height: 34, borderRadius: 9, background: "linear-gradient(145deg,#7180ff,#4254d8)", display: "grid", placeItems: "center", color: "#fff", fontWeight: 800, flexShrink: 0 }}>S</Box>
+            {!collapsed && <Box><Text fw={700} size="sm" c={theme.other.sidebarForeground}>Scholaris</Text><Text size="xs" c={theme.other.sidebarMuted}>School ERP</Text></Box>}
+          </Group>
+        </MantineAppShell.Section>
+        <MantineAppShell.Section grow component={ScrollArea} scrollbarSize={6} px="sm">
+          {groups.map(item => item.children ? (
+            <Box key={item.label} mb="md">
+              {!collapsed && <Text size="xs" fw={700} tt="uppercase" c={theme.other.sidebarMuted} px={8} pb={6} style={{ letterSpacing: "0.08em" }}>{item.label}</Text>}
+              <Box pl={collapsed ? 0 : 10} style={collapsed ? undefined : { borderLeft: `1px solid ${theme.other.sidebarBorder}` }}>
+                {item.children.map((child, index) => {
+                  const previousSection = index > 0 ? item.children![index - 1].section : undefined;
+                  const showSection = !collapsed && Boolean(child.section) && child.section !== previousSection;
+                  return (
+                    <Fragment key={child.path}>
+                      {showSection && (
+                        <Text size="xs" fw={600} tt="uppercase" c={theme.other.sidebarMuted} pl={8} pt={index === 0 ? 0 : "xs"} pb={2} style={{ letterSpacing: "0.06em" }}>
+                          {child.section}
+                        </Text>
+                      )}
+                      <NavButton item={child} path={path} collapsed={collapsed} onNavigate={() => setMobileOpened(false)} />
+                    </Fragment>
+                  );
+                })}
+              </Box>
+            </Box>
+          ) : <NavButton key={item.path} item={item} path={path} collapsed={collapsed} onNavigate={() => setMobileOpened(false)} />)}
+        </MantineAppShell.Section>
+        <MantineAppShell.Section p="sm" style={{ borderTop: `1px solid ${theme.other.sidebarBorder}` }}>
+          {platformAccess && (
+            <NavLink component="button" type="button" variant="subtle" label={collapsed ? undefined : "Platform console"} leftSection={<IconShieldCheck size={18} />} onClick={() => go("/platform")} c="violet.7" />
+          )}
+          <NavLink component="button" type="button" variant="subtle" label={collapsed ? undefined : (density === "compact" ? "Comfortable density" : "Compact density")} leftSection={<IconStack2 size={18} />} onClick={toggleDensity} c={theme.other.sidebarMuted} />
+          <NavLink component="button" type="button" variant="subtle" label={collapsed ? undefined : (soundOn ? "Sound on" : "Sound off")} leftSection={soundOn ? <IconVolume size={18} /> : <IconVolumeOff size={18} />} onClick={toggleSound} c={theme.other.sidebarMuted} />
+        </MantineAppShell.Section>
+      </MantineAppShell.Navbar>
+
+      <MantineAppShell.Main className={`density-${density}`}>{children}</MantineAppShell.Main>
+    </MantineAppShell>
+  );
+}
+
+export function PlatformShell({ children }: { children: React.ReactNode }) {
+  const { session, logout } = useAuth();
+  const path = usePath();
+  const theme = useMantineTheme();
+  const initials = session?.user?.name?.slice(0, 2).toUpperCase();
+  const items: { path: string; label: string; icon: NavItem["icon"] }[] = [
+    { path: "/platform", label: "Overview", icon: IconLayoutDashboard },
+    { path: "/platform/plans", label: "Plans", icon: IconStack2 },
+    { path: "/platform/audit", label: "Audit trail", icon: IconReportAnalytics },
+  ];
+  return (
+    <MantineAppShell header={{ height: 64 }} navbar={{ width: 260, breakpoint: "sm" }} padding="md">
+      <MantineAppShell.Header>
+        <Group h="100%" px="md" justify="space-between">
+          <Badge color="violet" variant="light" size="sm" tt="uppercase">Platform scope</Badge>
+          <Menu position="bottom-end" width={200}>
+            <Menu.Target>
+              <UnstyledButton>
+                <Group gap={8} wrap="nowrap">
+                  <Avatar radius="xl" size={34} color="violet">{initials}</Avatar>
+                  <Text size="sm" fw={600} visibleFrom="sm">{session?.user?.name}</Text>
+                </Group>
+              </UnstyledButton>
+            </Menu.Target>
+            <Menu.Dropdown>
+              <Menu.Item leftSection={<IconLogout size={14} />} onClick={() => void logout()}>Sign out</Menu.Item>
+            </Menu.Dropdown>
+          </Menu>
+        </Group>
+      </MantineAppShell.Header>
+      <MantineAppShell.Navbar className="app-shell-navbar" style={{ background: theme.other.sidebarBg, borderRight: `1px solid ${theme.other.sidebarBorder}` }}>
+        <MantineAppShell.Section p="md">
+          <Group gap={11} wrap="nowrap">
+            <Box style={{ width: 34, height: 34, borderRadius: 9, background: "linear-gradient(145deg,#9b8cff,#684ac7)", display: "grid", placeItems: "center", color: "#fff", fontWeight: 800, flexShrink: 0 }}>P</Box>
+            <Box><Text fw={700} size="sm" c={theme.other.sidebarForeground}>Scholaris Platform</Text><Text size="xs" c={theme.other.sidebarMuted}>Super administration</Text></Box>
+          </Group>
+        </MantineAppShell.Section>
+        <MantineAppShell.Section grow px="sm">
+          {items.map(item => (
+            <NavLink key={item.path} component="button" type="button" variant="subtle" active={path === item.path}
+              label={item.label} leftSection={<item.icon size={18} stroke={1.75} />} onClick={() => go(item.path)}
+              c={path === item.path ? "violet.7" : theme.other.sidebarForeground}
+              bg={path === item.path ? theme.other.sidebarActive : undefined}
+              style={{ borderLeft: `3px solid ${path === item.path ? "var(--mantine-color-violet-6)" : "transparent"}`, borderRadius: 6 }} />
+          ))}
+        </MantineAppShell.Section>
+        <MantineAppShell.Section p="sm" style={{ borderTop: `1px solid ${theme.other.sidebarBorder}` }}>
+          <NavLink component="button" type="button" variant="subtle" label="Return to school ERP" leftSection={<IconArrowLeft size={18} />} onClick={() => go("/")} c={theme.other.sidebarMuted} />
+        </MantineAppShell.Section>
+      </MantineAppShell.Navbar>
+      <MantineAppShell.Main>{children}</MantineAppShell.Main>
+    </MantineAppShell>
+  );
+}
