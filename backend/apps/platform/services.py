@@ -10,6 +10,7 @@ from .models import PlatformAuditEvent, SubscriptionPlan, TenantModuleOverride, 
 
 DEFAULT_TENANT_ADMIN_PERMISSIONS = [
     "tenancy.membership.manage", "tenancy.membership.view", "tenancy.role.manage", "tenancy.role.view",
+    "academics.setup.view",
 ]
 
 

@@ -27,6 +27,7 @@ PERMISSION_CATALOGUE = {
     "students.document.manage": "Upload and delete student documents",
 
     # Academics / assessments
+    "academics.setup.view": "View academic years and levels",
     "academics.students.enroll": "Place a student into a class/section for an academic year",
     "assessment.manage": "Open, mark, submit, and manage assessments",
     "assessment.record.view": "View assessment records and results",

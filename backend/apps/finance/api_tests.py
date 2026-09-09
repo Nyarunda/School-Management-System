@@ -103,6 +103,14 @@ class FinanceApiTests(TestCase):
         response = self.client.get("/api/v1/finance/setup/", **self.headers())
         self.assertEqual(response.status_code, 403)
 
+    def test_payment_methods_list_is_tenant_scoped(self):
+        foreign_tenant_method = PaymentMethod.objects.create(tenant=self.school_b, name="Cash", code="CASH")
+        response = self.client.get("/api/v1/finance/payment-methods/", **self.headers())
+        self.assertEqual(response.status_code, 200)
+        codes = [row["code"] for row in response.data["results"]]
+        self.assertIn("BANK", codes)
+        self.assertNotIn(foreign_tenant_method.code, codes)
+
     def test_updating_finance_setup_records_one_activity_event_with_bounded_metadata(self):
         response = self.client.patch(
             "/api/v1/finance/setup/",

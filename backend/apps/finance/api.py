@@ -172,6 +172,29 @@ class FeeItemListCreateView(ListCreateAPIView):
         serializer.save(tenant=tenant, category=category)
 
 
+class PaymentMethodSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PaymentMethod
+        fields = ["id", "name", "code", "is_active"]
+        read_only_fields = fields
+
+
+class PaymentMethodListView(ListAPIView):
+    """Read-only catalogue -- PaymentMethod rows are only ever created by the
+    M-Pesa gateway's auto-provisioning (code="MPESA") or directly via
+    shell/tests today; this exists only so the record-payment UI can
+    populate a picker from existing rows, the same shape as the
+    academics.api academic-year/level catalogues.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = PaymentMethodSerializer
+    pagination_class = FinancePagination
+
+    def get_queryset(self):
+        return PaymentMethod.objects.for_tenant(resolve_finance_tenant(self.request, "finance.setup.view")).order_by("name")
+
+
 class FeeStructureLineSerializer(serializers.ModelSerializer):
     fee_item_name = serializers.CharField(source="fee_item.name", read_only=True)
 
