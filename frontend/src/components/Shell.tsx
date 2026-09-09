@@ -57,7 +57,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       .filter(item => canAccess({ module: item.module, anyPermissions: item.permissions }) && (!item.children || item.children.length)),
     [session],
   );
-  const current = groups.flatMap(item => item.children ?? [item]).find(item => item.path === path);
   const activeRole = session?.memberships?.find(m => m.tenant.slug === session.active_tenant?.slug)?.role;
   const initials = session?.user?.name?.slice(0, 2).toUpperCase();
 
@@ -76,7 +75,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <ActionIcon variant="subtle" color="gray" visibleFrom="sm" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={() => setCollapsed(!collapsed)}>
               {collapsed ? <IconLayoutSidebarLeftExpand size={18} /> : <IconLayoutSidebarLeftCollapse size={18} />}
             </ActionIcon>
-            <Text fw={600} size="sm" c={theme.other.textPrimary}>{current?.label ?? "Dashboard"}</Text>
           </Group>
           <ActionIcon variant="subtle" color="gray" aria-label="Notifications" onClick={() => go("/communications/inbox")}><IconBell size={18} /></ActionIcon>
         </Group>
