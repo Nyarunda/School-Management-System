@@ -33,6 +33,7 @@ class SessionView(APIView):
                 "id": str(request.user.id),
                 "username": request.user.get_username(),
                 "name": request.user.get_full_name() or request.user.get_username(),
+                "is_platform_admin": request.user.is_superuser,
             },
             "active_tenant": {
                 "id": str(active.tenant.id),

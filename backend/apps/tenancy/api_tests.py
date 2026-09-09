@@ -21,6 +21,28 @@ class SessionApiTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data["active_tenant"]["slug"], "school-a")
         self.assertEqual(response.data["permissions"], ["finance.invoice.view"])
+        self.assertFalse(response.data["user"]["is_platform_admin"])
+
+    def test_session_bootstrap_reports_platform_admin_for_superusers(self):
+        user = User.objects.create_user(username="root", password="secret", is_superuser=True, is_staff=True)
+        client = APIClient()
+        client.force_authenticate(user)
+
+        response = client.get("/api/v1/session/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.data["user"]["is_platform_admin"])
+
+    def test_session_bootstrap_reports_no_platform_admin_without_any_membership(self):
+        user = User.objects.create_user(username="orphan", password="secret")
+        client = APIClient()
+        client.force_authenticate(user)
+
+        response = client.get("/api/v1/session/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIsNone(response.data["active_tenant"])
+        self.assertFalse(response.data["user"]["is_platform_admin"])
 
 
 class AuthApiTests(TestCase):
