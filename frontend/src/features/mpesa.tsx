@@ -29,7 +29,7 @@ export function MpesaPage(){
  const {can}=useAccess();
  const [tab,setTab]=useState(can("finance.mpesa.stk_push.view")?STK_TAB:CALLBACK_TAB);
  return <>
-  <WorkspaceHeader eyebrow="Finance · M-Pesa" title="M-Pesa operations" description="Track customer prompts separately from the secure callback verification queue."/>
+  <WorkspaceHeader title="M-Pesa operations" description="Track customer prompts separately from the secure callback verification queue."/>
   <RecordTabs tabs={[STK_TAB,CALLBACK_TAB]} value={tab} onChange={setTab}/>
   {tab===STK_TAB?<StkWorkspace/>:<CallbackWorkspace/>}
  </>;

@@ -4,7 +4,7 @@ import {
   Tooltip, UnstyledButton, AppShell as MantineAppShell, useMantineTheme,
 } from "@mantine/core";
 import {
-  IconArrowLeft, IconBell, IconCheck, IconChevronDown, IconLayoutDashboard, IconLayoutSidebarLeftCollapse,
+  IconArrowLeft, IconBell, IconCheck, IconChevronDown, IconChevronRight, IconLayoutDashboard, IconLayoutSidebarLeftCollapse,
   IconLayoutSidebarLeftExpand, IconLogout, IconReportAnalytics, IconShieldCheck, IconStack2, IconVolume, IconVolumeOff,
 } from "@tabler/icons-react";
 import { useAuth, useAccess } from "../app/auth";
@@ -21,7 +21,7 @@ const NAV_ROW_STYLES = { root: { paddingTop: 7, paddingBottom: 7, paddingLeft: 1
 function NavButton({ item, path, collapsed, onNavigate }: { item: NavItem; path: string; collapsed: boolean; onNavigate: () => void }) {
   const theme = useMantineTheme();
   if (!item.path) return null;
-  const active = path === item.path || (item.path !== "/" && path.startsWith(item.path + "/"));
+  const active = matchesNavPath(item.path, path);
   const ItemIcon = item.icon;
   const link = (
     <NavLink
@@ -35,21 +35,65 @@ function NavButton({ item, path, collapsed, onNavigate }: { item: NavItem; path:
       c={active ? theme.other.sidebarActiveForeground : theme.other.sidebarForeground}
       bg={active ? theme.other.sidebarActive : undefined}
       styles={NAV_ROW_STYLES}
-      style={{ borderLeft: `3px solid ${active ? theme.colors.indigo[6] : "transparent"}`, borderRadius: 6, fontSize: 13.5 }}
+      style={{ borderRadius: 8, fontSize: 13.5 }}
     />
   );
   return collapsed ? <Tooltip label={item.label} position="right" key={item.path}>{link}</Tooltip> : <Box key={item.path}>{link}</Box>;
 }
 
+// Group label + leaf label for the current route, read straight off the same
+// filtered `groups` the sidebar renders -- so the breadcrumb can never show a
+// section the user doesn't have access to, and never drifts from the sidebar.
+// Same prefix-match NavButton uses for its own active state, so a record
+// detail route (e.g. /students/<id>, not itself a nav entry) still resolves
+// to its list page's breadcrumb instead of rendering empty.
+function matchesNavPath(itemPath: string | undefined, path: string): boolean {
+  return !!itemPath && (path === itemPath || (itemPath !== "/" && path.startsWith(itemPath + "/")));
+}
+
+function breadcrumbFor(groups: NavItem[], path: string): string[] {
+  for (const item of groups) {
+    if (matchesNavPath(item.path, path)) return [item.label];
+    const child = item.children?.find(c => matchesNavPath(c.path, path));
+    if (child) return [item.label, child.label];
+  }
+  return [];
+}
+
+function AccountMenu({ trigger }: { trigger: React.ReactNode }) {
+  const { logout, platformAccess } = useAuth();
+  const { density, toggleDensity } = useDensity();
+  const [soundOn, setSoundOn] = useState(() => isSoundEnabled());
+  function toggleSound() { const next = !soundOn; setSoundEnabled(next); setSoundOn(next); }
+  return (
+    <Menu position="bottom-end" width={220} withinPortal closeOnItemClick={false}>
+      <Menu.Target>{trigger}</Menu.Target>
+      <Menu.Dropdown>
+        {platformAccess && <>
+          <Menu.Item leftSection={<IconShieldCheck size={14} />} onClick={() => go("/platform")}>Platform console</Menu.Item>
+          <Menu.Divider />
+        </>}
+        <Menu.Item leftSection={soundOn ? <IconVolume size={14} /> : <IconVolumeOff size={14} />} rightSection={<Text size="xs" c="dimmed">{soundOn ? "On" : "Off"}</Text>} onClick={toggleSound}>
+          Sound notifications
+        </Menu.Item>
+        <Menu.Item leftSection={<IconStack2 size={14} />} rightSection={<Text size="xs" c="dimmed">{density === "compact" ? "Compact" : "Comfortable"}</Text>} onClick={toggleDensity}>
+          Density
+        </Menu.Item>
+        <Menu.Divider />
+        <Menu.Item leftSection={<IconLogout size={14} />} onClick={() => void logout()}>Sign out</Menu.Item>
+      </Menu.Dropdown>
+    </Menu>
+  );
+}
+
 export function AppShell({ children }: { children: React.ReactNode }) {
-  const { session, logout, selectTenant, platformAccess } = useAuth();
+  const { session, selectTenant } = useAuth();
   const { canAccess } = useAccess();
   const theme = useMantineTheme();
   const path = usePath();
-  const { density, toggleDensity } = useDensity();
+  const { density } = useDensity();
   const [mobileOpened, setMobileOpened] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
-  const [soundOn, setSoundOn] = useState(() => isSoundEnabled());
 
   const groups = useMemo(
     () => navigation
@@ -59,43 +103,26 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   );
   const activeRole = session?.memberships?.find(m => m.tenant.slug === session.active_tenant?.slug)?.role;
   const initials = session?.user?.name?.slice(0, 2).toUpperCase();
-
-  function toggleSound() { const next = !soundOn; setSoundEnabled(next); setSoundOn(next); }
+  const crumbs = breadcrumbFor(groups, path);
 
   return (
     <MantineAppShell
       header={{ height: 56 }}
       navbar={{ width: collapsed ? 76 : 266, breakpoint: "sm", collapsed: { mobile: !mobileOpened } }}
-      padding="md"
+      padding={0}
     >
       <MantineAppShell.Header>
         <Group h="100%" px="md" justify="space-between" wrap="nowrap">
-          <Group gap="sm" wrap="nowrap">
-            <Burger opened={mobileOpened} onClick={() => setMobileOpened(o => !o)} hiddenFrom="sm" size="sm" />
-            <ActionIcon variant="subtle" color="gray" visibleFrom="sm" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={() => setCollapsed(!collapsed)}>
-              {collapsed ? <IconLayoutSidebarLeftExpand size={18} /> : <IconLayoutSidebarLeftCollapse size={18} />}
-            </ActionIcon>
-          </Group>
-          <ActionIcon variant="subtle" color="gray" aria-label="Notifications" onClick={() => go("/communications/inbox")}><IconBell size={18} /></ActionIcon>
-        </Group>
-      </MantineAppShell.Header>
-
-      <MantineAppShell.Navbar className="app-shell-navbar" style={{ background: theme.other.sidebarBg, borderRight: `1px solid ${theme.other.sidebarBorder}` }}>
-        <MantineAppShell.Section p="sm" style={{ borderBottom: `1px solid ${theme.other.sidebarBorder}` }}>
-          <Menu position="right-start" width={240} withinPortal disabled={(session?.memberships?.length ?? 0) < 2}>
+          <Menu position="bottom-start" width={240} withinPortal disabled={(session?.memberships?.length ?? 0) < 2}>
             <Menu.Target>
-              <UnstyledButton style={{ width: "100%", borderRadius: 8, padding: 6 }}>
-                <Group gap={10} wrap="nowrap" justify="space-between">
-                  <Group gap={10} wrap="nowrap">
-                    <Box style={{ width: 30, height: 30, borderRadius: 8, background: "linear-gradient(145deg,#7180ff,#4254d8)", display: "grid", placeItems: "center", color: "#fff", fontWeight: 800, flexShrink: 0, fontSize: 13 }}>S</Box>
-                    {!collapsed && (
-                      <Box style={{ minWidth: 0 }}>
-                        <Text fw={700} size="sm" c={theme.other.sidebarForeground} lineClamp={1}>{session?.active_tenant?.name ?? "Scholaris"}</Text>
-                        <Text size="xs" c={theme.other.sidebarMuted} lineClamp={1}>School workspace</Text>
-                      </Box>
-                    )}
-                  </Group>
-                  {!collapsed && (session?.memberships?.length ?? 0) > 1 && <IconChevronDown size={14} color={theme.other.sidebarMuted} />}
+              <UnstyledButton style={{ borderRadius: 8, padding: 6 }}>
+                <Group gap={10} wrap="nowrap">
+                  <Box style={{ width: 30, height: 30, borderRadius: 8, background: "linear-gradient(145deg,#7180ff,#4254d8)", display: "grid", placeItems: "center", color: "#fff", fontWeight: 800, flexShrink: 0, fontSize: 13 }}>S</Box>
+                  <Box style={{ minWidth: 0, textAlign: "left" }} visibleFrom="sm">
+                    <Text fw={700} size="sm" c={theme.other.textPrimary} lineClamp={1}>{session?.active_tenant?.name ?? "Scholaris"}</Text>
+                    <Text size="xs" c="dimmed" lineClamp={1}>School workspace</Text>
+                  </Box>
+                  {(session?.memberships?.length ?? 0) > 1 && <IconChevronDown size={14} color="var(--mantine-color-dimmed)" />}
                 </Group>
               </UnstyledButton>
             </Menu.Target>
@@ -109,7 +136,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               ))}
             </Menu.Dropdown>
           </Menu>
-        </MantineAppShell.Section>
+          <Group gap="sm" wrap="nowrap">
+            <ActionIcon variant="subtle" color="gray" aria-label="Notifications" onClick={() => go("/communications/inbox")}><IconBell size={18} /></ActionIcon>
+            <AccountMenu trigger={<UnstyledButton aria-label="Account menu"><Avatar radius="xl" size={32} color="indigo">{initials}</Avatar></UnstyledButton>} />
+          </Group>
+        </Group>
+      </MantineAppShell.Header>
+
+      <MantineAppShell.Navbar className="app-shell-navbar" style={{ background: theme.other.sidebarBg, borderRight: `1px solid ${theme.other.sidebarBorder}` }}>
         <MantineAppShell.Section grow component={ScrollArea} scrollbarSize={6} px="sm" pt="sm">
           {groups.map(item => item.children ? (
             <Box key={item.label} mb="md">
@@ -134,42 +168,40 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           ) : <NavButton key={item.path} item={item} path={path} collapsed={collapsed} onNavigate={() => setMobileOpened(false)} />)}
         </MantineAppShell.Section>
         <MantineAppShell.Section p="xs" style={{ borderTop: `1px solid ${theme.other.sidebarBorder}` }}>
-          <Menu position="top-start" width={220} withinPortal closeOnItemClick={false}>
-            <Menu.Target>
-              <UnstyledButton style={{ width: "100%", borderRadius: 8, padding: 6 }}>
-                <Group gap={8} wrap="nowrap" justify="space-between">
-                  <Group gap={8} wrap="nowrap">
-                    <Avatar radius="xl" size={30} color="indigo">{initials}</Avatar>
-                    {!collapsed && (
-                      <Box style={{ minWidth: 0, textAlign: "left" }}>
-                        <Text size="sm" fw={600} lineClamp={1}>{session?.user?.name}</Text>
-                        <Text size="xs" c={theme.other.sidebarMuted} lineClamp={1}>{activeRole}</Text>
-                      </Box>
-                    )}
-                  </Group>
-                  {!collapsed && <IconChevronDown size={14} color={theme.other.sidebarMuted} />}
+          <AccountMenu trigger={
+            <UnstyledButton style={{ width: "100%", borderRadius: 8, padding: 6 }}>
+              <Group gap={8} wrap="nowrap" justify="space-between">
+                <Group gap={8} wrap="nowrap">
+                  <Avatar radius="xl" size={30} color="indigo">{initials}</Avatar>
+                  {!collapsed && (
+                    <Box style={{ minWidth: 0, textAlign: "left" }}>
+                      <Text size="sm" fw={600} lineClamp={1}>{session?.user?.name}</Text>
+                      <Text size="xs" c={theme.other.sidebarMuted} lineClamp={1}>{activeRole}</Text>
+                    </Box>
+                  )}
                 </Group>
-              </UnstyledButton>
-            </Menu.Target>
-            <Menu.Dropdown>
-              {platformAccess && <>
-                <Menu.Item leftSection={<IconShieldCheck size={14} />} onClick={() => go("/platform")}>Platform console</Menu.Item>
-                <Menu.Divider />
-              </>}
-              <Menu.Item leftSection={soundOn ? <IconVolume size={14} /> : <IconVolumeOff size={14} />} rightSection={<Text size="xs" c="dimmed">{soundOn ? "On" : "Off"}</Text>} onClick={toggleSound}>
-                Sound notifications
-              </Menu.Item>
-              <Menu.Item leftSection={<IconStack2 size={14} />} rightSection={<Text size="xs" c="dimmed">{density === "compact" ? "Compact" : "Comfortable"}</Text>} onClick={toggleDensity}>
-                Density
-              </Menu.Item>
-              <Menu.Divider />
-              <Menu.Item leftSection={<IconLogout size={14} />} onClick={() => void logout()}>Sign out</Menu.Item>
-            </Menu.Dropdown>
-          </Menu>
+                {!collapsed && <IconChevronDown size={14} color={theme.other.sidebarMuted} />}
+              </Group>
+            </UnstyledButton>
+          } />
         </MantineAppShell.Section>
       </MantineAppShell.Navbar>
 
-      <MantineAppShell.Main className={`density-${density}`}>{children}</MantineAppShell.Main>
+      <MantineAppShell.Main className={`density-${density}`}>
+        <Group px={{ base: "md", sm: "lg" }} py="sm" gap={6} wrap="nowrap" style={{ borderBottom: `1px solid ${theme.other.borderDefault}` }}>
+          <Burger opened={mobileOpened} onClick={() => setMobileOpened(o => !o)} hiddenFrom="sm" size="sm" />
+          <ActionIcon variant="subtle" color="gray" visibleFrom="sm" size="sm" aria-label={collapsed ? "Expand navigation" : "Collapse navigation"} onClick={() => setCollapsed(!collapsed)}>
+            {collapsed ? <IconLayoutSidebarLeftExpand size={16} /> : <IconLayoutSidebarLeftCollapse size={16} />}
+          </ActionIcon>
+          {crumbs.map((label, index) => (
+            <Fragment key={label}>
+              {index > 0 && <IconChevronRight size={13} color="var(--mantine-color-dimmed)" />}
+              <Text size="sm" fw={index === 0 ? 600 : 500} c={index === crumbs.length - 1 && crumbs.length > 1 ? "dimmed" : theme.other.textPrimary}>{label}</Text>
+            </Fragment>
+          ))}
+        </Group>
+        <Box px={{ base: "md", sm: "lg" }} py="lg">{children}</Box>
+      </MantineAppShell.Main>
     </MantineAppShell>
   );
 }

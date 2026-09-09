@@ -52,7 +52,6 @@ export function AttendancePage(){
 	const classGroupData=(classGroups.data?.results??[]).map(c=>({value:c.id,label:`${c.name}${c.stream?` (${c.stream})`:""} · ${c.campus}`}));
 	return <>
 		<WorkspaceHeader
-			eyebrow="Academics · Attendance"
 			title="Attendance registers"
 			description="Open a daily class register, save the full roster, and submit it for the school record."
 			action={can("attendance.session.manage")?

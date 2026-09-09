@@ -68,7 +68,7 @@ export function LeaveWorkflowPage(){
 	const openEditStage=(stage:Stage)=>{setStageName(stage.name);setStageRole(String(stage.approver_role));setStageDialog({mode:"edit",stage})};
 
 	return <Stack gap="lg">
-		<WorkspaceHeader eyebrow="Staff · Leave · Setup" title="Approval workflows" description="Configure how leave requests move through approval."
+		<WorkspaceHeader title="Approval workflows" description="Configure how leave requests move through approval."
 			action={manage?<Button onClick={()=>{setWorkflowName("");setWorkflowDialog(true)}}>+ New workflow</Button>:undefined}/>
 
 		{workflows.isLoading?<Loading label="Loading workflows"/>:workflows.isError?<ErrorState error={workflows.error} retry={()=>void workflows.refetch()}/>:

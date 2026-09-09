@@ -41,7 +41,7 @@ export function StudentsPage(){
   {key:"status",header:"Status",cell:r=>display(r.status)},
  ];
  return <>
-  <WorkspaceHeader eyebrow="Student records" title="Student Directory" description="Manage enrolled students and open their complete student record."/>
+  <WorkspaceHeader title="Student Directory" description="Manage enrolled students and open their complete student record."/>
   <DataTable title="Students" columns={columns} rows={query.data?.results??[]} rowKey={r=>String(r.id)}
    loading={query.isLoading} error={query.error} retry={()=>query.refetch()} onRefresh={()=>query.refetch()}
    onRow={student=>{sessionStorage.setItem(`student:${student.id}`,JSON.stringify(student));go(`/students/${student.id}`)}}
