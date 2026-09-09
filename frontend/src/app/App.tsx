@@ -14,6 +14,12 @@ const MpesaPage=lazy(()=>import("../features/mpesa").then(m=>({default:m.MpesaPa
 const LeaveWorkflowPage=lazy(()=>import("../features/leave").then(m=>({default:m.LeaveWorkflowPage})));
 const AttendancePage=lazy(()=>import("../features/attendance").then(m=>({default:m.AttendancePage})));
 const AssessmentsPage=lazy(()=>import("../features/assessments").then(m=>({default:m.AssessmentsPage})));
+const ReportsPage=lazy(()=>import("../features/reporting").then(m=>({default:m.ReportsPage})));
+const NotificationInboxPage=lazy(()=>import("../features/notifications").then(m=>({default:m.NotificationInboxPage})));
+const NotificationTemplatesPage=lazy(()=>import("../features/notifications").then(m=>({default:m.NotificationTemplatesPage})));
+const NotificationProvidersPage=lazy(()=>import("../features/notifications").then(m=>({default:m.NotificationProvidersPage})));
+const NotificationRulesPage=lazy(()=>import("../features/notifications").then(m=>({default:m.NotificationRulesPage})));
+const NotificationOutboxPage=lazy(()=>import("../features/notifications").then(m=>({default:m.NotificationOutboxPage})));
 
 export function App(){
  const path=usePath();const {session,loading,platformAccess}=useAuth();
@@ -43,6 +49,12 @@ export function App(){
  else if(path==="/leave/workflows")page=<LeaveWorkflowPage/>;
  else if(path==="/attendance")page=<AttendancePage/>;
  else if(path==="/assessments")page=<AssessmentsPage/>;
+ else if(path==="/reports")page=<ReportsPage/>;
+ else if(path==="/communications/inbox")page=<NotificationInboxPage/>;
+ else if(path==="/communications/templates")page=<NotificationTemplatesPage/>;
+ else if(path==="/communications/providers")page=<NotificationProvidersPage/>;
+ else if(path==="/communications/rules")page=<NotificationRulesPage/>;
+ else if(path==="/communications/outbox")page=<NotificationOutboxPage/>;
  else page=resources[path]?<ResourcePage config={resources[path]}/>:<MissingPage/>;
  // Route-level enforcement mirrors navigation.ts exactly (parent + own requirement),
  // so a page is never reachable by URL when its own sidebar entry would be hidden.

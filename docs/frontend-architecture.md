@@ -133,18 +133,24 @@ Don't turn every operation into a modal — dense workflows (Attendance register
 - `notify.error` automatically overrides the message to "You do not have permission to perform this action" whenever the underlying error is a 403 (`ApiError` with `status === 403`), regardless of what the call site passed in.
 - Sound (`frontend/src/components/notifications/notificationSound.ts`) plays only on success/error (never on ordinary queries, page loads, or warning/info toasts), is a short WebAudio oscillator tone (no audio asset files), is **off by default**, and is user-toggleable (the sidebar-foot "Sound on/off" button in `components/Shell.tsx`, mirroring the existing density toggle). Never assume sound is available or audible — it fails silently if the browser blocks `AudioContext`.
 
+## Styling standard
+
+**Mantine is the authoritative UI and styling system.** Priority order: Mantine component props → Mantine layout primitives (`Group`/`Stack`/`Grid`/`Flex`/`Box`) → Mantine theme → Mantine style props → custom CSS, only when Mantine genuinely cannot express the behavior (dense registers, the timetable grid, sticky/resizable table internals). Do not introduce custom CSS for spacing, typography, colour, borders, radius, alignment, or standard form/modal/badge/card layout — those come from Mantine. Do not introduce another component framework to solve a styling problem. Use Tabler Icons (already installed, `@tabler/icons-react`) for any new icon rather than adding to `ui.tsx`'s hand-drawn glyph set.
+
+This applies going forward to new work — `finance.tsx`/`mpesa.tsx`/`attendance.tsx`/`assessments.tsx`/`leave.tsx` (plain HTML `<input>`/`<select>` + custom CSS classes) are **not** retrofitted just to comply; they already work. `notifications.tsx`, `documents.tsx`, and `reporting.tsx` are the first features built to this standard and are the reference examples.
+
 ## Coverage-audit backlog (frontend/backend API wiring)
 
-A full audit (2026-09-09) found the backend has ~130 endpoints; Finance, M-Pesa, Attendance, Assessments, and Leave-workflow-setup have real dedicated UIs, but Documents, Reporting, Notifications, Tenancy Administration, Platform Admin, and Timetable have only generic read-only list coverage or less — roughly 33 working backend endpoints have no frontend caller at all. Completion bar for each: **"endpoint connected" is not "workflow complete"** — a report catalogue `GET` reaching a table isn't Reporting done if preview/export/download have no UI. Remaining wiring work, in priority order:
+The full endpoint-by-endpoint ledger lives in **`docs/frontend-api-coverage.md`** — that's the authoritative, kept-current record; this section only tracks sequencing. Completion bar for each domain: **"endpoint connected" is not "workflow complete"** — a report catalogue `GET` reaching a table isn't Reporting done if preview/export/download have no UI.
 
-1. **Notifications + Documents + Reporting** — cross-cutting, currently the weakest coverage; Reporting's export/download makes the RC Area 3 audit-trail code reachable for the first time.
-2. **Tenancy Administration** (permission catalogue, role create/edit, membership activate/deactivate, user invite) — blocks normal operation today (nobody can invite a user or edit a role's permissions from the app).
+1. ~~**Notifications + Documents + Reporting**~~ — done (2026-09-09). Five Notifications workspaces (`features/notifications.tsx`), a shared `DocumentsPanel` (`features/documents.tsx`) wired into Student/Employee 360 replacing the broken `JsonPanel`-on-a-paginated-list bug, and a full Reporting workspace (`features/reporting.tsx`) preserving the async preview→export→poll→download model. See `docs/frontend-api-coverage.md` for the row-level detail.
+2. **Tenancy Administration** (permission catalogue, role create/edit, membership activate/deactivate, user invite) — blocks normal operation today (nobody can invite a user or edit a role's permissions from the app). Next up.
 3. **Platform Admin remainder** (plan edit/delete, tenant subscription edit, module overrides, per-tenant audit).
 4. **Timetable** (periods + entry CRUD, class/teacher schedule views).
 5. **Leave request lifecycle** (submit/decide/withdraw/cancel) — backend fully built and tested, contract already documented in the coverage-audit plan history.
-6. **Documents CRUD** (student/employee upload/download/delete) — folded into slice 1 when picked up.
+6. **Documents CRUD** — done as part of item 1 above (folded in early since Documents shared no dedicated feature file of its own).
 
-Do not invent an endpoint or fabricate data to make a domain look complete — where the backend genuinely has no contract (Guardians has zero API surface; Attendance/Assessment creation needs catalogue endpoints that don't exist), record it in `docs/frontend-backend-contract-gaps.md` instead.
+Do not invent an endpoint or fabricate data to make a domain look complete — where the backend genuinely has no contract (Guardians has zero API surface; Attendance/Assessment creation needs catalogue endpoints that don't exist; no bounded student search/lookup exists at all — `STUDENT-GAP-02`), record it in `docs/frontend-backend-contract-gaps.md` instead.
 
 ## What this doc is not
 

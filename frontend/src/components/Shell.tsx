@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { IconVolume, IconVolumeOff } from "@tabler/icons-react";
 import { useAuth, useAccess } from "../app/auth";
 import { navigation, NavItem } from "../app/navigation";
 import { isSoundEnabled, setSoundEnabled } from "./notifications/notificationSound";
@@ -17,7 +18,7 @@ export function AppShell({children}:{children:React.ReactNode}){
   <aside className="sidebar">
    <div className="brand"><div className="brand-mark">S</div><div><strong>Scholaris</strong><small>School ERP</small></div></div>
    <nav className="nav" aria-label="Primary navigation">{groups.map(item=>item.children?<section className="nav-group" key={item.label}><p>{item.label}</p>{item.children.map(link)}</section>:link(item))}</nav>
-   <div className="sidebar-foot">{platformAccess&&<button className="nav-link platform-link" onClick={()=>go("/platform")}><Icon name="shield"/><span>Platform console</span></button>}<button className="collapse-button" onClick={toggleDensity}><Icon name="layers"/><span>{density==="compact"?"Comfortable density":"Compact density"}</span></button><button className="collapse-button" onClick={toggleSound}><Icon name="volume"/><span>{soundOn?"Sound on":"Sound off"}</span></button><button className="collapse-button" onClick={()=>setCollapsed(!collapsed)}><span>{collapsed?"›":"‹"}</span><span>Collapse menu</span></button></div>
+   <div className="sidebar-foot">{platformAccess&&<button className="nav-link platform-link" onClick={()=>go("/platform")}><Icon name="shield"/><span>Platform console</span></button>}<button className="collapse-button" onClick={toggleDensity}><Icon name="layers"/><span>{density==="compact"?"Comfortable density":"Compact density"}</span></button><button className="collapse-button" onClick={toggleSound}>{soundOn?<IconVolume size={18}/>:<IconVolumeOff size={18}/>}<span>{soundOn?"Sound on":"Sound off"}</span></button><button className="collapse-button" onClick={()=>setCollapsed(!collapsed)}><span>{collapsed?"›":"‹"}</span><span>Collapse menu</span></button></div>
   </aside>
   {mobile&&<button className="scrim" aria-label="Close navigation" onClick={()=>setMobile(false)}/>} 
   <div className="app-main">
