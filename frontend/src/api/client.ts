@@ -51,7 +51,7 @@ function buildHeaders(options: ApiRequestOptions): Headers {
 export async function apiRequest<T>(path: string, options: ApiRequestOptions = {}): Promise<T> {
   const url = buildUrl(path, options.params);
   const headers = buildHeaders(options);
-  const response = await fetch(url.pathname + url.search, { ...options, headers });
+  const response = await fetch(url, { ...options, headers });
   if (response.status === 204) return undefined as T;
   const data: unknown = (response.headers.get("content-type") ?? "").includes("json") ? await response.json() : await response.text();
   if (!response.ok) throw new ApiError(response.status, data);
@@ -69,7 +69,7 @@ function filenameFromContentDisposition(value: string | null): string {
 export async function apiDownload(path: string, options: ApiRequestOptions = {}): Promise<{ blob: Blob; filename: string }> {
   const url = buildUrl(path, options.params);
   const headers = buildHeaders(options);
-  const response = await fetch(url.pathname + url.search, { ...options, headers });
+  const response = await fetch(url, { ...options, headers });
   if (!response.ok) {
     const data: unknown = (response.headers.get("content-type") ?? "").includes("json") ? await response.json() : await response.text();
     throw new ApiError(response.status, data);
