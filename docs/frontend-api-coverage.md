@@ -4,7 +4,7 @@ The authoritative, kept-current integration ledger. Updated whenever a wiring sl
 
 Rows below with exact paths were confirmed by reading the actual backend `urls.py`/`api.py` and the actual frontend call site — not inferred. Domains not yet given a dedicated wiring pass (marked "not yet detailed") are tracked at summary level only, using the original 2026-09-09 audit's counts; their exact endpoint list gets filled in here when that domain's slice is picked up, rather than guessed now.
 
-## Finance (core) — Partial (Credit Note creation closed this slice; Allocation Reversal, Payment detail, Ledger, and Fee Category/Item creation still open)
+## Finance (core) — Partial (Credit Note creation and Allocation Reversal closed; Payment detail, Ledger, and Fee Category/Item creation still open)
 
 | Endpoint | Method | Permission | Frontend | Connected | Workflow complete |
 |---|---|---|---|---|---|
@@ -21,7 +21,7 @@ Rows below with exact paths were confirmed by reading the actual backend `urls.p
 | `/finance/payments/<id>/allocate/` | POST | `finance.payment.allocate` | `PaymentsPage` | ✅ | ✅ |
 | `/finance/payments/<id>/reverse/` | POST | `finance.payment.reverse` | `PaymentsPage` | ✅ | ✅ |
 | `/finance/payments/<id>/` | GET | `finance.payment.view` | none | ❌ | Redundant today — the list row already carries everything this serializer returns |
-| `/finance/payment-allocations/<id>/reverse/` | POST | `finance.allocation.reverse` | none | ❌ | Narrower than whole-payment reversal; queued for the Payments migration slice |
+| `/finance/payment-allocations/<id>/reverse/` | POST | `finance.allocation.reverse` | `PaymentsPage` — per-allocation "Reverse" action inside the payment detail dialog, kept visually and semantically distinct from whole-payment reversal | ✅ | ✅ (no client-side "remaining amount" cap — `PaymentAllocationSerializer` doesn't expose reversed-to-date, so the backend's rejection is the authoritative guard; verified live) |
 | `/finance/ledger-entries/` | GET | `finance.student_account.view` | none | ❌ | Not yet detailed |
 | `/finance/incoming-payments/` | GET | `finance.reconciliation.view` | `IncomingPage` | ✅ | ✅ |
 | `/finance/incoming-payments/<id>/match/` | POST | `finance.reconciliation.match` | `IncomingPage` | ✅ | ✅ |

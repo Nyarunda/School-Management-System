@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, NumberInput, Stack, Text, Textarea, TextInput } from "@mantine/core";
+import { Alert, Box, Button, Group, NumberInput, Select, Stack, Text, Textarea, TextInput } from "@mantine/core";
 import { api, ApiError, Page } from "../api/client";
 import { useAccess } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
@@ -149,20 +149,48 @@ export function InvoicesPage(){
 export function PaymentsPage(){
 	const {can}=useAccess();
 	const qc=useQueryClient();
-	const data=usePaged<Payment>("payments","/finance/payments/");
+	const [page,setPage]=useState(1);
+	// Exact match only -- same reasoning as InvoicesPage: no search/name-resolution
+	// endpoint exists (STUDENT-GAP-02), so this stays a raw id field.
+	const [studentId,setStudentId]=useState("");
+	const payments=useQuery({queryKey:["payments",page,studentId],queryFn:()=>api<Page<Payment>>("/finance/payments/",{params:{page,student:studentId||undefined}})});
+
 	const [selected,setSelected]=useState<Payment|null>(null);
 	const [mode,setMode]=useState<"allocate"|"reverse"|null>(null);
 	const [invoice,setInvoice]=useState("");
-	const [amount,setAmount]=useState("");
+	const [amount,setAmount]=useState<number|"">("");
 	const [reason,setReason]=useState("");
-	const invoices=useQuery({queryKey:["payment-invoices",selected?.student],queryFn:()=>api<Page<Invoice>>("/finance/invoices/",{params:{student:selected!.student,page_size:100}}),enabled:mode==="allocate"&&!!selected});
+	// Bounded and real (filtered to the one student this payment belongs to,
+	// not a page of "all students") -- loaded as soon as a payment is opened
+	// so the allocations list below can also resolve invoice numbers, not
+	// just the Allocate dropdown.
+	const invoices=useQuery({queryKey:["payment-invoices",selected?.student],queryFn:()=>api<Page<Invoice>>("/finance/invoices/",{params:{student:selected!.student,page_size:100}}),enabled:!!selected});
+	const invoiceNumber=(id:string)=>invoices.data?.results.find(i=>i.id===id)?.invoice_number??id;
 	const mutate=useMutation({mutationFn:()=>api(mode==="allocate"?`/finance/payments/${selected!.id}/allocate/`:`/finance/payments/${selected!.id}/reverse/`,{method:"POST",body:JSON.stringify(mode==="allocate"?{invoice,amount}:{reason})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["payments"]});const done=mode;setMode(null);setSelected(null);notify.success(done==="allocate"?"Payment allocated":"Payment reversed")},onError:error=>notify.error(mode==="allocate"?"Payment could not be allocated":"Payment could not be reversed",error)});
+
+	// Allocation Reversal (finance.allocation.reverse) is deliberately kept
+	// separate from whole-Payment Reversal above: it corrects one misapplied
+	// allocation without touching the payment or its other allocations. The
+	// embedded PaymentAllocationSerializer (identical shape in the list row
+	// and in PaymentDetailView) exposes id/payment/invoice/amount/allocated_at
+	// only -- no reversed-to-date figure -- so unlike Allocate (which has a
+	// real unallocated_amount to cap against), this amount field has no
+	// client-side max. The backend's "Reversal exceeds the allocation's
+	// remaining amount" error is the authoritative guard.
+	const [reversingAllocation,setReversingAllocation]=useState<Allocation|null>(null);
+	const [allocationReversalAmount,setAllocationReversalAmount]=useState<number|"">("");
+	const [allocationReversalReason,setAllocationReversalReason]=useState("");
+	const reverseAllocation=useMutation({
+		mutationFn:()=>api(`/finance/payment-allocations/${reversingAllocation!.id}/reverse/`,{method:"POST",body:JSON.stringify({amount:allocationReversalAmount,reason:allocationReversalReason})}),
+		onSuccess:()=>{void qc.invalidateQueries({queryKey:["payments"]});setReversingAllocation(null);notify.success("Allocation reversed")},
+		onError:error=>notify.error("Allocation could not be reversed",error),
+	});
 
 	const canRecord=can("finance.payment.record");
 	const [recordOpen,setRecordOpen]=useState(false);
 	const [payStudent,setPayStudent]=useState("");
 	const [payMethod,setPayMethod]=useState("");
-	const [payAmount,setPayAmount]=useState("");
+	const [payAmount,setPayAmount]=useState<number|"">("");
 	const [payReference,setPayReference]=useState("");
 	// A retry of the SAME attempt (validation error, fix a field, submit again)
 	// must reuse this key so the backend's idempotency handling treats it as a
@@ -172,7 +200,8 @@ export function PaymentsPage(){
 	// Picker for the record-payment dialog only -- STUDENT-GAP-02 means there's
 	// no bounded way to resolve an arbitrary student id to a name, so the table's
 	// "Student" column below shows the raw id rather than guessing from this
-	// (necessarily incomplete) page of students.
+	// (necessarily incomplete) page of students. Pre-existing limitation,
+	// not solved by this migration -- carried forward, not silently hidden.
 	const students=useQuery({queryKey:["payment-students-lookup"],queryFn:()=>api<Page<Student>>("/students/",{params:{page_size:100}}),enabled:canRecord});
 	const paymentMethods=useQuery({queryKey:["payment-methods"],queryFn:()=>api<Page<PaymentMethod>>("/finance/payment-methods/",{params:{page_size:100}}),enabled:canRecord});
 	const openRecord=()=>{setIdempotencyKey(crypto.randomUUID());setPayStudent("");setPayMethod("");setPayAmount("");setPayReference("");setRecordOpen(true)};
@@ -182,21 +211,77 @@ export function PaymentsPage(){
 		onError:error=>notify.error("Payment could not be recorded",error),
 	});
 
-	const columns:Column<Payment>[]=[{key:"receipt",header:"Receipt",cell:r=><strong>{r.receipt?.receipt_number??"Pending"}</strong>},{key:"student",header:"Student",cell:r=><code>{r.student}</code>},{key:"amount",header:"Amount",cell:r=>cash(r.amount)},{key:"available",header:"Unallocated",cell:r=>cash(r.unallocated_amount)},{key:"status",header:"Status",cell:r=><StatusBadge value={r.status}/>},{key:"date",header:"Received",cell:r=>when(r.received_at)}];
+	const columns:Column<Payment>[]=[
+		{key:"receipt",header:"Receipt",cell:r=><Text size="sm" fw={600}>{r.receipt?.receipt_number??"Pending"}</Text>},
+		{key:"student",header:"Student",cell:r=><Text size="sm" ff="monospace">{r.student}</Text>},
+		{key:"amount",header:"Amount",cell:r=>cash(r.amount)},
+		{key:"available",header:"Unallocated",cell:r=>cash(r.unallocated_amount)},
+		{key:"status",header:"Status",cell:r=><StatusBadge value={r.status}/>},
+		{key:"date",header:"Received",cell:r=>when(r.received_at)},
+	];
 
 	return <>
-		<PageHeader eyebrow="Finance · Collections" title="Payments" description="Open a received payment to allocate it or record a controlled reversal." action={canRecord?<button className="button primary" onClick={openRecord}>+ Record payment</button>:undefined}/>
-		<DataTable {...data} loading={data.query.isLoading} error={data.query.error} retry={()=>void data.query.refetch()} columns={columns} rowKey={r=>r.id} count={data.query.data?.count} previous={!!data.query.data?.previous} next={!!data.query.data?.next} onPage={data.setPage} onRow={setSelected}/>
+		<WorkspaceHeader title="Payments" description="Open a received payment to allocate it or record a controlled reversal." action={canRecord?<Button onClick={openRecord}>+ Record payment</Button>:undefined}/>
+		<DataTable title="Payments" columns={columns} rows={payments.data?.results??[]} rowKey={r=>r.id} loading={payments.isLoading} error={payments.error} retry={()=>void payments.refetch()} onRefresh={()=>void payments.refetch()}
+			count={payments.data?.count} page={page} previous={!!payments.data?.previous} next={!!payments.data?.next} onPage={setPage} onRow={setSelected}
+			toolbar={<FilterBar>
+				<TextInput label="Student" placeholder="Exact student id" size="xs" w={300} value={studentId} onChange={e=>{setStudentId(e.currentTarget.value);setPage(1)}}/>
+			</FilterBar>}
+		/>
 
 		<ActionDialog open={recordOpen} title="Record payment" description="Creates a received payment for a student, ready to allocate against an invoice." confirmLabel="Record payment" busy={record.isPending} onClose={()=>setRecordOpen(false)} onSubmit={e=>{e.preventDefault();record.mutate()}}>
-			<Failure error={record.error}/>
-			<label>Student<select required value={payStudent} onChange={e=>setPayStudent(e.target.value)}><option value="">Select student</option>{students.data?.results.map(s=><option key={s.id} value={s.id}>{s.full_name} · {s.admission_number}</option>)}</select></label>
-			<label>Payment method<select required value={payMethod} onChange={e=>setPayMethod(e.target.value)}><option value="">Select payment method</option>{paymentMethods.data?.results.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}</select></label>
-			<label>Amount<input required type="number" min="0.01" step="0.01" value={payAmount} onChange={e=>setPayAmount(e.target.value)}/></label>
-			<label>External reference (optional)<input value={payReference} onChange={e=>setPayReference(e.target.value)}/></label>
+			<Stack gap="sm">
+				{record.error&&<Alert color="red" variant="light">{errorText(record.error)}</Alert>}
+				<Select label="Student" required searchable data={students.data?.results.map(s=>({value:s.id,label:`${s.full_name} · ${s.admission_number}`}))??[]} value={payStudent||null} onChange={value=>setPayStudent(value??"")}/>
+				<Select label="Payment method" required data={paymentMethods.data?.results.map(m=>({value:m.id,label:m.name}))??[]} value={payMethod||null} onChange={value=>setPayMethod(value??"")}/>
+				<NumberInput label="Amount (KES)" required min={0.01} decimalScale={2} value={payAmount} onChange={value=>setPayAmount(value===""||value===undefined?"":Number(value))}/>
+				<TextInput label="External reference (optional)" value={payReference} onChange={e=>setPayReference(e.currentTarget.value)}/>
+			</Stack>
 		</ActionDialog>
 
-		<ActionDialog open={!!selected&&!mode} title={selected?.receipt?.receipt_number??"Payment"} description={selected?`${cash(selected.amount)} received · ${cash(selected.unallocated_amount)} available`:undefined} confirmLabel="Close" onClose={()=>setSelected(null)} onSubmit={e=>{e.preventDefault();setSelected(null)}}><div className="detail-list">{selected?.allocations.map(a=><div key={a.id}><span>Invoice {a.invoice}</span><strong>{cash(a.amount)}</strong></div>)}</div>{selected?.status==="RECEIVED"&&<div className="choice-actions">{can("finance.payment.allocate")&&Number(selected.unallocated_amount)>0&&<button type="button" className="button primary" onClick={()=>setMode("allocate")}>Allocate payment</button>}{can("finance.payment.reverse")&&<button type="button" className="button danger" onClick={()=>setMode("reverse")}>Reverse payment</button>}</div>}</ActionDialog><ActionDialog open={!!selected&&!!mode} title={mode==="allocate"?"Allocate payment":"Reverse payment"} description={mode==="reverse"?"This invalidates the payment and reverses its active allocations. A reason is required.":"Apply available money to one issued invoice."} confirmLabel={mode==="allocate"?"Allocate":"Reverse payment"} danger={mode==="reverse"} busy={mutate.isPending} onClose={()=>setMode(null)} onSubmit={e=>{e.preventDefault();mutate.mutate()}}><Failure error={mutate.error}/>{mode==="allocate"?<><label>Invoice<select required value={invoice} onChange={e=>setInvoice(e.target.value)}><option value="">Select issued invoice</option>{invoices.data?.results.filter(i=>i.status==="ISSUED").map(i=><option key={i.id} value={i.id}>{i.invoice_number} · {cash(i.total)}</option>)}</select></label><label>Amount<input required type="number" min="0.01" step="0.01" max={selected?.unallocated_amount} value={amount} onChange={e=>setAmount(e.target.value)}/></label></>:<label>Reason<textarea required maxLength={240} value={reason} onChange={e=>setReason(e.target.value)}/></label>}</ActionDialog>
+		<ActionDialog open={!!selected&&!mode&&!reversingAllocation} title={selected?.receipt?.receipt_number??"Payment"} description={selected?`${cash(selected.amount)} received · ${cash(selected.unallocated_amount)} available`:undefined} confirmLabel="Close" onClose={()=>setSelected(null)} onSubmit={e=>{e.preventDefault();setSelected(null)}}>
+			<Stack gap="sm">
+				<Text size="sm" fw={600}>Allocations</Text>
+				{!selected?.allocations.length&&<Text size="sm" c="dimmed">No allocations yet.</Text>}
+				{selected?.allocations.map(a=>
+					<Group key={a.id} justify="space-between" wrap="nowrap" align="flex-start">
+						<Box>
+							<Text size="sm">Invoice {invoiceNumber(a.invoice)}</Text>
+							<Text size="xs" c="dimmed">{when(a.allocated_at)}</Text>
+						</Box>
+						<Group gap="xs" wrap="nowrap">
+							<Text size="sm" fw={600}>{cash(a.amount)}</Text>
+							{can("finance.allocation.reverse")&&selected.status==="RECEIVED"&&
+								<Button size="xs" variant="subtle" color="red" onClick={()=>{setReversingAllocation(a);setAllocationReversalAmount("");setAllocationReversalReason("")}}>Reverse</Button>}
+						</Group>
+					</Group>
+				)}
+				{selected?.status==="RECEIVED"&&<Group gap="xs" mt="sm">
+					{can("finance.payment.allocate")&&Number(selected.unallocated_amount)>0&&<Button onClick={()=>setMode("allocate")}>Allocate payment</Button>}
+					{can("finance.payment.reverse")&&<Button color="red" variant="light" onClick={()=>setMode("reverse")}>Reverse payment</Button>}
+				</Group>}
+			</Stack>
+		</ActionDialog>
+
+		<ActionDialog open={!!selected&&!!mode} title={mode==="allocate"?"Allocate payment":"Reverse payment"} description={mode==="reverse"?"Invalidates the payment and reverses every currently active allocation on it. A reason is required.":"Apply available money to one issued invoice."} confirmLabel={mode==="allocate"?"Allocate":"Reverse payment"} danger={mode==="reverse"} busy={mutate.isPending} onClose={()=>setMode(null)} onSubmit={e=>{e.preventDefault();mutate.mutate()}}>
+			<Stack gap="sm">
+				{mutate.error&&<Alert color="red" variant="light">{errorText(mutate.error)}</Alert>}
+				{mode==="allocate"?<>
+					<Select label="Invoice" required placeholder="Select issued invoice" data={invoices.data?.results.filter(i=>i.status==="ISSUED").map(i=>({value:i.id,label:`${i.invoice_number} · ${cash(i.total)}`}))??[]} value={invoice||null} onChange={value=>setInvoice(value??"")}/>
+					<NumberInput label="Amount (KES)" required min={0.01} max={selected?Number(selected.unallocated_amount):undefined} decimalScale={2} value={amount} onChange={value=>setAmount(value===""||value===undefined?"":Number(value))}/>
+				</>:
+					<Textarea label="Reason" required maxLength={240} value={reason} onChange={e=>setReason(e.currentTarget.value)}/>}
+			</Stack>
+		</ActionDialog>
+
+		<ActionDialog open={!!reversingAllocation} title="Reverse allocation" description={reversingAllocation?`Reverses money allocated to invoice ${invoiceNumber(reversingAllocation.invoice)} on ${when(reversingAllocation.allocated_at)}. This affects only this one allocation -- the payment itself and its other allocations are not touched.`:undefined} confirmLabel="Reverse allocation" danger busy={reverseAllocation.isPending} onClose={()=>setReversingAllocation(null)} onSubmit={e=>{e.preventDefault();reverseAllocation.mutate()}}>
+			<Stack gap="sm">
+				{reverseAllocation.error&&<Alert color="red" variant="light">{errorText(reverseAllocation.error)}</Alert>}
+				{reversingAllocation&&<Text size="sm" c="dimmed">Originally allocated: {cash(reversingAllocation.amount)}</Text>}
+				<NumberInput label="Amount to reverse (KES)" required min={0.01} decimalScale={2} value={allocationReversalAmount} onChange={value=>setAllocationReversalAmount(value===""||value===undefined?"":Number(value))}/>
+				<Textarea label="Reason" required maxLength={240} value={allocationReversalReason} onChange={e=>setAllocationReversalReason(e.currentTarget.value)}/>
+			</Stack>
+		</ActionDialog>
 	</>;
 }
 

@@ -7,7 +7,7 @@ from django.utils import timezone
 from apps.academics.models import (
     AcademicLevel, AcademicYear, ClassGroup, EnrollmentStatus, StudentEnrollment, Subject, TeacherAssignment,
 )
-from apps.finance.models import NumberSeries
+from apps.finance.models import NumberSeries, PaymentMethod
 from apps.leave.models import LeaveApprovalWorkflow, LeaveApprovalWorkflowStage, LeaveType
 from apps.platform.catalogue import MODULE_CATALOGUE
 from apps.platform.models import SubscriptionPlan, TenantSubscription
@@ -171,6 +171,11 @@ class Command(BaseCommand):
         # document types Finance actually issues.
         for document_type, prefix in [("INVOICE", "INV-"), ("CREDIT_NOTE", "CRN-"), ("RECEIPT", "RCT-"), ("PAYMENT_REVERSAL", "REV-")]:
             NumberSeries.objects.get_or_create(tenant=tenant, document_type=document_type, defaults={"prefix": prefix, "padding": 6})
+        # PaymentMethodListView is deliberately read-only (api.py:182-192) --
+        # rows only ever come from M-Pesa auto-provisioning or "directly via
+        # shell/tests". This is that direct-creation path for the demo tenant,
+        # so the Record Payment dialog has something to select.
+        PaymentMethod.objects.get_or_create(tenant=tenant, code="CASH", defaults={"name": "Cash"})
 
     def _provision_leave_workflow(self, tenant):
         line_manager_role, _ = Role.objects.get_or_create(tenant=tenant, name="Line Manager", defaults={"permissions": ["leave.approve"]})
