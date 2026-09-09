@@ -73,6 +73,7 @@ def add_fee_structure_line(*, user, tenant, fee_structure, fee_item, amount, is_
     )
 
 
+@transaction.atomic
 def approve_fee_structure(*, user, tenant, fee_structure):
     require_permission(user=user, tenant=tenant, permission="finance.fee_structure.approve")
     validate_same_tenant(tenant=tenant, fee_structure=fee_structure)
@@ -80,6 +81,13 @@ def approve_fee_structure(*, user, tenant, fee_structure):
         raise ValidationError("A fee structure must have at least one line before approval")
     fee_structure.is_approved = True
     fee_structure.save(update_fields=["is_approved"])
+    record_activity(
+        tenant=tenant,
+        actor=user,
+        action="fee_structure.approved",
+        resource_type="fee_structure",
+        resource_id=str(fee_structure.id),
+    )
     return fee_structure
 
 
@@ -146,9 +154,30 @@ def generate_invoice(*, user, tenant, assignment):
         invoice.subtotal = subtotal
         invoice.total = subtotal
         invoice.save(update_fields=["subtotal", "total"])
+        record_activity(
+            tenant=tenant,
+            actor=user,
+            action="invoice.generated",
+            resource_type="invoice",
+            resource_id=str(invoice.id),
+        )
         return invoice
     except IntegrityError as error:
-        raise ValidationError("Invoice generation conflicted with another request") from error
+        # Only translate the idempotency-key collision, not unrelated failures
+        # (e.g. a genuine invoice-numbering bug), into a business validation
+        # error -- matches record_payment's/ingest_incoming_payment's pattern.
+        # In practice this is a narrow defensive backstop: the StudentFeeAssignment
+        # lock above already prevents two concurrent calls for the *same*
+        # assignment from racing into this block.
+        cause = error.__cause__
+        constraint = getattr(getattr(cause, "diag", None), "constraint_name", None)
+        sqlite_duplicate = str(cause) == "UNIQUE constraint failed: finance_invoice.tenant_id, finance_invoice.idempotency_key"
+        if constraint != "unique_invoice_idempotency_per_tenant" and not sqlite_duplicate:
+            raise
+        replay = Invoice.objects.filter(tenant=tenant, assignment=locked_assignment).first()
+        if replay is None:
+            raise ValidationError("Invoice generation conflicted with another request") from error
+        return replay
 
 
 @transaction.atomic

@@ -26,6 +26,7 @@ from .models import (
     PaymentStatus,
     ReconciliationStatus,
     Receipt,
+    StudentFeeAssignment,
 )
 from .selectors import student_balance
 from .services import (
@@ -351,6 +352,60 @@ class PaymentAllocationConcurrencyTests(TransactionTestCase):
         net_allocated = PaymentAllocation.objects.filter(payment=payment).aggregate(total=Sum("amount"))["total"] or Decimal("0")
         net_reversed = AllocationReversal.objects.filter(allocation__payment=payment).aggregate(total=Sum("amount"))["total"] or Decimal("0")
         self.assertEqual(net_allocated - net_reversed, Decimal("0.00"))
+
+
+@skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL transaction semantics")
+class FeeAssignmentConcurrencyTests(TransactionTestCase):
+    """RC Area 4 verification gap: assign_fee_structure has no
+    @transaction.atomic/select_for_update of its own, relying entirely on
+    Django's get_or_create (one internal retry on IntegrityError, then a
+    get()). This proves two concurrent assignment attempts for the same
+    (student, fee_structure) pair collapse to exactly one row without an
+    unhandled IntegrityError escaping as a 500.
+    """
+
+    def setUp(self):
+        self.school_a = Tenant.objects.create(name="School A", slug="school-a")
+        self.user = User.objects.create_user(username="bursar", password="secret")
+        self.role = Role.objects.create(
+            tenant=self.school_a,
+            name="Bursar",
+            permissions=["finance.fee_structure.create", "finance.fee_structure.edit", "finance.fee_structure.approve", "finance.invoice.create"],
+        )
+        Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role)
+        year = AcademicYear.objects.create(tenant=self.school_a, name="2026", starts_on=date(2026, 1, 1), ends_on=date(2026, 12, 31))
+        level = AcademicLevel.objects.create(tenant=self.school_a, name="Grade 8", code="G8", sequence=8)
+        self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level)
+
+        from .models import FeeCategory, FeeItem
+
+        category = FeeCategory.objects.create(tenant=self.school_a, name="Tuition", code="TUITION")
+        item = FeeItem.objects.create(tenant=self.school_a, category=category, name="Tuition fee", code="TUITION")
+        add_fee_structure_line(user=self.user, tenant=self.school_a, fee_structure=self.structure, fee_item=item, amount=Decimal("50000.00"))
+        approve_fee_structure(user=self.user, tenant=self.school_a, fee_structure=self.structure)
+
+        self.student = Student.objects.create(tenant=self.school_a, admission_number="ADM-001", first_name="Amina", last_name="Otieno")
+
+    def attempt(self, barrier):
+        connections.close_all()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("SET statement_timeout = '8s'")
+                cursor.execute("SET lock_timeout = '6s'")
+            barrier.wait(timeout=6)
+            assignment = assign_fee_structure(user=self.user, tenant=self.school_a, student=self.student, fee_structure=self.structure)
+            return str(assignment.id)
+        finally:
+            connections.close_all()
+
+    def test_competing_assignments_of_the_same_student_and_structure_collapse_to_one(self):
+        barrier = Barrier(2)
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(self.attempt, barrier) for _ in range(2)]
+            outcomes = [future.result(timeout=15) for future in futures]
+
+        self.assertEqual(outcomes[0], outcomes[1])
+        self.assertEqual(StudentFeeAssignment.objects.filter(tenant=self.school_a, student=self.student, fee_structure=self.structure).count(), 1)
 
 
 @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL transaction semantics")

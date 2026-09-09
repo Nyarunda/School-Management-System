@@ -6,6 +6,7 @@ from django.test import TestCase
 from rest_framework.test import APIClient
 
 from apps.academics.models import AcademicLevel, AcademicYear
+from apps.activity.models import ActivityEvent
 from apps.students.models import Student
 from apps.tenancy.models import Membership, Role, Tenant, User
 
@@ -101,6 +102,20 @@ class FinanceApiTests(TestCase):
         set_module_override(tenant=self.school_a, module_code="finance", is_enabled=False)
         response = self.client.get("/api/v1/finance/setup/", **self.headers())
         self.assertEqual(response.status_code, 403)
+
+    def test_updating_finance_setup_records_one_activity_event_with_bounded_metadata(self):
+        response = self.client.patch(
+            "/api/v1/finance/setup/",
+            {"currency": "KES", "configuration": {"secret_bank_account": "12345"}},
+            format="json",
+            **self.headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+
+        event = ActivityEvent.objects.get(action="finance_setup.updated")
+        self.assertEqual(sorted(event.metadata["changed_fields"]), ["configuration", "currency"])
+        self.assertNotIn("secret_bank_account", str(event.metadata))
+        self.assertNotIn("KES", str(event.metadata))
 
     def test_finance_flow_uses_business_actions_and_student_summary(self):
         setup_response = self.client.get("/api/v1/finance/setup/", **self.headers())

@@ -129,8 +129,49 @@ Journey 1 enrollment capacity/date-window validation; Journey 2 formal credit-no
 ### Full test suite (SQLite + PostgreSQL 17)
 SQLite: 822 tests, OK (44 skipped — Postgres-only cases). PostgreSQL 17 (`postgres:17`, disposable container `school-rc-area3-pg`): 822 tests, OK (0 skipped), including every existing Postgres-only concurrency suite re-run as this area's evidence and the two new concurrency tests (Journey 1 enrollment race, Journey 6 cancellation race). No schema changes — `makemigrations --check --dry-run` clean.
 
-## Area 4 — Finance & M-Pesa integrity
-*Not started.*
+## Area 4 — Finance & M-Pesa integrity ✅ CLOSED
+
+**Baseline under test:** `8ad5a13` (RC Area 3 close). **Date:** 2026-09-09.
+Scope: auditing (not redesigning) the existing financial controls — ledger/accounting invariants, invoice/credit-note integrity, payment and allocation invariants, reversal correctness, incoming-payment reconciliation, M-Pesa STK/callback verification and processing, idempotency/replay protection, concurrency behavior, tenant isolation, permission enforcement, and auditability. Grounded via direct reading of `issue_credit_note`, `_invoice_outstanding_balance`, `allocate_payment`, `assign_fee_structure`, `generate_invoice`, and `FinanceSetupView` before classifying two open questions, plus a full pass over `mpesa_services.py`/`mpesa_api.py` and every existing Finance/M-Pesa test file.
+
+This is a mature, heavily-tested subsystem: 11 pre-existing Postgres concurrency tests in `finance/test_concurrency.py` plus ~15 across `test_mpesa_concurrency.py`/`test_mpesa_recovery.py`. No BLOCKER was found. The M-Pesa pipeline in particular (durable-intent-before-external-I/O on STK initiation, a hard verify→process boundary, row-locked idempotent replay at every layer) required no code changes at all beyond what RC Area 3 already closed.
+
+### Findings
+
+| Finding | Classification | Resolution |
+|---|---|---|
+| `generate_invoice`'s `IntegrityError` catch re-labeled *any* integrity failure as "conflicted with another request," unlike `record_payment`/`ingest_incoming_payment`, which check the specific constraint name before translating | **DEFECT, fixed this area** | Catch now checks for `unique_invoice_idempotency_per_tenant` (or the SQLite-equivalent message) specifically, re-raising unmasked otherwise, and performs the same existing-row replay lookup `record_payment` already does. Verified with a real forced invoice-number collision between two different assignments (`apps/finance/tests.py::test_unrelated_integrity_error_during_invoice_generation_is_not_masked_as_idempotency_replay`), mirroring the identical existing test for `record_payment`. |
+| Several money-adjacent Finance actions had no audit trail: `approve_fee_structure` (the gate that makes a fee structure usable for real invoicing), `generate_invoice` (only the later, separate `issue_invoice` call was audited — a generated-but-never-issued invoice left zero trail), and `FinanceSetupView.update` (tenant currency/fiscal-year/configuration changes bypassed `services.py` and had no audit call at all) | **DEFECT, fixed this area** | Added `record_activity` calls: `fee_structure.approved`, `invoice.generated` (idempotent replay of an existing invoice correctly records no additional event), and `finance_setup.updated` — the last with bounded metadata (`changed_fields` only, never the raw `configuration` JSON payload, which is arbitrary tenant-supplied data). Directly analogous to the Area 3 Reporting audit-trail fix. |
+| `assign_fee_structure` has no `@transaction.atomic`/`select_for_update` of its own, unlike every other write path in this file — relies entirely on Django's internal `get_or_create` retry-once behavior | **RC VERIFICATION GAP, closed this area** | Added a PostgreSQL concurrency test (`FeeAssignmentConcurrencyTests`) proving two concurrent assignment attempts for the same `(student, fee_structure)` pair collapse to exactly one row with no unhandled exception. Passed — confirmed correct behavior, no code change required. |
+| Credit notes are bounded only by invoice face value (`amount > invoice.total - issued_credits`), never netted against existing payment allocations — untested in the reverse order (credit note issued *after* an invoice is already fully allocated) | **RC VERIFICATION GAP, closed this area** | Investigated the consequence before writing the test: the ledger is live-summed and append-only (no cached/stored balance to drift), so this cannot corrupt the student's aggregate balance — it only drives that one invoice's own outstanding balance negative, cleanly blocking further allocation to it. Added a test proving exactly this (`test_credit_note_issued_after_full_allocation_blocks_further_allocation_without_corrupting_balance`) — confirmed correct, standard accounts-receivable behavior, no code change required. |
+| No automated timeout/expiry for stuck `PENDING`/`UNKNOWN` M-Pesa STK requests (no callback ever received) | **ACCEPTED RISK** | Recovery is entirely human-invoked today (`query_stk_request`, `identify_stk_request`), both already correct and tested; stuck requests remain visible via `StkRequestListView` for manual reconciliation indefinitely. An operational dashboard/alert on aged requests is a reasonable post-go-live monitoring enhancement, not a financial-integrity defect. No code change. |
+
+### Carried-forward items, explicitly re-evaluated (not silently accepted)
+
+- **Finance organizational/campus scope** — re-confirmed this area: a repo-wide grep for "campus" inside `apps/finance/` still returns zero matches, and `require_permission` resolves membership by `(user, tenant)` only, never `membership.campus_id`. No new evidence changes the underlying business question. **Unchanged — remains a GO-LIVE ACCEPTANCE DECISION**, carried forward verbatim from Area 3 (see below).
+- **Credit-note reversal/void workflow** — re-confirmed: `CreditNoteStatus.VOID`/`InvoiceStatus.VOID` remain defined but genuinely never set by any service function; no `void_credit_note` capability or route exists anywhere. **Unchanged — remains POST-GO-LIVE.**
+
+### Go-live acceptance decisions requiring sign-off
+
+| Decision | Detail |
+|---|---|
+| **Finance organizational scope** (carried from Area 3) | Are finance/bursar users ever campus-restricted in practice, or is finance always a tenant-wide role? If campus-restricted bursars are a real scenario, the fix belongs in Finance's own authorization model, not a Reporting-only patch. No evidence found this area that changes the answer either way — this needs a business decision, not further code investigation. |
+| **Fee-structure-creation / payment-recording frontend operator journeys** | The frontend already flags both as blocked (`frontend/src/features/finance.tsx`: "New structure" and "Record payment" buttons disabled with tooltips). Confirmed as genuine, narrow backend API gaps, not frontend-fixable alone: `apps.academics` has zero API surface at all (no way to list `AcademicYear`/`AcademicLevel` for a picker), and `PaymentMethod` has no list endpoint either — in both cases the *write* side already accepts the needed UUIDs. Open question: are these two operator journeys required to be available via the frontend at go-live? If yes, this is a small, well-scoped follow-up (two new read-only list endpoints, no write-side changes needed). If no, it moves to a future frontend/API milestone. No endpoint was built this area — this needs a business answer first, not a speculative API addition. |
+
+### Accepted risks (ordinary, recorded, no code change)
+
+- No automated alerting/expiry for stuck `PENDING`/`UNKNOWN` M-Pesa STK requests (see Findings above) — manual recovery path exists and is proven correct.
+
+### Not a defect (recorded so they aren't re-litigated)
+
+`MpesaCallbackLog` has no unique constraint (duplicate log rows on retry are harmless — real idempotency is enforced downstream at `MpesaStkPushRequest`/`IncomingPayment`); `PaymentAllocation`/`AllocationReversal` have no DB-level check constraint capping their sums against invoice total/allocation amount (enforced correctly in application code via row-locking in `allocate_payment`/`reverse_allocation`/`reverse_payment`, and no code path bypasses the service layer to write these rows directly); the ledger is live-summed rather than a cached/stored balance, so no drift is possible by construction; M-Pesa's durable-intent-before-external-I/O design and hard verify→process boundary (already proven correct by an extensive pre-existing test suite, reconfirmed this area); `InvoiceStatus.VOID` and other unused enum values besides credit-note `VOID` (the correction path via `issue_credit_note` remains the documented mechanism, carried from Area 3).
+
+### Post-go-live (backlog, unchanged from Area 3)
+
+Formal credit-note/invoice void/reversal workflow — an unimplemented capability with an existing manual-escalation workaround (a bursar can issue a new correcting credit note; there is no in-system "undo"), not a conscious risk being shipped.
+
+### Full test suite (SQLite + PostgreSQL 17)
+SQLite: 830 tests, OK (45 skipped — Postgres-only cases, including the one new `FeeAssignmentConcurrencyTests` test). PostgreSQL 17 (`postgres:17`, disposable container `school-rc-area4-pg`): 830 tests, OK (0 skipped), including a full re-run of every existing Finance/M-Pesa concurrency and recovery suite as this area's evidence. No schema changes — `makemigrations --check --dry-run` clean.
 
 ## Area 5 — Concurrency & failure recovery
 *Not started.*

@@ -13,6 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from apps.academics.models import AcademicLevel, AcademicYear
+from apps.activity.services import record_activity
 from apps.students.models import Student
 from apps.platform.services import require_module_enabled
 from apps.tenancy.services import require_permission
@@ -117,6 +118,16 @@ class FinanceSetupView(RetrieveUpdateAPIView):
         serializer = self.get_serializer(setup, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        # Bounded metadata only -- never the raw configuration payload, which
+        # is arbitrary tenant-supplied JSON and may itself carry sensitive data.
+        record_activity(
+            tenant=tenant,
+            actor=request.user,
+            action="finance_setup.updated",
+            resource_type="finance_setup",
+            resource_id=str(setup.id),
+            metadata={"changed_fields": sorted(request.data.keys())},
+        )
         return Response(serializer.data)
 
 

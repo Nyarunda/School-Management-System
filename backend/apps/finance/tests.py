@@ -6,6 +6,7 @@ from django.db import IntegrityError
 from django.test import TestCase
 
 from apps.academics.models import AcademicLevel, AcademicYear
+from apps.activity.models import ActivityEvent
 from apps.guardians.models import Guardian, StudentGuardian
 from apps.notifications.models import NotificationChannel, NotificationEvent, NotificationOutbox, NotificationRecipientType
 from apps.notifications.services import create_notification_rule, create_notification_template, expand_notification_event, set_channel_enabled
@@ -211,6 +212,26 @@ class FinanceSetupTests(TestCase):
         self.assertEqual(first.id, second.id)
         self.assertEqual(Invoice.objects.filter(assignment=assignment).count(), 1)
 
+    def test_approve_fee_structure_records_one_activity_event(self):
+        structure = create_fee_structure(
+            user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=self.year_a, academic_level=self.level_a,
+        )
+        add_fee_structure_line(user=self.user, tenant=self.school_a, fee_structure=structure, fee_item=self.item_a, amount=Decimal("50000.00"))
+
+        approve_fee_structure(user=self.user, tenant=self.school_a, fee_structure=structure)
+
+        event = ActivityEvent.objects.get(action="fee_structure.approved")
+        self.assertEqual(event.resource_id, str(structure.id))
+
+    def test_generate_invoice_records_one_activity_event_and_replay_records_none(self):
+        structure = self._approved_structure()
+        assignment = assign_fee_structure(user=self.user, tenant=self.school_a, student=self.student_a, fee_structure=structure)
+
+        invoice = generate_invoice(user=self.user, tenant=self.school_a, assignment=assignment)
+        generate_invoice(user=self.user, tenant=self.school_a, assignment=assignment)  # idempotent replay
+
+        self.assertEqual(ActivityEvent.objects.filter(action="invoice.generated", resource_id=str(invoice.id)).count(), 1)
+
     def test_issue_and_credit_note_update_calculated_student_balance(self):
         structure = self._approved_structure()
         assignment = assign_fee_structure(
@@ -380,6 +401,31 @@ class PaymentTests(TestCase):
         self.assertEqual(Payment.objects.filter(tenant=self.school_a).count(), 1)
         self.assertEqual(Payment.objects.get(tenant=self.school_a).id, first.id)
 
+    def test_unrelated_integrity_error_during_invoice_generation_is_not_masked_as_idempotency_replay(self):
+        # RC Area 4: generate_invoice's IntegrityError catch previously
+        # re-labeled *any* IntegrityError as "conflicted with another
+        # request" without checking which constraint fired. A duplicate
+        # invoice_number for a *different* assignment (a genuine numbering
+        # bug, not a legitimate retry of the same fee assignment) must
+        # propagate as a real error, not be silently swallowed -- mirroring
+        # test_unrelated_integrity_error_is_not_masked_as_idempotency_replay
+        # above for record_payment's identical pattern.
+        first_assignment = assign_fee_structure(user=self.user, tenant=self.school_a, student=self.other_student, fee_structure=self.structure)
+        generate_invoice(user=self.user, tenant=self.school_a, assignment=first_assignment)
+
+        series = NumberSeries.objects.get(tenant=self.school_a, document_type="INVOICE")
+        series.next_value -= 1  # forces the next invoice number to collide with the one just used
+        series.save(update_fields=["next_value"])
+
+        second_assignment = assign_fee_structure(
+            user=self.user, tenant=self.school_a, student=self.other_student, fee_structure=self._new_structure("Transport"),
+        )
+
+        with self.assertRaises(IntegrityError):
+            generate_invoice(user=self.user, tenant=self.school_a, assignment=second_assignment)
+
+        self.assertEqual(Invoice.objects.filter(tenant=self.school_a, assignment=second_assignment).count(), 0)
+
     def test_allocate_payment_reduces_balance_and_reverse_restores_it(self):
         payment = self._record_payment()
 
@@ -438,6 +484,31 @@ class PaymentTests(TestCase):
 
         allocate_payment(user=self.user, tenant=self.school_a, payment=payment, invoice=self.invoice, amount=Decimal("45000.00"))
         self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("0.00"))
+
+    def test_credit_note_issued_after_full_allocation_blocks_further_allocation_without_corrupting_balance(self):
+        # RC Area 4 verification gap: issue_credit_note's own bound
+        # (amount > invoice.total - issued_credits) is never netted against
+        # existing payment allocations, unlike _invoice_outstanding_balance.
+        # This proves the untested reverse order -- a credit note issued
+        # *after* an invoice is already fully allocated -- still behaves
+        # correctly: it succeeds (a real, legitimate correction), drives that
+        # invoice's own outstanding balance negative, cleanly blocks any
+        # further allocation to it, and the student's aggregate ledger
+        # balance (summed live, never cached) correctly ends up in credit.
+        payment = self._record_payment()
+        allocate_payment(user=self.user, tenant=self.school_a, payment=payment, invoice=self.invoice, amount=Decimal("50000.00"))
+        self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("0.00"))
+
+        issue_credit_note(
+            user=self.user, tenant=self.school_a, student=self.student, invoice=self.invoice,
+            amount=Decimal("5000.00"), reason="Late fee waived after payment",
+        )
+
+        another_payment = self._record_payment(amount="0.01", key="pay-after-credit-note")
+        with self.assertRaises(ValidationError):
+            allocate_payment(user=self.user, tenant=self.school_a, payment=another_payment, invoice=self.invoice, amount=Decimal("0.01"))
+
+        self.assertEqual(student_balance(tenant=self.school_a, student=self.student), Decimal("-5000.00"))
 
     def test_allocation_requires_issued_invoice(self):
         other_assignment = assign_fee_structure(user=self.user, tenant=self.school_a, student=self.other_student, fee_structure=self.structure)
