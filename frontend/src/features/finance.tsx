@@ -425,7 +425,7 @@ export function IncomingPage(){
 			count={incoming.data?.count} page={page} previous={!!incoming.data?.previous} next={!!incoming.data?.next} onPage={setPage}
 			toolbar={<FilterBar>
 				<TextInput type="date" label="Received after" size="xs" w={170} value={receivedAfter} onChange={e=>{setReceivedAfter(e.currentTarget.value);setPage(1)}}/>
-				{receivedAfter&&<Button variant="subtle" size="xs" mt={22} onClick={()=>{setReceivedAfter("");setPage(1)}}>Clear</Button>}
+				{receivedAfter&&<Button variant="subtle" size="xs" onClick={()=>{setReceivedAfter("");setPage(1)}}>Clear</Button>}
 			</FilterBar>}
 		/>
 
