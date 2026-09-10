@@ -34,7 +34,7 @@ export function FinanceOverview(){return <><PageHeader eyebrow="Finance" title="
 export function FeeStructuresPage(){
 	const {can}=useAccess();
 	const qc=useQueryClient();
-	const q=useQuery({queryKey:["fee-structures"],queryFn:()=>api<Page<Structure>>("/finance/fee-structures/")});
+	const data=usePaged<Structure>("fee-structures","/finance/fee-structures/");
 	const [selected,setSelected]=useState<Structure|null>(null);
 	const approve=useMutation({mutationFn:(id:string)=>api(`/finance/fee-structures/${id}/approve/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setSelected(null);notify.success("Fee structure approved")},onError:error=>notify.error("Fee structure could not be approved",error)});
 
@@ -47,15 +47,25 @@ export function FeeStructuresPage(){
 	// Shared by the create dialog's pickers AND the table's year/level column
 	// labels below, so a viewer without create rights still sees names, not
 	// raw ids -- gated on the page's own view permission, not the create one.
+	// page_size=100 is the real max_page_size AcademicsPagination enforces
+	// (apps/academics/api.py:47-49), not an arbitrary frontend guess -- but
+	// unlike that hard ceiling, nothing here checks `next`, so a tenant that
+	// somehow accumulated more than 100 academic years/levels would still
+	// silently see a truncated picker. Realistically far outside any school's
+	// actual catalogue size, but noted rather than assumed safe forever.
 	const years=useQuery({queryKey:["academic-years"],queryFn:()=>api<Page<AcademicYear>>("/academics/academic-years/",{params:{page_size:100}}),enabled:canView});
 	const levels=useQuery({queryKey:["academic-levels"],queryFn:()=>api<Page<AcademicLevel>>("/academics/academic-levels/",{params:{page_size:100}}),enabled:canView});
 	const yearName=(id:string)=>years.data?.results.find(y=>y.id===id)?.name??id;
 	const levelName=(id:string)=>levels.data?.results.find(l=>l.id===id)?.name??id;
 	const create=useMutation({mutationFn:()=>api<Structure>("/finance/fee-structures/",{method:"POST",body:JSON.stringify({name,academic_year:year,academic_level:level})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setCreateOpen(false);setName("");setYear("");setLevel("");notify.success("Fee structure created")},onError:error=>notify.error("Fee structure could not be created",error)});
 
+	// add_fee_structure_line raises "Approved fee structures cannot be edited"
+	// once is_approved is true (services.py:63-64) -- this gate reflects that
+	// real backend restriction, not an assumption about what approval "should"
+	// mean.
 	const canEdit=can("finance.fee_structure.edit");
 	const [lineItem,setLineItem]=useState("");
-	const [lineAmount,setLineAmount]=useState("");
+	const [lineAmount,setLineAmount]=useState<number|"">("");
 	const feeItems=useQuery({queryKey:["fee-items"],queryFn:()=>api<Page<FeeItemOption>>("/finance/fee-items/",{params:{page_size:100}}),enabled:canEdit});
 	const addLine=useMutation({
 		mutationFn:()=>api<Line>(`/finance/fee-structures/${selected!.id}/lines/`,{method:"POST",body:JSON.stringify({fee_item:lineItem,amount:lineAmount})}),
@@ -63,29 +73,49 @@ export function FeeStructuresPage(){
 		onError:error=>notify.error("Fee line could not be added",error),
 	});
 
-	const columns:Column<Structure>[]=[{key:"name",header:"Structure",cell:r=><><strong>{r.name}</strong><small className="cell-sub">{r.lines.length} fee lines</small></>},{key:"year",header:"Academic year",cell:r=>yearName(r.academic_year)},{key:"level",header:"Level",cell:r=>levelName(r.academic_level)},{key:"total",header:"Total",cell:r=>cash(r.lines.reduce((n,l)=>n+Number(l.amount),0))},{key:"status",header:"Status",cell:r=><StatusBadge value={r.is_approved?"Approved":"Draft"}/>}];
+	const columns:Column<Structure>[]=[
+		{key:"name",header:"Structure",cell:r=><><Text size="sm" fw={600}>{r.name}</Text><Text size="xs" c="dimmed">{r.lines.length} fee lines</Text></>},
+		{key:"year",header:"Academic year",cell:r=>yearName(r.academic_year)},
+		{key:"level",header:"Level",cell:r=>levelName(r.academic_level)},
+		{key:"total",header:"Total",cell:r=>cash(r.lines.reduce((n,l)=>n+Number(l.amount),0))},
+		{key:"status",header:"Status",cell:r=><StatusBadge value={r.is_approved?"Approved":"Draft"}/>},
+	];
 
 	return <>
-		<PageHeader eyebrow="Finance · Setup" title="Fee structures" description="Review charging schedules and approve them before assignment." action={canCreate?<button className="button primary" onClick={()=>setCreateOpen(true)}>+ New structure</button>:undefined}/>
-		<DataTable columns={columns} rows={q.data?.results??[]} rowKey={r=>r.id} loading={q.isLoading} error={q.error} retry={()=>void q.refetch()} count={q.data?.count} onRow={setSelected}/>
+		<WorkspaceHeader title="Fee structures" description="Review charging schedules and approve them before assignment." action={canCreate?<Button onClick={()=>setCreateOpen(true)}>+ New structure</Button>:undefined}/>
+		<DataTable title="Fee structures" columns={columns} rows={data.query.data?.results??[]} rowKey={r=>r.id} loading={data.query.isLoading} error={data.query.error} retry={()=>void data.query.refetch()} onRefresh={()=>void data.query.refetch()}
+			count={data.query.data?.count} page={data.page} previous={!!data.query.data?.previous} next={!!data.query.data?.next} onPage={data.setPage} onRow={setSelected}
+		/>
 
 		<ActionDialog open={createOpen} title="New fee structure" description="Choose the academic year and level this structure applies to." confirmLabel="Create structure" busy={create.isPending} onClose={()=>setCreateOpen(false)} onSubmit={e=>{e.preventDefault();create.mutate()}}>
-			<Failure error={create.error}/>
-			<label>Name<input required value={name} onChange={e=>setName(e.target.value)}/></label>
-			<label>Academic year<select required value={year} onChange={e=>setYear(e.target.value)}><option value="">Select academic year</option>{years.data?.results.map(y=><option key={y.id} value={y.id}>{y.name}{y.is_current?" · Current":""}</option>)}</select></label>
-			<label>Level<select required value={level} onChange={e=>setLevel(e.target.value)}><option value="">Select level</option>{levels.data?.results.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</select></label>
+			<Stack gap="sm">
+				{create.error&&<Alert color="red" variant="light">{errorText(create.error)}</Alert>}
+				<TextInput label="Name" required value={name} onChange={e=>setName(e.currentTarget.value)}/>
+				<Select label="Academic year" required placeholder="Select academic year" data={years.data?.results.map(y=>({value:y.id,label:`${y.name}${y.is_current?" · Current":""}`}))??[]} value={year||null} onChange={value=>setYear(value??"")}/>
+				<Select label="Level" required placeholder="Select level" data={levels.data?.results.map(l=>({value:l.id,label:l.name}))??[]} value={level||null} onChange={value=>setLevel(value??"")}/>
+			</Stack>
 		</ActionDialog>
 
 		<ActionDialog open={!!selected} title={selected?.name??"Fee structure"} description="Approval makes this structure available for student assignment." confirmLabel="Approve structure" busy={approve.isPending} onClose={()=>setSelected(null)} onSubmit={e=>{e.preventDefault();if(selected&&!selected.is_approved)approve.mutate(selected.id)}}>
-			<Failure error={approve.error}/>
-			{selected&&<div className="detail-list">{selected.lines.map(l=><div key={l.id}><span>{l.fee_item_name}{l.is_required?" · Required":" · Optional"}</span><strong>{cash(l.amount)}</strong></div>)}</div>}
-			{selected?.is_approved&&<p className="notice">This structure is already approved.</p>}
-			{selected&&!selected.is_approved&&canEdit&&<div className="detail-list">
-				<Failure error={addLine.error}/>
-				<label>Fee item<select value={lineItem} onChange={e=>setLineItem(e.target.value)}><option value="">Select fee item</option>{feeItems.data?.results.map(i=><option key={i.id} value={i.id}>{i.name}</option>)}</select></label>
-				<label>Amount<input type="number" min="0.01" step="0.01" value={lineAmount} onChange={e=>setLineAmount(e.target.value)}/></label>
-				<button type="button" className="button secondary" disabled={!lineItem||!lineAmount||addLine.isPending} onClick={()=>addLine.mutate()}>Add line</button>
-			</div>}
+			<Stack gap="sm">
+				{approve.error&&<Alert color="red" variant="light">{errorText(approve.error)}</Alert>}
+				<Stack gap={4}>
+					{selected?.lines.map(l=>
+						<Group key={l.id} justify="space-between" wrap="nowrap">
+							<Text size="sm">{l.fee_item_name}{l.is_required?" · Required":" · Optional"}</Text>
+							<Text size="sm" fw={600}>{cash(l.amount)}</Text>
+						</Group>
+					)}
+					{!selected?.lines.length&&<Text size="sm" c="dimmed">No lines yet.</Text>}
+				</Stack>
+				{selected?.is_approved&&<Text size="sm" c="dimmed">This structure is already approved.</Text>}
+				{selected&&!selected.is_approved&&canEdit&&<Stack gap="sm" mt="sm">
+					{addLine.error&&<Alert color="red" variant="light">{errorText(addLine.error)}</Alert>}
+					<Select label="Fee item" placeholder="Select fee item" data={feeItems.data?.results.map(i=>({value:i.id,label:i.name}))??[]} value={lineItem||null} onChange={value=>setLineItem(value??"")}/>
+					<NumberInput label="Amount (KES)" min={0.01} decimalScale={2} value={lineAmount} onChange={value=>setLineAmount(value===""||value===undefined?"":Number(value))}/>
+					<Button variant="default" disabled={!lineItem||!lineAmount||addLine.isPending} onClick={()=>addLine.mutate()}>Add line</Button>
+				</Stack>}
+			</Stack>
 		</ActionDialog>
 	</>;
 }

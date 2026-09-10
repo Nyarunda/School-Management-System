@@ -8,7 +8,7 @@ Rows below with exact paths were confirmed by reading the actual backend `urls.p
 
 | Endpoint | Method | Permission | Frontend | Connected | Workflow complete |
 |---|---|---|---|---|---|
-| `/finance/fee-structures/` | GET/POST | `finance.fee_structure.view`/`.create` | `features/finance.tsx` `FeeStructuresPage` | ✅ | ✅ |
+| `/finance/fee-structures/` | GET/POST | `finance.fee_structure.view`/`.create` | `features/finance.tsx` `FeeStructuresPage` | ✅ | ✅ — was hand-rolled as an unpaginated first-page fetch (no `page`/`onPage` wired to `DataTable`); fixed onto the `usePaged` pattern in the List Workspace migration and verified live past 25 rows |
 | `/finance/fee-structures/<id>/lines/` | POST | `finance.fee_structure.edit` | `FeeStructuresPage` | ✅ | ✅ |
 | `/finance/fee-structures/<id>/approve/` | POST | `finance.fee_structure.approve` | `FeeStructuresPage` | ✅ | ✅ |
 | `/finance/student-fee-assignments/` | GET/POST | `finance.fee_structure.view`/`.edit` | `AssignmentsPage` | ✅ | ✅ |
