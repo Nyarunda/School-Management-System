@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Box, Button, Group, NumberInput, Select, Stack, Text, Textarea, TextInput } from "@mantine/core";
+import { Alert, Box, Button, Group, NumberInput, Select, Stack, Tabs, Text, Textarea, TextInput } from "@mantine/core";
 import { api, ApiError, Page } from "../api/client";
 import { useAccess } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
@@ -285,4 +285,82 @@ export function PaymentsPage(){
 	</>;
 }
 
-export function IncomingPage(){const {can}=useAccess();const qc=useQueryClient();const [status,setStatus]=useState("UNMATCHED");const data=usePaged<Incoming>("incoming","/finance/incoming-payments/",{status});const [selected,setSelected]=useState<Incoming|null>(null);const [mode,setMode]=useState<"match"|"ignore"|null>(null);const [student,setStudent]=useState("");const [reason,setReason]=useState("");const students=useQuery({queryKey:["reconciliation-students"],queryFn:()=>api<Page<Student>>("/students/",{params:{page_size:100}}),enabled:mode==="match"});const paymentMethods=useQuery({queryKey:["incoming-payment-methods-lookup"],queryFn:()=>api<Page<PaymentMethod>>("/finance/payment-methods/",{params:{page_size:100}}),enabled:can("finance.reconciliation.view")});const methodName=(id:string)=>paymentMethods.data?.results.find(m=>m.id===id)?.name??id;const action=useMutation({mutationFn:()=>api(`/finance/incoming-payments/${selected!.id}/${mode}/`,{method:"POST",body:JSON.stringify(mode==="match"?{student}:{reason})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["incoming"]});const done=mode;setSelected(null);setMode(null);notify.success(done==="match"?"Incoming payment matched":"Incoming payment ignored")},onError:error=>notify.error(mode==="match"?"Incoming payment could not be matched":"Incoming payment could not be ignored",error)});const columns:Column<Incoming>[]=[{key:"reference",header:"Reference",cell:r=><><strong>{r.external_transaction_id}</strong><small className="cell-sub">{r.external_reference||"No account reference"}</small></>},{key:"amount",header:"Amount",cell:r=>cash(r.amount)},{key:"method",header:"Payment method",cell:r=>methodName(r.payment_method)},{key:"status",header:"Status",cell:r=><StatusBadge value={r.status}/>},{key:"date",header:"Received",cell:r=>when(r.received_at)}];return <><PageHeader eyebrow="Finance · Reconciliation" title="Incoming payments" description="Unmatched entries are a holding queue. They become student payments only after matching."/><DataTable {...data} loading={data.query.isLoading} error={data.query.error} retry={()=>void data.query.refetch()} columns={columns} rowKey={r=>r.id} count={data.query.data?.count} previous={!!data.query.data?.previous} next={!!data.query.data?.next} onPage={data.setPage} onRow={r=>r.status==="UNMATCHED"&&setSelected(r)} toolbar={<label>Status <select value={status} onChange={e=>{setStatus(e.target.value);data.setPage(1)}}><option value="UNMATCHED">Unmatched</option><option value="MATCHED">Matched</option><option value="IGNORED">Ignored</option></select></label>}/><ActionDialog open={!!selected&&!mode} title={selected?.external_transaction_id??"Incoming payment"} description={selected?`${cash(selected.amount)} is not yet confirmed against a student account.`:undefined} onClose={()=>setSelected(null)} onSubmit={e=>{e.preventDefault();setSelected(null)}}><div className="choice-actions">{can("finance.reconciliation.match")&&<button type="button" className="button primary" onClick={()=>setMode("match")}>Match to student</button>}{can("finance.reconciliation.ignore")&&<button type="button" className="button danger" onClick={()=>setMode("ignore")}>Ignore entry</button>}</div></ActionDialog><ActionDialog open={!!mode} title={mode==="match"?"Match incoming payment":"Ignore incoming payment"} description={mode==="match"?"This creates a real student payment. Check the student carefully.":"The entry remains in the audit trail and will not become a payment."} confirmLabel={mode==="match"?"Confirm match":"Ignore entry"} danger={mode==="ignore"} busy={action.isPending} onClose={()=>setMode(null)} onSubmit={e=>{e.preventDefault();action.mutate()}}><Failure error={action.error}/>{mode==="match"?<label>Student<select required value={student} onChange={e=>setStudent(e.target.value)}><option value="">Select student</option>{students.data?.results.map(s=><option key={s.id} value={s.id}>{s.full_name} · {s.admission_number}</option>)}</select></label>:<label>Reason<textarea required maxLength={240} value={reason} onChange={e=>setReason(e.target.value)}/></label>}</ActionDialog></>}
+const INCOMING_TABS=[{value:"UNMATCHED",label:"Unmatched"},{value:"MATCHED",label:"Matched"},{value:"IGNORED",label:"Ignored"}];
+
+export function IncomingPage(){
+	const {can}=useAccess();
+	const qc=useQueryClient();
+	const [status,setStatus]=useState("UNMATCHED");
+	const [page,setPage]=useState(1);
+	// Plain date input -- converted to an ISO datetime at midnight UTC before
+	// it reaches the API, matching the exact format the backend's own test
+	// exercises (api_tests.py: "received_after=2999-01-01T00:00:00Z"), rather
+	// than relying on Django's undocumented bare-date fallback parsing.
+	const [receivedAfter,setReceivedAfter]=useState("");
+	const incoming=useQuery({queryKey:["incoming",status,page,receivedAfter],queryFn:()=>api<Page<Incoming>>("/finance/incoming-payments/",{params:{status,page,received_after:receivedAfter?`${receivedAfter}T00:00:00Z`:undefined}})});
+
+	const [matchTarget,setMatchTarget]=useState<Incoming|null>(null);
+	// The match serializer takes only a student id -- no bounded/searchable
+	// student catalogue exists (STUDENT-GAP-02), so unlike the old dropdown
+	// (a page_size:100 fetch presented as if it were the complete roster),
+	// this stays a raw exact-id field. Flagged rather than carried forward.
+	const [matchStudentId,setMatchStudentId]=useState("");
+	const match=useMutation({
+		mutationFn:()=>api(`/finance/incoming-payments/${matchTarget!.id}/match/`,{method:"POST",body:JSON.stringify({student:matchStudentId})}),
+		onSuccess:()=>{void qc.invalidateQueries({queryKey:["incoming"]});setMatchTarget(null);notify.success("Incoming payment matched")},
+		onError:error=>notify.error("Incoming payment could not be matched",error),
+	});
+
+	const [ignoreTarget,setIgnoreTarget]=useState<Incoming|null>(null);
+	const [ignoreReason,setIgnoreReason]=useState("");
+	const ignore=useMutation({
+		mutationFn:()=>api(`/finance/incoming-payments/${ignoreTarget!.id}/ignore/`,{method:"POST",body:JSON.stringify({reason:ignoreReason})}),
+		onSuccess:()=>{void qc.invalidateQueries({queryKey:["incoming"]});setIgnoreTarget(null);notify.success("Incoming payment ignored")},
+		onError:error=>notify.error("Incoming payment could not be ignored",error),
+	});
+
+	const paymentMethods=useQuery({queryKey:["incoming-payment-methods-lookup"],queryFn:()=>api<Page<PaymentMethod>>("/finance/payment-methods/",{params:{page_size:100}}),enabled:can("finance.reconciliation.view")});
+	const methodName=(id:string)=>paymentMethods.data?.results.find(m=>m.id===id)?.name??id;
+
+	const columns:Column<Incoming>[]=[
+		{key:"reference",header:"Reference",cell:r=><><Text size="sm" fw={600}>{r.external_transaction_id}</Text><Text size="xs" c="dimmed">{r.external_reference||"No account reference"}</Text></>},
+		{key:"amount",header:"Amount",cell:r=>cash(r.amount)},
+		{key:"method",header:"Payment method",cell:r=>methodName(r.payment_method)},
+		{key:"status",header:"Status",cell:r=><><StatusBadge value={r.status}/>{r.status==="IGNORED"&&r.ignored_reason&&<Text size="xs" c="dimmed" mt={2}>{r.ignored_reason}</Text>}{r.status==="MATCHED"&&r.matched_payment&&<Text size="xs" c="dimmed" ff="monospace" mt={2}>Payment {r.matched_payment}</Text>}</>},
+		{key:"date",header:"Received",cell:r=>when(r.received_at)},
+		{key:"action",header:"",cell:r=>r.status==="UNMATCHED"?<Group gap="xs" wrap="nowrap">
+			{can("finance.reconciliation.match")&&<Button size="xs" variant="default" onClick={e=>{e.stopPropagation();setMatchTarget(r);setMatchStudentId("")}}>Match</Button>}
+			{can("finance.reconciliation.ignore")&&<Button size="xs" variant="default" color="red" onClick={e=>{e.stopPropagation();setIgnoreTarget(r);setIgnoreReason("")}}>Ignore</Button>}
+		</Group>:null},
+	];
+
+	return <>
+		<WorkspaceHeader title="Incoming payments" description="Review and reconcile incoming payment records."/>
+		<Tabs value={status} onChange={v=>{if(v){setStatus(v);setPage(1)}}} mb="md">
+			<Tabs.List>
+				{INCOMING_TABS.map(t=><Tabs.Tab key={t.value} value={t.value}>{t.label}</Tabs.Tab>)}
+			</Tabs.List>
+		</Tabs>
+		<DataTable title="Incoming payments" columns={columns} rows={incoming.data?.results??[]} rowKey={r=>r.id} loading={incoming.isLoading} error={incoming.error} retry={()=>void incoming.refetch()} onRefresh={()=>void incoming.refetch()}
+			count={incoming.data?.count} page={page} previous={!!incoming.data?.previous} next={!!incoming.data?.next} onPage={setPage}
+			toolbar={<FilterBar>
+				<TextInput type="date" label="Received after" size="xs" w={170} value={receivedAfter} onChange={e=>{setReceivedAfter(e.currentTarget.value);setPage(1)}}/>
+				{receivedAfter&&<Button variant="subtle" size="xs" mt={22} onClick={()=>{setReceivedAfter("");setPage(1)}}>Clear</Button>}
+			</FilterBar>}
+		/>
+
+		<ActionDialog open={!!matchTarget} title="Match incoming payment" description={matchTarget?`Creates a real student payment for ${cash(matchTarget.amount)}. Check the student id carefully -- this cannot be undone from here.`:undefined} confirmLabel="Confirm match" busy={match.isPending} onClose={()=>setMatchTarget(null)} onSubmit={e=>{e.preventDefault();match.mutate()}}>
+			<Stack gap="sm">
+				{match.error&&<Alert color="red" variant="light">{errorText(match.error)}</Alert>}
+				<TextInput label="Student id" required placeholder="Exact student id" value={matchStudentId} onChange={e=>setMatchStudentId(e.currentTarget.value)}/>
+			</Stack>
+		</ActionDialog>
+
+		<ActionDialog open={!!ignoreTarget} title="Ignore incoming payment" description="The entry remains in the audit trail and will not become a payment." confirmLabel="Ignore entry" danger busy={ignore.isPending} onClose={()=>setIgnoreTarget(null)} onSubmit={e=>{e.preventDefault();ignore.mutate()}}>
+			<Stack gap="sm">
+				{ignore.error&&<Alert color="red" variant="light">{errorText(ignore.error)}</Alert>}
+				<Textarea label="Reason" required maxLength={240} value={ignoreReason} onChange={e=>setIgnoreReason(e.currentTarget.value)}/>
+			</Stack>
+		</ActionDialog>
+	</>;
+}

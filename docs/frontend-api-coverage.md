@@ -23,8 +23,8 @@ Rows below with exact paths were confirmed by reading the actual backend `urls.p
 | `/finance/payments/<id>/` | GET | `finance.payment.view` | none | ❌ | Redundant today — the list row already carries everything this serializer returns |
 | `/finance/payment-allocations/<id>/reverse/` | POST | `finance.allocation.reverse` | `PaymentsPage` — per-allocation "Reverse" action inside the payment detail dialog, kept visually and semantically distinct from whole-payment reversal | ✅ | ✅ (no client-side "remaining amount" cap — `PaymentAllocationSerializer` doesn't expose reversed-to-date, so the backend's rejection is the authoritative guard; verified live) |
 | `/finance/ledger-entries/` | GET | `finance.student_account.view` | none | ❌ | Not yet detailed |
-| `/finance/incoming-payments/` | GET | `finance.reconciliation.view` | `IncomingPage` | ✅ | ✅ |
-| `/finance/incoming-payments/<id>/match/` | POST | `finance.reconciliation.match` | `IncomingPage` | ✅ | ✅ |
+| `/finance/incoming-payments/` | GET | `finance.reconciliation.view` | `IncomingPage` — first real `status=` WorkflowTabs consumer in Finance (Unmatched/Matched/Ignored, each a real server request) plus a `received_after` FilterBar control | ✅ | ✅ |
+| `/finance/incoming-payments/<id>/match/` | POST | `finance.reconciliation.match` | `IncomingPage` — raw student-id field, not the old `page_size:100` dropdown (`STUDENT-GAP-02`) | ✅ | ✅ |
 | `/finance/incoming-payments/<id>/ignore/` | POST | `finance.reconciliation.ignore` | `IncomingPage` | ✅ | ✅ |
 | `/finance/payment-methods/` | GET | `finance.payment.record` | `IncomingPage`/`PaymentsPage` lookup | ✅ | ✅ |
 | `/finance/setup/` | GET | `finance.setup.view` | `pages.tsx` `SetupPage` (read-only) | ✅ | Partial — no edit UI (out of scope this slice) |
