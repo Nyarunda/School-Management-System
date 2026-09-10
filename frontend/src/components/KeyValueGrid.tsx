@@ -5,7 +5,7 @@ export function KeyValueSection({ title, children }: { title: string; children: 
   return (
     <Box mb="lg">
       <Text fz={13} fw={600} tt="uppercase" c="dimmed" mb={6} style={{ letterSpacing: "0.05em" }}>{title}</Text>
-      <Divider mb="sm" />
+      <Divider mb="sm" color="indigo.3" />
       {children}
     </Box>
   );
