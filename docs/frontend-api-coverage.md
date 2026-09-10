@@ -4,14 +4,14 @@ The authoritative, kept-current integration ledger. Updated whenever a wiring sl
 
 Rows below with exact paths were confirmed by reading the actual backend `urls.py`/`api.py` and the actual frontend call site — not inferred. Domains not yet given a dedicated wiring pass (marked "not yet detailed") are tracked at summary level only, using the original 2026-09-09 audit's counts; their exact endpoint list gets filled in here when that domain's slice is picked up, rather than guessed now.
 
-## Finance (core) — Partial (Credit Note creation and Allocation Reversal closed; Payment detail, Ledger, and Fee Category/Item creation still open)
+## Finance (core) — List Workspace migration complete (Invoices, Payments, Incoming Payments, Fee Structures, Fee Assignments); Payment detail, Ledger, Fee Category/Item creation, and an unscoped Credit Notes browsing page remain unconnected by design (see rows below)
 
 | Endpoint | Method | Permission | Frontend | Connected | Workflow complete |
 |---|---|---|---|---|---|
 | `/finance/fee-structures/` | GET/POST | `finance.fee_structure.view`/`.create` | `features/finance.tsx` `FeeStructuresPage` | ✅ | ✅ — was hand-rolled as an unpaginated first-page fetch (no `page`/`onPage` wired to `DataTable`); fixed onto the `usePaged` pattern in the List Workspace migration and verified live past 25 rows |
 | `/finance/fee-structures/<id>/lines/` | POST | `finance.fee_structure.edit` | `FeeStructuresPage` | ✅ | ✅ |
 | `/finance/fee-structures/<id>/approve/` | POST | `finance.fee_structure.approve` | `FeeStructuresPage` | ✅ | ✅ |
-| `/finance/student-fee-assignments/` | GET/POST | `finance.fee_structure.view`/`.edit` | `AssignmentsPage` | ✅ | ✅ |
+| `/finance/student-fee-assignments/` | GET/POST | `finance.student_account.view`/`finance.invoice.create` | `AssignmentsPage` — the "+ Assign fees" visibility gate was `finance.fee_structure.edit` (wrong permission, coupled assignment capability to fee-structure maintenance); fixed to `finance.invoice.create`, the permission `AssignmentListCreateView.create()`/`assign_fee_structure()` actually enforce. Verified live across all four YES/NO combinations of the two permissions. Student field is a raw exact-id `TextInput`, not a dropdown (`STUDENT-GAP-02`) | ✅ | ✅ |
 | `/finance/student-fee-assignments/<id>/generate-invoice/` | POST | `finance.invoice.create` | `AssignmentsPage` | ✅ | ✅ |
 | `/finance/invoices/` | GET | `finance.invoice.view` | `InvoicesPage` | ✅ | ✅ (raw student id — `STUDENT-GAP-02`) |
 | `/finance/invoices/<id>/issue/` | POST | `finance.invoice.issue` | `InvoicesPage` | ✅ | ✅ |

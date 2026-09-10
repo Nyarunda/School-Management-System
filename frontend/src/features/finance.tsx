@@ -26,7 +26,6 @@ const kes=new Intl.NumberFormat("en-KE",{style:"currency",currency:"KES",minimum
 const cash=(v:string|number)=>kes.format(Number(v));
 const when=(v:string|null)=>v?new Intl.DateTimeFormat("en-KE",{dateStyle:"medium",timeStyle:"short"}).format(new Date(v)):"—";
 function usePaged<T>(key:string,path:string,params?:Record<string,string|number|undefined>){const [page,setPage]=useState(1);const query=useQuery({queryKey:[key,page,params],queryFn:()=>api<Page<T>>(path,{params:{page,...params}})});return {page,setPage,query,rows:query.data?.results??[]};}
-function Failure({error}:{error:unknown}){return error?<div className="form-error" role="alert">{error instanceof Error?error.message:"The action failed"}</div>:null}
 const errorText=(error:unknown)=>error instanceof ApiError?error.message:error instanceof Error?error.message:"The action failed";
 
 export function FinanceOverview(){return <><PageHeader eyebrow="Finance" title="Finance operations" description="Move from approved charges to invoices, collections and reconciled student accounts."/><div className="workflow-strip"><a href="/finance/fees"><b>1</b><span><strong>Set fees</strong><small>Approve charging schedules</small></span></a><a href="/finance/assignments"><b>2</b><span><strong>Assign & invoice</strong><small>Generate student charges</small></span></a><a href="/finance/payments"><b>3</b><span><strong>Collect & allocate</strong><small>Apply money to invoices</small></span></a><a href="/finance/incoming"><b>4</b><span><strong>Reconcile</strong><small>Resolve incoming money</small></span></a></div></>}
@@ -120,7 +119,58 @@ export function FeeStructuresPage(){
 	</>;
 }
 
-export function AssignmentsPage(){const {can}=useAccess();const qc=useQueryClient();const data=usePaged<Assignment>("assignments","/finance/student-fee-assignments/");const students=useQuery({queryKey:["assignment-students"],queryFn:()=>api<Page<Student>>("/students/",{params:{page_size:100}}),enabled:can("finance.fee_structure.edit")});const structures=useQuery({queryKey:["assignment-structures"],queryFn:()=>api<Page<Structure>>("/finance/fee-structures/",{params:{page_size:100}}),enabled:can("finance.fee_structure.edit")});const [open,setOpen]=useState(false);const [student,setStudent]=useState("");const [structure,setStructure]=useState("");const create=useMutation({mutationFn:()=>api("/finance/student-fee-assignments/",{method:"POST",body:JSON.stringify({student,fee_structure:structure})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});setOpen(false);notify.success("Fee structure assigned to student")},onError:error=>notify.error("Fee assignment could not be created",error)});const generate=useMutation({mutationFn:(id:string)=>api(`/finance/student-fee-assignments/${id}/generate-invoice/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});void qc.invalidateQueries({queryKey:["invoices"]});notify.success("Invoice generated")},onError:error=>notify.error("Invoice could not be generated",error)});const columns:Column<Assignment>[]=[{key:"student",header:"Student",cell:r=><strong>{r.student_name}</strong>},{key:"structure",header:"Fee structure",cell:r=>r.fee_structure_name},{key:"status",header:"Status",cell:r=><StatusBadge value={r.status}/>},{key:"assigned",header:"Assigned",cell:r=>when(r.assigned_at)},{key:"action",header:"",cell:r=>can("finance.invoice.create")?<button className="button secondary" disabled={generate.isPending} onClick={e=>{e.stopPropagation();generate.mutate(r.id)}}>Generate invoice</button>:null}];return <><PageHeader eyebrow="Finance · Billing" title="Fee assignments" description="Assign an approved fee structure, then generate the student's draft invoice." action={can("finance.fee_structure.edit")?<button className="button primary" onClick={()=>setOpen(true)}>+ Assign fees</button>:undefined}/><Failure error={generate.error}/><DataTable {...data} loading={data.query.isLoading} error={data.query.error} retry={()=>void data.query.refetch()} columns={columns} rowKey={r=>r.id} count={data.query.data?.count} previous={!!data.query.data?.previous} next={!!data.query.data?.next} onPage={data.setPage}/><ActionDialog open={open} title="Assign fee structure" description="Only approved structures are offered." confirmLabel="Assign fees" busy={create.isPending} onClose={()=>setOpen(false)} onSubmit={e=>{e.preventDefault();create.mutate()}}><Failure error={create.error}/><label>Student<select required value={student} onChange={e=>setStudent(e.target.value)}><option value="">Select student</option>{students.data?.results.map(s=><option key={s.id} value={s.id}>{s.full_name} · {s.admission_number}</option>)}</select></label><label>Approved fee structure<select required value={structure} onChange={e=>setStructure(e.target.value)}><option value="">Select structure</option>{structures.data?.results.filter(s=>s.is_approved).map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label></ActionDialog></>}
+export function AssignmentsPage(){
+	const {can}=useAccess();
+	const qc=useQueryClient();
+	const data=usePaged<Assignment>("assignments","/finance/student-fee-assignments/");
+	// AssignmentListCreateView.create() (api.py:292-297) and assign_fee_structure()
+	// (services.py:94-95) both require finance.invoice.create -- the old gate
+	// here was finance.fee_structure.edit, which incorrectly coupled "who can
+	// assign fees" to "who can edit fee-structure lines". Fixed to match the
+	// permission actually enforced server-side.
+	const canAssign=can("finance.invoice.create");
+	// FeeStructure catalogue: real max_page_size=100 (FinancePagination, same
+	// ceiling as the academic-year/level catalogues), and fee structures are
+	// an administratively-created, small catalogue -- realistically never
+	// near 100 per tenant. Kept as a dropdown, filtered to is_approved (the
+	// one real backend restriction: assign_fee_structure rejects an
+	// unapproved structure with "Only approved fee structures can be
+	// assigned"; is_active is never checked, so it's not filtered on here).
+	const structures=useQuery({queryKey:["assignment-structures"],queryFn:()=>api<Page<Structure>>("/finance/fee-structures/",{params:{page_size:100}}),enabled:canAssign});
+	const [open,setOpen]=useState(false);
+	// Student: a raw exact-id field, not the old page_size:100 dropdown --
+	// students are an unbounded, realistically >100 population per tenant
+	// (STUDENT-GAP-02), unlike fee structures above. Flagged and dropped
+	// rather than carried forward, matching the same call made for Incoming
+	// Payments' Match dialog.
+	const [studentId,setStudentId]=useState("");
+	const [structure,setStructure]=useState("");
+	const create=useMutation({mutationFn:()=>api("/finance/student-fee-assignments/",{method:"POST",body:JSON.stringify({student:studentId,fee_structure:structure})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});setOpen(false);notify.success("Fee structure assigned to student")},onError:error=>notify.error("Fee assignment could not be created",error)});
+	const generate=useMutation({mutationFn:(id:string)=>api(`/finance/student-fee-assignments/${id}/generate-invoice/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});void qc.invalidateQueries({queryKey:["invoices"]});notify.success("Invoice generated")},onError:error=>notify.error("Invoice could not be generated",error)});
+
+	const columns:Column<Assignment>[]=[
+		{key:"student",header:"Student",cell:r=><Text size="sm" fw={600}>{r.student_name}</Text>},
+		{key:"structure",header:"Fee structure",cell:r=>r.fee_structure_name},
+		{key:"status",header:"Status",cell:r=><StatusBadge value={r.status}/>},
+		{key:"assigned",header:"Assigned",cell:r=>when(r.assigned_at)},
+		{key:"action",header:"",cell:r=>can("finance.invoice.create")?<Button size="xs" variant="default" disabled={generate.isPending} onClick={e=>{e.stopPropagation();generate.mutate(r.id)}}>Generate invoice</Button>:null},
+	];
+
+	return <>
+		<WorkspaceHeader title="Fee assignments" description="Assign an approved fee structure, then generate the student's draft invoice." action={canAssign?<Button onClick={()=>{setStudentId("");setStructure("");setOpen(true)}}>+ Assign fees</Button>:undefined}/>
+		<DataTable title="Fee assignments" columns={columns} rows={data.query.data?.results??[]} rowKey={r=>r.id} loading={data.query.isLoading} error={data.query.error} retry={()=>void data.query.refetch()} onRefresh={()=>void data.query.refetch()}
+			count={data.query.data?.count} page={data.page} previous={!!data.query.data?.previous} next={!!data.query.data?.next} onPage={data.setPage}
+		/>
+
+		<ActionDialog open={open} title="Assign fee structure" description="Only approved structures are offered. Assigning the same student and structure again is safe -- it returns the existing assignment rather than creating a duplicate." confirmLabel="Assign fees" busy={create.isPending} onClose={()=>setOpen(false)} onSubmit={e=>{e.preventDefault();create.mutate()}}>
+			<Stack gap="sm">
+				{create.error&&<Alert color="red" variant="light">{errorText(create.error)}</Alert>}
+				<TextInput label="Student id" required placeholder="Exact student id" value={studentId} onChange={e=>setStudentId(e.currentTarget.value)}/>
+				<Select label="Approved fee structure" required placeholder="Select structure" data={structures.data?.results.filter(s=>s.is_approved).map(s=>({value:s.id,label:s.name}))??[]} value={structure||null} onChange={value=>setStructure(value??"")}/>
+			</Stack>
+		</ActionDialog>
+	</>;
+}
 
 export function InvoicesPage(){
 	const {can}=useAccess();
