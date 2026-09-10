@@ -43,6 +43,20 @@ def require_permission(*, user, permission, tenant=None, tenant_slug=None):
     return membership
 
 
+def require_any_permission(*, user, permissions, tenant=None, tenant_slug=None):
+    """Like require_permission, but authorizes on any one of several permissions --
+    for reference data that multiple distinct roles in a domain legitimately need
+    to read (e.g. a leave-type catalogue), where gating reads behind a single
+    narrow permission would lock out roles that only hold a sibling permission.
+    No permission implication exists anywhere else in this codebase (confirmed by
+    grep), so this is an explicit, named exception, not a general rule.
+    """
+    membership = require_membership(user=user, tenant=tenant, tenant_slug=tenant_slug)
+    if not getattr(user, "is_superuser", False) and not any(p in membership.role.permissions for p in permissions):
+        raise ValidationError(f"User lacks any of the required permissions: {', '.join(permissions)}")
+    return membership
+
+
 def require_same_tenant(*, tenant, **objects):
     """Reject a domain operation when any tenant-owned object crosses boundaries."""
     mismatched = [name for name, value in objects.items() if value.tenant_id != tenant.id]

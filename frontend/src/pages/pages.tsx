@@ -1,6 +1,6 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, NumberInput, Paper, Stack } from "@mantine/core";
+import { Alert, Group, NumberInput, Paper, Select, Stack, Table, Text } from "@mantine/core";
 import { api, Page } from "../api/client";
 import { useAccess, useAuth } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
@@ -67,7 +67,7 @@ export function StudentPage({id}:{id:string}){const student=JSON.parse(sessionSt
 
 export function StaffPage(){const query=useQuery({queryKey:["employees"],queryFn:()=>api<Page<Row>>("/staff/employees/")});return <><PageHeader eyebrow="Staff & HR" title="Employees" description="Open an employee record to manage employment, qualifications, documents and leave."/><section className="card data-card">{query.isLoading?<Loading/>:query.isError?<ErrorState error={query.error}/>:!query.data?.results.length?<Empty/>:<div className="student-cards">{query.data.results.map(employee=><button key={String(employee.id)} onClick={()=>go(`/staff/${employee.id}`)}><span className="student-avatar">{`${String(employee.first_name??"").slice(0,1)}${String(employee.last_name??"").slice(0,1)}`}</span><span><strong>{String(employee.first_name??"")} {String(employee.last_name??"")}</strong><small>{display(employee.employee_number)} · {display(employee.job_title)}</small></span><StatusBadge value={String(employee.status??"Active")}/><b>›</b></button>)}</div>}</section></>}
 
-export function EmployeePage({id}:{id:string}){const {can}=useAccess();const detail=useQuery({queryKey:["employee",id],queryFn:()=>api<Row>(`/staff/employees/${id}/`)});const tabs=["Overview","Qualifications","Documents",...(can("leave.request.view")||can("leave.balance.adjust")?["Leave"]:[]),...(can("staff.user_link.manage")?["User access"]:[])];const [tab,setTab]=useState("Overview");const qualifications=useQuery({queryKey:["employee-qualifications",id],queryFn:()=>api<Page<Row>|Row[]>(`/staff/employees/${id}/qualifications/`),enabled:tab==="Qualifications"});const leave=useQuery({queryKey:["employee-leave",id],queryFn:()=>api<Row>(`/leave/employees/${id}/balance/`),enabled:tab==="Leave"});if(detail.isLoading)return <Loading label="Opening employee record"/>;if(detail.isError)return <ErrorState error={detail.error}/>;const employee=detail.data??{};return <>
+export function EmployeePage({id}:{id:string}){const {can}=useAccess();const detail=useQuery({queryKey:["employee",id],queryFn:()=>api<Row>(`/staff/employees/${id}/`)});const tabs=["Overview","Qualifications","Documents",...(can("leave.request.view")||can("leave.balance.adjust")?["Leave"]:[]),...(can("staff.user_link.manage")?["User access"]:[])];const [tab,setTab]=useState("Overview");const qualifications=useQuery({queryKey:["employee-qualifications",id],queryFn:()=>api<Page<Row>|Row[]>(`/staff/employees/${id}/qualifications/`),enabled:tab==="Qualifications"});if(detail.isLoading)return <Loading label="Opening employee record"/>;if(detail.isError)return <ErrorState error={detail.error}/>;const employee=detail.data??{};return <>
  <RecordHeader backLabel="Employee directory" onBack={()=>go("/staff")}
   initials={`${String(employee.first_name??"").slice(0,1)}${String(employee.last_name??"").slice(0,1)}`.toUpperCase()}
   eyebrow={String(employee.employee_number??"Employee record")} title={`${String(employee.first_name??"")} ${String(employee.last_name??"")}`}
@@ -77,10 +77,40 @@ export function EmployeePage({id}:{id:string}){const {can}=useAccess();const det
   {tab==="Overview"&&<KeyValueSection title="Overview"><KeyValueGrid>{["employment_type","hire_date","campus","email","phone_number","user_account"].map(key=><KeyValueItem key={key} label={pretty(key)} value={display(employee[key])}/>)}</KeyValueGrid></KeyValueSection>}
   {tab==="Qualifications"&&<JsonPanel query={qualifications}/>}
   {tab==="Documents"&&<DocumentsPanel basePath="/staff/employees" ownerId={id} viewPermission="staff.view" managePermission="staff.manage" can={can}/>}
-  {tab==="Leave"&&<JsonPanel query={leave}/>}
+  {tab==="Leave"&&<LeavePanel employeeId={id}/>}
   {tab==="User access"&&<KeyValueSection title="User access"><KeyValueGrid><KeyValueItem label="Linked account" value={display(employee.user_account)}/><KeyValueItem label="Account management" value="Available to authorized administrators"/></KeyValueGrid></KeyValueSection>}
  </Paper>
 </>}
+type LeaveTypeOption={id:string;name:string};
+type LeaveBalanceEntry={id:string;entry_type:string;days:number;reason:string;created_at:string};
+type LeaveBalance={balance:number;entries:LeaveBalanceEntry[]};
+function LeavePanel({employeeId}:{employeeId:string}){
+	const [leaveTypeId,setLeaveTypeId]=useState("");
+	const [year,setYear]=useState<number|"">(new Date().getFullYear());
+	const leaveTypes=useQuery({queryKey:["leave-types-for-balance"],queryFn:()=>api<Page<LeaveTypeOption>>("/leave/types/",{params:{page_size:100}})});
+	const balance=useQuery({
+		queryKey:["employee-leave-balance",employeeId,leaveTypeId,year],
+		queryFn:()=>api<LeaveBalance>(`/leave/employees/${employeeId}/balance/`,{params:{leave_type:leaveTypeId,year}}),
+		enabled:!!leaveTypeId&&year!=="",
+	});
+	return <Stack gap="md">
+		<Group gap="sm" align="end">
+			<Select label="Leave type" placeholder={leaveTypes.isLoading?"Loading…":"Select leave type"} disabled={leaveTypes.isLoading}
+				data={(leaveTypes.data?.results??[]).map(t=>({value:t.id,label:t.name}))} value={leaveTypeId||null} onChange={value=>setLeaveTypeId(value??"")}/>
+			<NumberInput label="Year" w={120} value={year} onChange={value=>setYear(value===""||value===undefined?"":Number(value))}/>
+		</Group>
+		{leaveTypes.isError&&<Alert color="red" variant="light">{leaveTypes.error instanceof Error?leaveTypes.error.message:"Leave types could not be loaded"}</Alert>}
+		{!leaveTypeId?<Text size="sm" c="dimmed">Select a leave type to view the balance.</Text>:
+			balance.isLoading?<Loading label="Loading balance"/>:balance.isError?<ErrorState error={balance.error}/>:<>
+				<Text size="sm">Balance: <Text span fw={700}>{balance.data?.balance} days</Text></Text>
+				{!balance.data?.entries.length?<Empty title="No ledger entries" message="No adjustments recorded for this leave type and year."/>:
+					<Table withTableBorder verticalSpacing="xs">
+						<Table.Thead><Table.Tr><Table.Th>Type</Table.Th><Table.Th>Days</Table.Th><Table.Th>Reason</Table.Th><Table.Th>Date</Table.Th></Table.Tr></Table.Thead>
+						<Table.Tbody>{balance.data!.entries.map(e=><Table.Tr key={e.id}><Table.Td>{e.entry_type}</Table.Td><Table.Td>{e.days}</Table.Td><Table.Td>{e.reason||"—"}</Table.Td><Table.Td>{new Date(e.created_at).toLocaleDateString()}</Table.Td></Table.Tr>)}</Table.Tbody>
+					</Table>}
+			</>}
+	</Stack>;
+}
 function Info({label,value}:{label:string;value:unknown}){return <div className="info-block"><small>{label}</small><strong>{display(value)}</strong></div>}
 function JsonPanel({query}:{query:{isLoading:boolean;isError:boolean;error:unknown;data?:unknown}}){if(query.isLoading)return <Loading/>;if(query.isError)return <ErrorState error={query.error}/>;if(!query.data)return <Empty/>;const value=query.data as Row;const entries=Array.isArray(value)?value:Object.entries(value);return <div className="overview-grid">{Array.isArray(entries)&&entries.slice(0,12).map((entry,index)=>Array.isArray(entry)?<Info key={entry[0]} label={pretty(entry[0])} value={entry[1]}/>:<Info key={index} label={`Record ${index+1}`} value={entry}/>)}</div>}
 

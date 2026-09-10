@@ -11,7 +11,7 @@ from rest_framework.views import APIView
 from apps.platform.services import require_module_enabled
 from apps.staff.models import Employee
 from apps.tenancy.models import Role
-from apps.tenancy.services import require_permission
+from apps.tenancy.services import require_any_permission, require_permission
 
 from .models import (
     LeaveApprovalWorkflow,
@@ -55,6 +55,22 @@ def resolve_leave_tenant(request, permission):
         raise NotFound("Tenant context is required")
     try:
         membership = require_permission(user=request.user, tenant_slug=slug, permission=permission)
+        require_module_enabled(tenant=membership.tenant, module_code="staff_hr")
+        return membership.tenant
+    except DjangoValidationError as error:
+        raise PermissionDenied(error.messages) from error
+
+
+def resolve_leave_tenant_any(request, permissions):
+    """Same shape as resolve_leave_tenant, but for reference data (the leave-type
+    catalogue) that every leave-domain role legitimately needs to read, not just
+    leave.setup.view holders -- see require_any_permission's docstring.
+    """
+    slug = request.headers.get("X-Tenant-Slug")
+    if not slug:
+        raise NotFound("Tenant context is required")
+    try:
+        membership = require_any_permission(user=request.user, tenant_slug=slug, permissions=permissions)
         require_module_enabled(tenant=membership.tenant, module_code="staff_hr")
         return membership.tenant
     except DjangoValidationError as error:
@@ -142,7 +158,11 @@ class LeaveTypeListCreateView(ListCreateAPIView):
     pagination_class = LeavePagination
 
     def get_queryset(self):
-        return LeaveType.objects.filter(tenant=resolve_leave_tenant(self.request, "leave.setup.view")).order_by("code")
+        tenant = resolve_leave_tenant_any(self.request, [
+            "leave.setup.view", "leave.setup.manage", "leave.request.view",
+            "leave.request.manage", "leave.approve", "leave.balance.adjust",
+        ])
+        return LeaveType.objects.filter(tenant=tenant).order_by("code")
 
     def create(self, request, *args, **kwargs):
         tenant = resolve_leave_tenant(request, "leave.setup.manage")
