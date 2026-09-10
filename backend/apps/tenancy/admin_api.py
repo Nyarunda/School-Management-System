@@ -69,6 +69,31 @@ class PermissionCatalogueView(APIView):
         ])
 
 
+# --- Campus catalogue -------------------------------------------------------
+
+class CampusSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Campus
+        fields = ["id", "name"]
+        read_only_fields = fields
+
+
+class CampusListView(ListAPIView):
+    """Read-only, deliberately narrow (id/name only) -- CAMPUS-GAP-01. Exists
+    so Invite/Reassign can show real campus names instead of asking an admin
+    to type an opaque integer id; no mutation, no new business rule, mirrors
+    the class-group catalogue closure for Attendance.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = CampusSerializer
+    pagination_class = TenancyAdminPagination
+
+    def get_queryset(self):
+        tenant = resolve_tenancy_admin_tenant(self.request, "tenancy.membership.view")
+        return Campus.objects.filter(tenant=tenant).order_by("name")
+
+
 # --- Roles -----------------------------------------------------------------
 
 class RoleSerializer(serializers.ModelSerializer):
@@ -146,7 +171,8 @@ class MembershipSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Membership
-        fields = ["id", "user", "role", "campus", "is_active", "joined_at"]
+        fields = ["id", "user", "role", "campus", "is_active", "invite_accepted_at", "joined_at"]
+        read_only_fields = ["id", "user", "role", "campus", "is_active", "invite_accepted_at", "joined_at"]
 
     def get_user(self, obj):
         return {

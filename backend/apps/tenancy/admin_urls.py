@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .admin_api import (
+    CampusListView,
     MembershipActivateView,
     MembershipDeactivateView,
     MembershipDetailView,
@@ -13,6 +14,7 @@ from .admin_api import (
 
 urlpatterns = [
     path("permissions/", PermissionCatalogueView.as_view(), name="tenancy-permissions"),
+    path("campuses/", CampusListView.as_view(), name="tenancy-campuses"),
     path("roles/", RoleListCreateView.as_view(), name="tenancy-roles"),
     path("roles/<int:role_id>/", RoleDetailView.as_view(), name="tenancy-role-detail"),
     path("memberships/", MembershipListView.as_view(), name="tenancy-memberships"),

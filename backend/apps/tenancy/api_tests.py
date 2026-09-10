@@ -4,7 +4,7 @@ from rest_framework.test import APIClient
 
 from apps.notifications.models import NotificationOutbox
 
-from .models import Membership, Role, Tenant, User
+from .models import Campus, Membership, Role, Tenant, User
 
 
 class SessionApiTests(TestCase):
@@ -153,6 +153,17 @@ class TenancyAdminApiTests(TestCase):
         delete_response = self.client.delete(f"/api/v1/tenancy/roles/{role_id}/", **self.headers())
         self.assertEqual(delete_response.status_code, 204)
 
+    def test_role_manage_permission_does_not_imply_role_view(self):
+        # Same non-implication question as campuses, for the role catalogue
+        # Invite/Reassign's role picker depends on: .manage alone must not
+        # be treated as if it also grants .view.
+        manage_only_role = Role.objects.create(tenant=self.school_a, name="Role Manage Only", permissions=["tenancy.role.manage"])
+        manage_only_user = User.objects.create_user(username="role-manage-only", password="secret")
+        Membership.objects.create(tenant=self.school_a, user=manage_only_user, role=manage_only_role)
+        self.client.force_authenticate(manage_only_user)
+        response = self.client.get("/api/v1/tenancy/roles/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
     def test_role_from_another_tenant_is_not_found(self):
         foreign_role = Role.objects.create(tenant=self.school_b, name="Foreign", permissions=[])
         response = self.client.get(f"/api/v1/tenancy/roles/{foreign_role.id}/", **self.headers())
@@ -250,3 +261,92 @@ class TenancyAdminApiTests(TestCase):
         membership = Membership.objects.get(pk=membership_id)
         self.assertTrue(membership.is_active)
         self.assertTrue(existing.check_password("whatever"))
+
+    def test_campus_catalogue_is_tenant_scoped_and_paginated(self):
+        Campus.objects.create(tenant=self.school_a, name="Main Campus", code="MAIN")
+        Campus.objects.create(tenant=self.school_a, name="North Campus", code="NORTH")
+        Campus.objects.create(tenant=self.school_b, name="Foreign Campus", code="FOREIGN")
+
+        response = self.client.get("/api/v1/tenancy/campuses/", **self.headers())
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("results", response.data)
+        self.assertEqual(response.data["count"], 2)
+        names = {entry["name"] for entry in response.data["results"]}
+        self.assertEqual(names, {"Main Campus", "North Campus"})
+        self.assertEqual(set(response.data["results"][0].keys()), {"id", "name"})
+
+    def test_campus_catalogue_requires_membership_view_permission(self):
+        # No relevant permission at all.
+        self.client.force_authenticate(self.viewer_user)
+        response = self.client.get("/api/v1/tenancy/campuses/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
+        # tenancy.membership.manage alone does NOT imply .view -- confirms the
+        # permission-implication question raised before implementing this
+        # endpoint: manage-only holders are correctly still blocked here, so
+        # a real admin role must be granted both explicitly if it needs to
+        # both invite/reassign and populate this picker.
+        manage_only_role = Role.objects.create(tenant=self.school_a, name="Manage Only", permissions=["tenancy.membership.manage"])
+        manage_only_user = User.objects.create_user(username="manage-only", password="secret")
+        Membership.objects.create(tenant=self.school_a, user=manage_only_user, role=manage_only_role)
+        self.client.force_authenticate(manage_only_user)
+        response = self.client.get("/api/v1/tenancy/campuses/", **self.headers())
+        self.assertEqual(response.status_code, 403)
+
+        # .view alone is sufficient.
+        view_only_role = Role.objects.create(tenant=self.school_a, name="View Only", permissions=["tenancy.membership.view"])
+        view_only_user = User.objects.create_user(username="view-only", password="secret")
+        Membership.objects.create(tenant=self.school_a, user=view_only_user, role=view_only_role)
+        self.client.force_authenticate(view_only_user)
+        response = self.client.get("/api/v1/tenancy/campuses/", **self.headers())
+        self.assertEqual(response.status_code, 200)
+
+    def test_campus_catalogue_second_page_is_reachable(self):
+        Campus.objects.bulk_create([Campus(tenant=self.school_a, name=f"Campus {i:03d}", code=f"C{i:03d}") for i in range(26)])
+
+        first_page = self.client.get("/api/v1/tenancy/campuses/", **self.headers())
+        self.assertEqual(first_page.status_code, 200)
+        self.assertEqual(first_page.data["count"], 26)
+        self.assertEqual(len(first_page.data["results"]), 25)
+        self.assertIsNotNone(first_page.data["next"])
+
+        second_page = self.client.get("/api/v1/tenancy/campuses/?page=2", **self.headers())
+        self.assertEqual(second_page.status_code, 200)
+        self.assertEqual(len(second_page.data["results"]), 1)
+        self.assertIsNone(second_page.data["next"])
+
+    def test_membership_serializer_distinguishes_pending_active_and_deactivated(self):
+        invite_response = self.client.post(
+            "/api/v1/tenancy/users/invite/",
+            {"email": "pending.member@example.com", "role": self.viewer_role.id}, format="json", **self.headers(),
+        )
+        pending_id = invite_response.data["id"]
+        pending = self.client.get(f"/api/v1/tenancy/memberships/{pending_id}/", **self.headers())
+        self.assertFalse(pending.data["is_active"])
+        self.assertIsNone(pending.data["invite_accepted_at"])
+
+        outbox_entry = NotificationOutbox.objects.for_tenant(self.school_a).get(
+            message_type="tenancy.user_invited", recipient="pending.member@example.com",
+        )
+        token = outbox_entry.context["invite_link"].split("token=")[1]
+        # InviteAcceptView shares the "login" ScopedRateThrottle bucket with
+        # LoginView (5/min), keyed by client IP in a cache that persists
+        # across test methods within this run -- other tests in this module
+        # also call accept/login, so without clearing here this can trip the
+        # throttle depending on execution order/timing. Not testing the
+        # throttle itself, so reset it rather than let this test be
+        # order-dependent.
+        from django.core.cache import cache
+        cache.clear()
+        accept_response = APIClient().post("/api/v1/auth/invites/accept/", {"token": token, "password": "a-strong-passw0rd!"}, format="json")
+        self.assertEqual(accept_response.status_code, 200)
+
+        active = self.client.get(f"/api/v1/tenancy/memberships/{pending_id}/", **self.headers())
+        self.assertTrue(active.data["is_active"])
+        self.assertIsNotNone(active.data["invite_accepted_at"])
+
+        self.client.post(f"/api/v1/tenancy/memberships/{pending_id}/deactivate/", **self.headers())
+        deactivated = self.client.get(f"/api/v1/tenancy/memberships/{pending_id}/", **self.headers())
+        self.assertFalse(deactivated.data["is_active"])
+        self.assertIsNotNone(deactivated.data["invite_accepted_at"])
