@@ -200,7 +200,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </Fragment>
           ))}
         </Group>
-        <Box px={{ base: "md", sm: "lg" }} py="lg">{children}</Box>
+        <Box px={{ base: "md", sm: "lg" }} py="lg" maw={1600} mx="auto">{children}</Box>
       </MantineAppShell.Main>
     </MantineAppShell>
   );
