@@ -21,6 +21,7 @@ const NotificationProvidersPage=lazy(()=>import("../features/notifications").the
 const NotificationRulesPage=lazy(()=>import("../features/notifications").then(m=>({default:m.NotificationRulesPage})));
 const NotificationOutboxPage=lazy(()=>import("../features/notifications").then(m=>({default:m.NotificationOutboxPage})));
 const RolesPage=lazy(()=>import("../features/tenancy").then(m=>({default:m.RolesPage})));
+const UsersPage=lazy(()=>import("../features/tenancy").then(m=>({default:m.UsersPage})));
 
 export function App(){
  const path=usePath();const {session,loading,platformAccess}=useAuth();
@@ -40,6 +41,7 @@ export function App(){
  else if(/^\/staff\/[0-9a-f-]+$/i.test(path))page=<EmployeePage id={path.split("/").pop()!}/>;
  else if(path==="/administration/setup")page=<SetupPage/>;
  else if(path==="/administration/roles")page=<RolesPage/>;
+ else if(path==="/administration/users")page=<UsersPage/>;
  else if(path==="/admissions")page=<MissingPage/>;
  else if(path==="/finance")page=<FinanceOverview/>;
  else if(path==="/finance/fees")page=<FeeStructuresPage/>;

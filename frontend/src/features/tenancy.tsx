@@ -1,12 +1,13 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Checkbox, Grid, Group, Paper, SimpleGrid, Stack, Text, TextInput, Tooltip, UnstyledButton } from "@mantine/core";
+import { Alert, Button, Checkbox, Grid, Group, Paper, Select, SimpleGrid, Stack, Text, TextInput, Tooltip, UnstyledButton } from "@mantine/core";
 import { api, ApiError, Page } from "../api/client";
 import { useAccess, useAuth } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
+import { Column, DataTable } from "../components/DataTable";
 import { WorkspaceHeader } from "../components/WorkspaceHeader";
 import { notify } from "../components/notifications/notify";
-import { ErrorState, Loading } from "../components/ui";
+import { ErrorState, Loading, StatusBadge } from "../components/ui";
 
 type Role={id:number;name:string;permissions:string[]};
 type PermissionEntry={code:string;label:string;domain:string};
@@ -185,6 +186,132 @@ export function RolesPage(){
 
 		<ActionDialog open={!!deleteTarget} title="Delete role" danger description={`Delete "${deleteTarget?.name}" permanently? This cannot be undone.`} confirmLabel="Delete role" busy={remove.isPending} onClose={()=>setDeleteTarget(null)} onSubmit={e=>{e.preventDefault();remove.mutate()}}>
 			{remove.error&&<Alert color="red" variant="light">{errorText(remove.error)}</Alert>}
+		</ActionDialog>
+	</Stack>;
+}
+
+type MembershipUser={id:string;username:string;email:string;first_name:string;last_name:string};
+type MembershipRole={id:number;name:string};
+type MembershipCampus={id:number;name:string}|null;
+type UserMembership={id:number;user:MembershipUser;role:MembershipRole;campus:MembershipCampus;is_active:boolean;invite_accepted_at:string|null;joined_at:string};
+type CampusOption={id:number;name:string};
+const when=(v:string|null)=>v?new Intl.DateTimeFormat("en-KE",{dateStyle:"medium",timeStyle:"short"}).format(new Date(v)):"—";
+// invite_accepted_at is the single-use invite-acceptance flag (independent
+// of is_active, see accept_invite's docstring) -- "Pending" means the invite
+// was sent but never accepted, distinct from "Inactive" (accepted, then
+// later deactivated by an admin).
+function membershipStatus(m:UserMembership):"Pending"|"Active"|"Inactive"{
+	if(!m.invite_accepted_at)return "Pending";
+	return m.is_active?"Active":"Inactive";
+}
+
+export function UsersPage(){
+	const {can}=useAccess();
+	const {session}=useAuth();
+	const qc=useQueryClient();
+	const manage=can("tenancy.membership.manage");
+	// tenancy.role.view is a different domain permission from
+	// tenancy.membership.view (which the route itself already requires) --
+	// not implied by it, proven twice now on RolesPage. Gated independently
+	// here too, never assumed from this page's own reachability.
+	const canViewRoles=can("tenancy.role.view");
+
+	// Mirrors _require_grantable_permissions server-side: a non-superuser can
+	// only invite/reassign someone into a role whose permissions they
+	// themselves already hold. Used to grey out ungrantable roles in the
+	// pickers below rather than let the request round-trip into a 400.
+	const isPlatformAdmin=session?.user.is_platform_admin??false;
+	const actorPermissions=new Set(session?.permissions??[]);
+	const canGrantRole=(role:Role)=>isPlatformAdmin||role.permissions.every(p=>actorPermissions.has(p));
+
+	const [page,setPage]=useState(1);
+	const memberships=useQuery({queryKey:["tenancy-memberships",page],queryFn:()=>api<Page<UserMembership>>("/tenancy/memberships/",{params:{page}})});
+	const roles=useQuery({queryKey:["tenancy-roles-for-users"],queryFn:()=>api<Page<Role>>("/tenancy/roles/",{params:{page_size:100}}),enabled:canViewRoles});
+	// CampusListView requires tenancy.membership.view, exactly what this
+	// page's own route already requires -- always safe to fetch here.
+	const campuses=useQuery({queryKey:["tenancy-campuses-for-users"],queryFn:()=>api<Page<CampusOption>>("/tenancy/campuses/",{params:{page_size:100}})});
+	const roleOptions=(roles.data?.results??[]).map(r=>({value:String(r.id),label:r.name,disabled:!canGrantRole(r)}));
+	const campusOptions=(campuses.data?.results??[]).map(c=>({value:String(c.id),label:c.name}));
+
+	const [inviteOpen,setInviteOpen]=useState(false);
+	const [inviteForm,setInviteForm]=useState({email:"",role:"",campus:""});
+	const invite=useMutation({
+		mutationFn:()=>api<UserMembership>("/tenancy/users/invite/",{method:"POST",body:JSON.stringify({email:inviteForm.email,role:Number(inviteForm.role),campus:inviteForm.campus?Number(inviteForm.campus):null})}),
+		onSuccess:()=>{void qc.invalidateQueries({queryKey:["tenancy-memberships"]});setInviteOpen(false);notify.success("Invitation sent")},
+		onError:error=>notify.error("Invitation could not be sent",error),
+	});
+
+	const [reassignTarget,setReassignTarget]=useState<UserMembership|null>(null);
+	const [reassignForm,setReassignForm]=useState({role:"",campus:""});
+	const reassign=useMutation({
+		mutationFn:()=>api<UserMembership>(`/tenancy/memberships/${reassignTarget!.id}/`,{method:"PATCH",body:JSON.stringify({
+			...(canViewRoles&&reassignForm.role?{role:Number(reassignForm.role)}:{}),
+			campus:reassignForm.campus?Number(reassignForm.campus):null,
+		})}),
+		onSuccess:()=>{void qc.invalidateQueries({queryKey:["tenancy-memberships"]});setReassignTarget(null);notify.success("Member updated")},
+		onError:error=>notify.error("Member could not be updated",error),
+	});
+
+	// Activation is only ever offered for a membership that already accepted
+	// its invite (invite_accepted_at set) and was later deactivated --
+	// never for a Pending row. activate_membership has no server-side guard
+	// against activating an unaccepted invite, so the UI is what keeps an
+	// admin from bypassing the accept-invite flow (setting a password /
+	// explicit consent) entirely.
+	const [statusTarget,setStatusTarget]=useState<{membership:UserMembership;action:"activate"|"deactivate"}|null>(null);
+	const setStatus=useMutation({
+		mutationFn:()=>api<UserMembership>(`/tenancy/memberships/${statusTarget!.membership.id}/${statusTarget!.action}/`,{method:"POST"}),
+		onSuccess:()=>{const action=statusTarget?.action;void qc.invalidateQueries({queryKey:["tenancy-memberships"]});setStatusTarget(null);notify.success(action==="activate"?"Member activated":"Member deactivated")},
+		onError:error=>notify.error(statusTarget?.action==="activate"?"Member could not be activated":"Member could not be deactivated",error),
+	});
+
+	const columns:Column<UserMembership>[]=[
+		{key:"user",header:"Member",cell:r=><><Text size="sm" fw={500}>{(r.user.first_name||r.user.last_name)?`${r.user.first_name} ${r.user.last_name}`.trim():r.user.username}</Text><Text size="xs" c="dimmed">{r.user.email||r.user.username}</Text></>},
+		{key:"role",header:"Role",cell:r=>r.role.name},
+		{key:"campus",header:"Campus",cell:r=>r.campus?.name??"All campuses"},
+		{key:"status",header:"Status",cell:r=><StatusBadge value={membershipStatus(r)}/>},
+		{key:"joined",header:"Joined",cell:r=>when(r.joined_at)},
+	];
+
+	return <Stack gap="lg">
+		<WorkspaceHeader title="Users" description="Invite people to this workspace and manage their role, campus and access."
+			action={manage?<Button disabled={!canViewRoles} onClick={()=>{setInviteForm({email:"",role:"",campus:""});setInviteOpen(true)}}>+ Invite user</Button>:undefined}/>
+
+		<DataTable title="Members" columns={columns} rows={memberships.data?.results??[]} rowKey={r=>r.id}
+			loading={memberships.isLoading} error={memberships.error} retry={()=>void memberships.refetch()} onRefresh={()=>void memberships.refetch()}
+			page={page} count={memberships.data?.count} previous={!!memberships.data?.previous} next={!!memberships.data?.next} onPage={setPage}
+			rowActions={!manage?undefined:r=>{
+				const status=membershipStatus(r);
+				return <Group gap={6} wrap="nowrap">
+					<Button size="xs" variant="default" onClick={e=>{e.stopPropagation();setReassignForm({role:String(r.role.id),campus:r.campus?String(r.campus.id):""});setReassignTarget(r)}}>Reassign</Button>
+					{status==="Active"&&<Button size="xs" variant="default" color="red" onClick={e=>{e.stopPropagation();setStatusTarget({membership:r,action:"deactivate"})}}>Deactivate</Button>}
+					{status==="Inactive"&&<Button size="xs" variant="default" onClick={e=>{e.stopPropagation();setStatusTarget({membership:r,action:"activate"})}}>Activate</Button>}
+				</Group>;
+			}}/>
+
+		<ActionDialog open={inviteOpen} title="Invite user" description="They'll receive an email with a secure link to accept and set up access." confirmLabel="Send invite" busy={invite.isPending} onClose={()=>setInviteOpen(false)} onSubmit={e=>{e.preventDefault();if(!inviteForm.email||!inviteForm.role)return;invite.mutate()}}>
+			<Stack gap="sm">
+				{invite.error&&<Alert color="red" variant="light">{errorText(invite.error)}</Alert>}
+				<TextInput label="Email" type="email" required value={inviteForm.email} onChange={e=>setInviteForm({...inviteForm,email:e.currentTarget.value})}/>
+				<Select label="Role" required placeholder={roles.isLoading?"Loading…":"Select role"} disabled={roles.isLoading} data={roleOptions} value={inviteForm.role||null} onChange={value=>setInviteForm({...inviteForm,role:value??""})}/>
+				<Select label="Campus" placeholder={campuses.isLoading?"Loading…":"All campuses"} disabled={campuses.isLoading} data={campusOptions} value={inviteForm.campus||null} onChange={value=>setInviteForm({...inviteForm,campus:value??""})} clearable/>
+			</Stack>
+		</ActionDialog>
+
+		<ActionDialog open={!!reassignTarget} title="Reassign member" description={`Change ${reassignTarget?.user.username}'s role or campus.`} confirmLabel="Save changes" busy={reassign.isPending} onClose={()=>setReassignTarget(null)} onSubmit={e=>{e.preventDefault();reassign.mutate()}}>
+			<Stack gap="sm">
+				{reassign.error&&<Alert color="red" variant="light">{errorText(reassign.error)}</Alert>}
+				{canViewRoles?
+					<Select label="Role" required placeholder={roles.isLoading?"Loading…":"Select role"} disabled={roles.isLoading} data={roleOptions} value={reassignForm.role||null} onChange={value=>setReassignForm({...reassignForm,role:value??""})}/>
+				:<Text size="sm" c="dimmed">You don't have permission to view roles, so this member's role cannot be changed here.</Text>}
+				<Select label="Campus" placeholder={campuses.isLoading?"Loading…":"All campuses"} disabled={campuses.isLoading} data={campusOptions} value={reassignForm.campus||null} onChange={value=>setReassignForm({...reassignForm,campus:value??""})} clearable/>
+			</Stack>
+		</ActionDialog>
+
+		<ActionDialog open={!!statusTarget} title={statusTarget?.action==="activate"?"Activate member":"Deactivate member"} danger={statusTarget?.action==="deactivate"}
+			description={statusTarget?.action==="activate"?"Restore this member's access to the workspace.":"This member will immediately lose access to the workspace."}
+			confirmLabel={statusTarget?.action==="activate"?"Activate":"Deactivate"} busy={setStatus.isPending} onClose={()=>setStatusTarget(null)} onSubmit={e=>{e.preventDefault();setStatus.mutate()}}>
+			{setStatus.error&&<Alert color="red" variant="light">{errorText(setStatus.error)}</Alert>}
 		</ActionDialog>
 	</Stack>;
 }
