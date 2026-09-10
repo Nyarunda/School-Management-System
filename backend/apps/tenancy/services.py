@@ -111,7 +111,26 @@ def update_role(*, actor, tenant, role, name=None, permissions=None):
     canonical = None
     if permissions is not None:
         canonical = validate_permission_codes(permissions)
-        _require_grantable_permissions(actor=actor, tenant=tenant, permissions=canonical)
+        # Only additions and removals require the actor's own authorization --
+        # a permission already on the role that stays on the role is neutral,
+        # regardless of whether the actor holds it themselves. Checking the
+        # full requested set here (as create_role/invite_user/update_membership
+        # correctly do, since every permission there is genuinely new to the
+        # grant) made any role holding so much as one permission outside the
+        # actor's own set permanently unmodifiable by that actor -- not even a
+        # rename-plus-unrelated-addition could get past the check, since the
+        # untouched permission was always present in the full submitted list.
+        # Removals are included in "changed" too: letting a restricted actor
+        # strip a permission they don't hold themselves isn't privilege
+        # escalation in the narrow sense, but it's still unauthorized
+        # privilege administration (a form of governance bypass / denial of
+        # service against a more-privileged role), so it's rejected the same
+        # way an unauthorized addition is.
+        current = set(role.permissions)
+        requested = set(canonical)
+        added = requested - current
+        removed = current - requested
+        _require_grantable_permissions(actor=actor, tenant=tenant, permissions=added | removed)
     try:
         with transaction.atomic():
             # Lock + last-admin check happen inside the atomic block, right

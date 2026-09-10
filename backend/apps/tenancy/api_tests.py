@@ -350,3 +350,118 @@ class TenancyAdminApiTests(TestCase):
         deactivated = self.client.get(f"/api/v1/tenancy/memberships/{pending_id}/", **self.headers())
         self.assertFalse(deactivated.data["is_active"])
         self.assertIsNotNone(deactivated.data["invite_accepted_at"])
+
+
+class RoleUpdateAuthorizationTests(TestCase):
+    """update_role() previously checked the entire requested permission list
+    for grantability, not just what's actually changing -- so a role holding
+    even one permission outside the acting admin's own grant set became
+    completely unmodifiable by that admin, including fully legitimate edits.
+    Fixed to check only the symmetric difference (added | removed); an
+    unchanged permission is neutral regardless of who holds it. These tests
+    cover the full authorization matrix that fix depends on.
+    """
+
+    def setUp(self):
+        self.client = APIClient()
+        self.tenant = Tenant.objects.create(name="School C", slug="school-c")
+        # Holds tenancy.role.manage/.view and finance.invoice.view (Y) --
+        # deliberately NOT finance.payment.reverse (X) or finance.invoice.issue (Z).
+        self.editor_role = Role.objects.create(
+            tenant=self.tenant, name="Editor",
+            permissions=["tenancy.role.manage", "tenancy.role.view", "finance.invoice.view"],
+        )
+        self.editor_user = User.objects.create_user(username="editor-c", password="secret")
+        Membership.objects.create(tenant=self.tenant, user=self.editor_user, role=self.editor_role)
+        self.client.force_authenticate(self.editor_user)
+
+    def headers(self):
+        return {"HTTP_X_TENANT_SLUG": "school-c"}
+
+    def test_unchanged_permission_outside_actor_grant_is_preserved_while_editor_changes_one_they_hold(self):
+        target = Role.objects.create(tenant=self.tenant, name="Target", permissions=["finance.payment.reverse"])
+        response = self.client.patch(
+            f"/api/v1/tenancy/roles/{target.id}/",
+            {"permissions": ["finance.payment.reverse", "finance.invoice.view"]}, format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.data["permissions"]), {"finance.payment.reverse", "finance.invoice.view"})
+
+    def test_adding_a_permission_the_actor_does_not_hold_is_rejected(self):
+        target = Role.objects.create(tenant=self.tenant, name="Target", permissions=["finance.payment.reverse"])
+        response = self.client.patch(
+            f"/api/v1/tenancy/roles/{target.id}/",
+            {"permissions": ["finance.payment.reverse", "finance.invoice.issue"]}, format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+        target.refresh_from_db()
+        self.assertEqual(target.permissions, ["finance.payment.reverse"])
+
+    def test_removing_a_permission_the_actor_does_not_hold_is_rejected(self):
+        target = Role.objects.create(tenant=self.tenant, name="Target", permissions=["finance.payment.reverse"])
+        response = self.client.patch(
+            f"/api/v1/tenancy/roles/{target.id}/", {"permissions": []}, format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+        target.refresh_from_db()
+        self.assertEqual(target.permissions, ["finance.payment.reverse"])
+
+    def test_adding_a_permission_the_actor_holds_succeeds(self):
+        target = Role.objects.create(tenant=self.tenant, name="Target", permissions=[])
+        response = self.client.patch(
+            f"/api/v1/tenancy/roles/{target.id}/", {"permissions": ["finance.invoice.view"]}, format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["permissions"], ["finance.invoice.view"])
+
+    def test_removing_a_permission_the_actor_holds_succeeds(self):
+        target = Role.objects.create(tenant=self.tenant, name="Target", permissions=["finance.invoice.view"])
+        response = self.client.patch(
+            f"/api/v1/tenancy/roles/{target.id}/", {"permissions": []}, format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["permissions"], [])
+
+    def test_name_only_patch_never_touches_permissions_even_outside_actor_grant(self):
+        target = Role.objects.create(tenant=self.tenant, name="Target", permissions=["finance.payment.reverse"])
+        response = self.client.patch(
+            f"/api/v1/tenancy/roles/{target.id}/", {"name": "Renamed Target"}, format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["name"], "Renamed Target")
+        self.assertEqual(response.data["permissions"], ["finance.payment.reverse"])
+
+    def test_last_administrator_protection_still_blocks_removing_membership_manage(self):
+        # The editor's own role is the tenant's only administrator-granting
+        # role; the editor holds tenancy.membership.manage themselves (so the
+        # new added/removed authorization check would allow the removal),
+        # but _ensure_not_removing_last_administrator must still reject it --
+        # proving the two checks (authorization vs. last-admin safety) are
+        # independent and both still run after this fix.
+        self.editor_role.permissions = self.editor_role.permissions + ["tenancy.membership.manage"]
+        self.editor_role.save(update_fields=["permissions"])
+        response = self.client.patch(
+            f"/api/v1/tenancy/roles/{self.editor_role.id}/",
+            {"permissions": ["tenancy.role.manage", "tenancy.role.view", "finance.invoice.view"]},
+            format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 400)
+        self.editor_role.refresh_from_db()
+        self.assertIn("tenancy.membership.manage", self.editor_role.permissions)
+
+    def test_superuser_bypasses_grant_authorization_entirely(self):
+        target = Role.objects.create(tenant=self.tenant, name="Target", permissions=["finance.payment.reverse"])
+        superuser = User.objects.create_superuser(username="root-c", password="secret", email="root-c@example.com")
+        # require_permission() always calls require_membership() first,
+        # regardless of is_superuser -- only the permission-string check
+        # itself is bypassed for superusers, so a membership (any role) is
+        # still required to reach update_role() at all.
+        no_permission_role = Role.objects.create(tenant=self.tenant, name="No Permissions", permissions=[])
+        Membership.objects.create(tenant=self.tenant, user=superuser, role=no_permission_role)
+        self.client.force_authenticate(superuser)
+        response = self.client.patch(
+            f"/api/v1/tenancy/roles/{target.id}/",
+            {"permissions": ["finance.mpesa.configure", "finance.allocation.reverse"]}, format="json", **self.headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(set(response.data["permissions"]), {"finance.mpesa.configure", "finance.allocation.reverse"})
