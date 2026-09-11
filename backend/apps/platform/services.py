@@ -198,6 +198,28 @@ def clear_module_override(*, actor=None, tenant, module_code):
         )
 
 
+def update_tenant(*, actor=None, tenant, name=None, is_active=None):
+    """Deactivating a tenant isn't cosmetic -- apps.tenancy.services.
+    require_membership (the resolution path every single domain's
+    resolve_<domain>_tenant helper goes through) filters
+    tenant__is_active=True, so this immediately locks out every user of
+    the tenant, everywhere, the moment it's saved.
+    """
+    updated_fields = [field for field, value in (("name", name), ("is_active", is_active)) if value is not None]
+    if not updated_fields:
+        return tenant
+    if name is not None:
+        tenant.name = name
+    if is_active is not None:
+        tenant.is_active = is_active
+    tenant.save(update_fields=updated_fields)
+    PlatformAuditEvent.objects.create(
+        actor=actor, action="platform.tenant.updated", resource_type="Tenant", resource_id=str(tenant.id),
+        metadata={"updated_fields": updated_fields, "name": tenant.name, "is_active": tenant.is_active},
+    )
+    return tenant
+
+
 def provision_tenant(*, actor, name, slug, admin_email, admin_role_name="Administrator", admin_permissions=None):
     """The one Super Admin entry point for bringing a new tenant into
     existence with its first administrator -- everything else (schools

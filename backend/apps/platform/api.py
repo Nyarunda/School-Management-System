@@ -1,4 +1,5 @@
 from django.core.exceptions import ValidationError as DjangoValidationError
+from django.db.models import Q
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.generics import ListAPIView
@@ -20,6 +21,7 @@ from .services import (
     provision_tenant,
     set_module_override,
     update_plan,
+    update_tenant,
 )
 
 
@@ -82,6 +84,60 @@ class TenantProvisionSerializer(serializers.Serializer):
     admin_permissions = serializers.ListField(child=serializers.CharField(), required=False, allow_null=True)
 
 
+class TenantListSerializer(serializers.ModelSerializer):
+    """List-row shape -- computed from prefetched subscription/overrides
+    rather than calling get_enabled_modules per row (which would issue two
+    extra queries per tenant in a paginated list).
+    """
+
+    plan_name = serializers.SerializerMethodField()
+    enabled_module_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Tenant
+        fields = ["id", "name", "slug", "is_active", "created_at", "plan_name", "enabled_module_count"]
+        read_only_fields = fields
+
+    def get_plan_name(self, tenant):
+        subscription = getattr(tenant, "subscription", None)
+        return subscription.plan.name if subscription else None
+
+    def _enabled_modules(self, tenant):
+        subscription = getattr(tenant, "subscription", None)
+        enabled = set(subscription.plan.module_codes) if subscription else set()
+        for override in tenant.module_overrides.all():
+            if override.is_enabled:
+                enabled.add(override.module_code)
+            else:
+                enabled.discard(override.module_code)
+        return enabled
+
+    def get_enabled_module_count(self, tenant):
+        return len(self._enabled_modules(tenant))
+
+
+class TenantDetailSerializer(serializers.ModelSerializer):
+    plan = serializers.SerializerMethodField()
+    enabled_modules = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Tenant
+        fields = ["id", "name", "slug", "is_active", "created_at", "plan", "enabled_modules"]
+        read_only_fields = fields
+
+    def get_plan(self, tenant):
+        subscription = getattr(tenant, "subscription", None)
+        return SubscriptionPlanSerializer(subscription.plan).data if subscription else None
+
+    def get_enabled_modules(self, tenant):
+        return sorted(get_enabled_modules(tenant))
+
+
+class TenantUpdateSerializer(serializers.Serializer):
+    name = serializers.CharField(max_length=200, required=False)
+    is_active = serializers.BooleanField(required=False)
+
+
 class ModuleCatalogueView(APIView):
     permission_classes = [IsSuperUser]
 
@@ -135,12 +191,34 @@ class SubscriptionPlanDetailView(APIView):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
-class TenantProvisionView(APIView):
-    """The single Super Admin entry point for bringing a new tenant + its
-    first administrator into existence -- see services.provision_tenant.
+class TenantPagination(PageNumberPagination):
+    page_size = 25
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class TenantListCreateView(APIView):
+    """GET lists every tenant on the platform (search by name/slug) -- the
+    list this platform admin area never had before. POST is unchanged: the
+    single Super Admin entry point for bringing a new tenant + its first
+    administrator into existence (see services.provision_tenant).
     """
 
     permission_classes = [IsSuperUser]
+
+    def get(self, request):
+        queryset = (
+            Tenant.objects.all()
+            .select_related("subscription__plan")
+            .prefetch_related("module_overrides")
+            .order_by("-created_at")
+        )
+        search = request.query_params.get("search")
+        if search:
+            queryset = queryset.filter(Q(name__icontains=search) | Q(slug__icontains=search))
+        paginator = TenantPagination()
+        page = paginator.paginate_queryset(queryset, request)
+        return paginator.get_paginated_response(TenantListSerializer(page, many=True).data)
 
     def post(self, request):
         serializer = TenantProvisionSerializer(data=request.data)
@@ -157,6 +235,21 @@ class TenantProvisionView(APIView):
             {"tenant_id": str(tenant.id), "slug": tenant.slug, "name": tenant.name},
             status=status.HTTP_201_CREATED,
         )
+
+
+class TenantDetailView(APIView):
+    permission_classes = [IsSuperUser]
+
+    def get(self, request, tenant_id):
+        tenant = get_object_or_404(Tenant.objects.select_related("subscription__plan"), pk=tenant_id)
+        return Response(TenantDetailSerializer(tenant).data)
+
+    def patch(self, request, tenant_id):
+        tenant = get_object_or_404(Tenant, pk=tenant_id)
+        serializer = TenantUpdateSerializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        tenant = update_tenant(actor=request.user, tenant=tenant, **serializer.validated_data)
+        return Response(TenantDetailSerializer(tenant).data)
 
 
 class TenantSubscriptionView(APIView):
@@ -259,7 +352,15 @@ class PlatformAuditEventListView(ListAPIView):
     permission_classes = [IsSuperUser]
     serializer_class = PlatformAuditEventSerializer
     pagination_class = PlatformAuditPagination
-    queryset = PlatformAuditEvent.objects.all().order_by("-created_at")
+
+    def get_queryset(self):
+        queryset = PlatformAuditEvent.objects.all().order_by("-created_at")
+        search = self.request.query_params.get("search")
+        if search:
+            queryset = queryset.filter(
+                Q(action__icontains=search) | Q(resource_type__icontains=search) | Q(resource_id__icontains=search)
+            )
+        return queryset
 
 
 class TenantAuditEventListView(ListAPIView):

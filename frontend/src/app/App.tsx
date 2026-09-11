@@ -2,9 +2,12 @@ import { lazy, Suspense } from "react";
 import { Box, Loader, Stack, Text } from "@mantine/core";
 import { AppShell, PlatformShell } from "../components/Shell";
 import { Loading, usePath } from "../components/ui";
-import { DashboardPage, EmployeePage, InvitePage, LoginPage, MissingPage, PlatformHome, ResourcePage, resources, SetupPage, StaffPage, StudentPage, StudentsPage } from "../pages/pages";
+import { DashboardPage, EmployeePage, InvitePage, LoginPage, MissingPage, ResourcePage, resources, SetupPage, StaffPage, StudentPage, StudentsPage } from "../pages/pages";
 import { canAccess, useAuth } from "./auth";
 import { navRequirementsFor } from "./navigation";
+const PlatformOverview=lazy(()=>import("../features/platform").then(m=>({default:m.PlatformOverview})));
+const TenantsPage=lazy(()=>import("../features/platform").then(m=>({default:m.TenantsPage})));
+const PlansPage=lazy(()=>import("../features/platform").then(m=>({default:m.PlansPage})));
 const FinanceOverview=lazy(()=>import("../features/finance").then(m=>({default:m.FinanceOverview})));
 const FeeStructuresPage=lazy(()=>import("../features/finance").then(m=>({default:m.FeeStructuresPage})));
 const FeeItemsPage=lazy(()=>import("../features/finance").then(m=>({default:m.FeeItemsPage})));
@@ -44,8 +47,12 @@ export function App(){
  if(!session)return <LoginPage/>;
  if(path.startsWith("/platform")){
   if(!platformAccess)return <AppShell><MissingPage/></AppShell>;
-  const platformPage=path==="/platform"?<PlatformHome/>:resources[path]?<ResourcePage config={resources[path]}/>:<MissingPage/>;
-  return <PlatformShell>{platformPage}</PlatformShell>;
+  let platformPage:React.ReactNode;
+  if(path==="/platform")platformPage=<PlatformOverview/>;
+  else if(path==="/platform/tenants")platformPage=<TenantsPage/>;
+  else if(path==="/platform/plans")platformPage=<PlansPage/>;
+  else platformPage=resources[path]?<ResourcePage config={resources[path]}/>:<MissingPage/>;
+  return <PlatformShell><Suspense fallback={<Loading label="Opening workspace"/>}>{platformPage}</Suspense></PlatformShell>;
  }
  let page:React.ReactNode;
  if(path==="/")page=<DashboardPage/>;

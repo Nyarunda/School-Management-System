@@ -6,9 +6,10 @@ from .api import (
     SubscriptionPlanDetailView,
     SubscriptionPlanListCreateView,
     TenantAuditEventListView,
+    TenantDetailView,
+    TenantListCreateView,
     TenantModuleOverrideDetailView,
     TenantModuleOverrideListView,
-    TenantProvisionView,
     TenantSubscriptionView,
 )
 
@@ -16,7 +17,8 @@ urlpatterns = [
     path("modules/", ModuleCatalogueView.as_view(), name="platform-modules"),
     path("plans/", SubscriptionPlanListCreateView.as_view(), name="platform-plans"),
     path("plans/<uuid:plan_id>/", SubscriptionPlanDetailView.as_view(), name="platform-plan-detail"),
-    path("tenants/", TenantProvisionView.as_view(), name="platform-tenant-provision"),
+    path("tenants/", TenantListCreateView.as_view(), name="platform-tenant-list-create"),
+    path("tenants/<uuid:tenant_id>/", TenantDetailView.as_view(), name="platform-tenant-detail"),
     path("tenants/<uuid:tenant_id>/subscription/", TenantSubscriptionView.as_view(), name="platform-tenant-subscription"),
     path("tenants/<uuid:tenant_id>/overrides/", TenantModuleOverrideListView.as_view(), name="platform-tenant-overrides"),
     path(

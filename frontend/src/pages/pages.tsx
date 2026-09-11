@@ -571,13 +571,51 @@ export function EmployeePage({id}:{id:string}){const {can}=useAccess();const det
   subtitle={`${String(employee.job_title??"Job title not assigned")} · ${String(employee.department??"No department")}`} status={String(employee.status??"Active")}/>
  <RecordTabs tabs={tabs} value={tab} onChange={setTab}/>
  <Paper p="lg">
-  {tab==="Overview"&&<KeyValueSection title="Overview"><KeyValueGrid>{["employment_type","hire_date","campus","email","phone_number","user_account"].map(key=><KeyValueItem key={key} label={pretty(key)} value={display(employee[key])}/>)}</KeyValueGrid></KeyValueSection>}
+  {tab==="Overview"&&<KeyValueSection title="Overview"><KeyValueGrid>{["employment_type","hire_date","campus","email","phone_number"].map(key=><KeyValueItem key={key} label={pretty(key)} value={display(employee[key])}/>)}</KeyValueGrid></KeyValueSection>}
   {tab==="Qualifications"&&<JsonPanel query={qualifications}/>}
   {tab==="Documents"&&<DocumentsPanel basePath="/staff/employees" ownerId={id} viewPermission="staff.view" managePermission="staff.manage" can={can}/>}
   {tab==="Leave"&&<LeavePanel employeeId={id}/>}
-  {tab==="User access"&&<KeyValueSection title="User access"><KeyValueGrid><KeyValueItem label="Linked account" value={display(employee.user_account)}/><KeyValueItem label="Account management" value="Available to authorized administrators"/></KeyValueGrid></KeyValueSection>}
+  {tab==="User access"&&<UserAccessPanel employeeId={id} userAccountId={employee.user_account as string|null|undefined}/>}
  </Paper>
 </>}
+type MembershipUser={id:string;username:string;email:string;first_name:string;last_name:string};
+type MembershipLite={id:number;user:MembershipUser};
+// staff.user_link.manage already gates this tab's visibility (EmployeePage's
+// tabs list), but link_user_account/unlink_user_account (apps/staff/services.py)
+// re-check the same permission server-side -- this only reads useAccess so a
+// viewer who can see the tab but somehow lost the permission mid-session
+// (role edited elsewhere) gets a read-only view instead of buttons that 403.
+function UserAccessPanel({employeeId,userAccountId}:{employeeId:string;userAccountId:string|null|undefined}){
+	const qc=useQueryClient();
+	const {can}=useAccess();
+	const canManage=can("staff.user_link.manage");
+	const memberships=useQuery({queryKey:["tenancy-memberships-lookup"],queryFn:()=>api<Page<MembershipLite>>("/tenancy/memberships/",{params:{page_size:100}}),enabled:canManage});
+	const linkedUser=memberships.data?.results.find(m=>m.user.id===userAccountId)?.user;
+	const [selected,setSelected]=useState("");
+	const link=useMutation({
+		mutationFn:()=>api(`/staff/employees/${employeeId}/user-link/`,{method:"POST",body:JSON.stringify({user_id:selected})}),
+		onSuccess:()=>{void qc.invalidateQueries({queryKey:["employee",employeeId]});setSelected("");notify.success("User account linked")},
+		onError:error=>notify.error("User account could not be linked",error),
+	});
+	const unlink=useMutation({
+		mutationFn:()=>api(`/staff/employees/${employeeId}/user-link/`,{method:"DELETE"}),
+		onSuccess:()=>{void qc.invalidateQueries({queryKey:["employee",employeeId]});notify.success("User account unlinked")},
+		onError:error=>notify.error("User account could not be unlinked",error),
+	});
+	return <KeyValueSection title="User access">
+		<Stack gap="md">
+			<KeyValueGrid>
+				<KeyValueItem label="Linked account" value={!userAccountId?"Not linked":linkedUser?`${linkedUser.first_name} ${linkedUser.last_name} · ${linkedUser.username}`:userAccountId}/>
+			</KeyValueGrid>
+			{canManage&&(userAccountId
+				?<Button size="xs" variant="light" color="red" w={180} loading={unlink.isPending} onClick={()=>unlink.mutate()}>Unlink account</Button>
+				:<Group align="end" gap="sm">
+					<Select label="Link to a tenant user" placeholder={memberships.isLoading?"Loading…":"Select a user"} data={memberships.data?.results.map(m=>({value:m.user.id,label:`${m.user.first_name} ${m.user.last_name} · ${m.user.username}`}))??[]} value={selected||null} onChange={value=>setSelected(value??"")} w={280}/>
+					<Button size="xs" disabled={!selected||link.isPending} onClick={()=>link.mutate()}>Link account</Button>
+				</Group>)}
+		</Stack>
+	</KeyValueSection>;
+}
 type LeaveTypeOption={id:string;name:string};
 type LeaveBalanceEntry={id:string;entry_type:string;days:number;reason:string;created_at:string};
 type LeaveBalance={balance:number;entries:LeaveBalanceEntry[]};
@@ -635,8 +673,6 @@ function SetupCard({name,endpoint,managePermission}:{name:string;endpoint:string
 	</section>;
 }
 
-export function PlatformHome(){const modules=useQuery({queryKey:["platform-modules"],queryFn:()=>api<Row[]>("/platform/modules/",{tenant:false})});const [form,setForm]=useState({name:"",slug:"",admin_email:""});const [result,setResult]=useState("");async function provision(e:FormEvent){e.preventDefault();try{const data=await api<Row>("/platform/tenants/",{method:"POST",tenant:false,body:JSON.stringify(form)});setResult(`Created ${String(data.name)} (${String(data.slug)})`);setForm({name:"",slug:"",admin_email:""})}catch(e){setResult(e instanceof Error?e.message:"Provisioning failed")}}return <><PageHeader eyebrow="Platform administration" title="Tenant operations" description="Provision schools and control the modules available to each tenant."/><div className="platform-grid"><section className="card panel-card"><div className="card-heading"><div><h2>Provision a school</h2><p>Creates the tenant and first administrator invitation.</p></div></div><form className="form-grid" onSubmit={provision}><label>School name<input value={form.name} onChange={e=>setForm({...form,name:e.target.value})} required/></label><label>Tenant slug<input value={form.slug} onChange={e=>setForm({...form,slug:e.target.value.toLowerCase().replace(/[^a-z0-9-]/g,"-")})} required/></label><label className="span-two">First administrator email<input type="email" value={form.admin_email} onChange={e=>setForm({...form,admin_email:e.target.value})} required/></label><div className="span-two form-actions">{result&&<p>{result}</p>}<button className="button platform-button">Provision school</button></div></form></section><section className="card panel-card"><div className="card-heading"><div><h2>Module catalogue</h2><p>Capabilities available to subscription plans.</p></div></div>{modules.isLoading?<Loading/>:modules.isError?<ErrorState error={modules.error}/>:<div className="module-list">{(Array.isArray(modules.data)?modules.data:[]).map(module=><div key={String(module.code)}><span className="metric-icon violet"><Icon name="layers"/></span><span><strong>{display(module.label)}</strong><small>{display(module.code)}</small></span></div>)}</div>}</section></div></>}
-
 export const resources:Record<string,ResourceConfig>={
  "/finance/fees":{eyebrow:"Finance · Setup",title:"Fee structures",description:"Approved charging schedules by academic year and level.",endpoint:"/finance/fee-structures/",columns:["name","academic_year","academic_level","is_approved","created_at"]},
  "/finance/invoices":{eyebrow:"Finance · Billing",title:"Invoices",description:"Issued and draft student charges.",endpoint:"/finance/invoices/",columns:["invoice_number","student","status","total","issued_at"]},
@@ -650,7 +686,6 @@ export const resources:Record<string,ResourceConfig>={
  "/leave":{eyebrow:"Staff & HR",title:"Leave requests",description:"Employee requests and approval workflow.",endpoint:"/leave/requests/",columns:["employee","leave_type","starts_on","ends_on","status"]},
  "/administration/users":{eyebrow:"Administration",title:"Users",description:"Tenant memberships, roles and campus scope.",endpoint:"/tenancy/memberships/",columns:["user","role","campus","is_active","joined_at"]},
  "/administration/roles":{eyebrow:"Administration",title:"Roles & permissions",description:"Define the actions each school role can perform.",endpoint:"/tenancy/roles/",columns:["name","permissions"]},
- "/platform/plans":{eyebrow:"Platform administration",title:"Subscription plans",description:"Module bundles assigned to schools.",endpoint:"/platform/plans/",columns:["name","module_codes","is_default","is_active","created_at"]},
  "/platform/audit":{eyebrow:"Platform administration",title:"Platform audit trail",description:"Recorded cross-tenant administrative actions.",endpoint:"/platform/audit-events/",columns:["actor","action","resource_type","resource_id","created_at"]},
 };
 

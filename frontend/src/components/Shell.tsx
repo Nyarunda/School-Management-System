@@ -5,7 +5,7 @@ import {
 } from "@mantine/core";
 import {
   IconArrowLeft, IconBell, IconCheck, IconChevronDown, IconChevronRight, IconLayoutDashboard, IconLayoutSidebarLeftCollapse,
-  IconLayoutSidebarLeftExpand, IconLogout, IconReportAnalytics, IconShieldCheck, IconStack2, IconVolume, IconVolumeOff,
+  IconLayoutSidebarLeftExpand, IconLogout, IconReportAnalytics, IconShieldCheck, IconStack2, IconUsers, IconVolume, IconVolumeOff,
 } from "@tabler/icons-react";
 import { useAuth, useAccess } from "../app/auth";
 import { useDensity } from "../app/density";
@@ -213,6 +213,7 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
   const initials = session?.user?.name?.slice(0, 2).toUpperCase();
   const items: { path: string; label: string; icon: NavItem["icon"] }[] = [
     { path: "/platform", label: "Overview", icon: IconLayoutDashboard },
+    { path: "/platform/tenants", label: "Tenants", icon: IconUsers },
     { path: "/platform/plans", label: "Plans", icon: IconStack2 },
     { path: "/platform/audit", label: "Audit trail", icon: IconReportAnalytics },
   ];
