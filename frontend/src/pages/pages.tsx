@@ -33,7 +33,13 @@ export function LoginPage() {
       go("/");
     } catch (caught) {
       const msg = caught instanceof Error ? caught.message : "Sign in failed";
-      notify.error(msg, caught);
+      // Don't pass `caught` through to notify.error: its blanket 403 ->
+      // "You do not have permission..." override is meant for an action
+      // denied by a missing permission. A 403 here means "no active
+      // membership in this tenant" (apps/tenancy/api.py's SessionView) --
+      // a distinct condition the user needs to actually see, not a
+      // permission check on something they tried to do.
+      notify.error(msg);
     } finally {
       setBusy(false);
     }
