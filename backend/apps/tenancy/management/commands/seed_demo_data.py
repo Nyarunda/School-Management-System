@@ -16,9 +16,33 @@ from apps.students.models import Student
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 from apps.tenancy.permissions_catalogue import PERMISSION_CATALOGUE
 
+SUPERADMIN_USERNAME = "demo-superadmin"
 ADMIN_USERNAME = "demo-admin"
 TEACHER_USERNAME = "demo-teacher"
+BURSAR_USERNAME = "demo-bursar"
 DEMO_PASSWORD = "demo-pass-12345"
+
+# Every finance.* permission this app defines, plus the minimal read-access
+# outside finance a bursar actually needs (looking up which student an
+# invoice belongs to, exporting finance reports). Mirrors
+# apps/finance/management/commands/loadtest_provision.py's ALL_FINANCE_PERMISSIONS,
+# kept separate/inlined here since that module is load-test-only tooling,
+# not meant to be imported from.
+BURSAR_PERMISSIONS = [
+    "students.view",
+    "finance.setup.view", "finance.setup.manage",
+    "finance.fee_structure.view", "finance.fee_structure.create", "finance.fee_structure.edit", "finance.fee_structure.approve",
+    "finance.invoice.view", "finance.invoice.create", "finance.invoice.issue",
+    "finance.credit_note.create",
+    "finance.student_account.view",
+    "finance.payment.view", "finance.payment.record", "finance.payment.allocate", "finance.payment.reverse",
+    "finance.allocation.reverse",
+    "finance.reconciliation.view", "finance.reconciliation.ingest", "finance.reconciliation.match", "finance.reconciliation.ignore",
+    "finance.mpesa.configure",
+    "finance.mpesa.callback.view", "finance.mpesa.callback.verify", "finance.mpesa.callback.process",
+    "finance.mpesa.stk_push.view", "finance.mpesa.stk_push.initiate", "finance.mpesa.stk_push.query", "finance.mpesa.stk_push.reconcile",
+    "reports.finance.view", "reports.finance.export",
+]
 
 STUDENT_NAMES = [
     ("John", "Kamau"), ("Mary", "Wanjiku"), ("Peter", "Otieno"), ("Grace", "Achieng"),
@@ -40,8 +64,16 @@ class Command(BaseCommand):
         campus = self._provision_campus(tenant)
         admin_role = self._provision_admin_role(tenant)
         admin_user = self._provision_user(tenant=tenant, role=admin_role, campus=None, username=ADMIN_USERNAME)
+        # Superuser bypasses every permission-string check (require_permission
+        # etc.) regardless of which role its membership carries -- reusing
+        # admin_role here is just so the account also has something sensible
+        # to browse inside the demo tenant; apps.platform's IsSuperUser (the
+        # Super Admin tenant-provisioning API) needs no membership at all.
+        superadmin_user = self._provision_user(tenant=tenant, role=admin_role, campus=None, username=SUPERADMIN_USERNAME, is_superuser=True)
         teacher_role = self._provision_teacher_role(tenant)
         teacher_user = self._provision_user(tenant=tenant, role=teacher_role, campus=campus, username=TEACHER_USERNAME)
+        bursar_role = self._provision_bursar_role(tenant)
+        bursar_user = self._provision_user(tenant=tenant, role=bursar_role, campus=None, username=BURSAR_USERNAME)
 
         year = self._provision_academic_year(tenant)
         levels = self._provision_levels(tenant)
@@ -55,9 +87,11 @@ class Command(BaseCommand):
         self._provision_finance_number_series(tenant)
 
         self.stdout.write(self.style.SUCCESS(f"\nDemo tenant ready: {tenant.name} ({tenant.slug})"))
-        self.stdout.write("Log in with either account (tenant is selected automatically after login):")
-        self.stdout.write(f"  Full access -- username: {admin_user.username}  password: {DEMO_PASSWORD}")
-        self.stdout.write(f"  Class-scoped teacher -- username: {teacher_user.username}  password: {DEMO_PASSWORD}")
+        self.stdout.write("Log in with any account (tenant is selected automatically after login):")
+        self.stdout.write(f"  Super Admin (cross-tenant, provisions schools) -- username: {superadmin_user.username}  password: {DEMO_PASSWORD}")
+        self.stdout.write(f"  School Administrator (full access, this tenant) -- username: {admin_user.username}  password: {DEMO_PASSWORD}")
+        self.stdout.write(f"  Bursar (finance-scoped) -- username: {bursar_user.username}  password: {DEMO_PASSWORD}")
+        self.stdout.write(f"  Teacher (class-scoped) -- username: {teacher_user.username}  password: {DEMO_PASSWORD}")
 
     @transaction.atomic
     def _provision_tenant(self, *, slug, name):
@@ -94,11 +128,25 @@ class Command(BaseCommand):
             role.save(update_fields=["permissions"])
         return role
 
-    def _provision_user(self, *, tenant, role, campus, username):
-        user, created = User.objects.get_or_create(username=username, defaults={"first_name": username.split("-")[1].title()})
+    def _provision_bursar_role(self, tenant):
+        role, _ = Role.objects.get_or_create(tenant=tenant, name="Demo Bursar", defaults={"permissions": BURSAR_PERMISSIONS})
+        if role.permissions != BURSAR_PERMISSIONS:
+            role.permissions = BURSAR_PERMISSIONS
+            role.save(update_fields=["permissions"])
+        return role
+
+    def _provision_user(self, *, tenant, role, campus, username, is_superuser=False):
+        user, created = User.objects.get_or_create(
+            username=username,
+            defaults={"first_name": username.split("-")[1].title(), "is_superuser": is_superuser, "is_staff": is_superuser},
+        )
         if created:
             user.set_password(DEMO_PASSWORD)
             user.save(update_fields=["password"])
+        elif user.is_superuser != is_superuser:
+            user.is_superuser = is_superuser
+            user.is_staff = is_superuser
+            user.save(update_fields=["is_superuser", "is_staff"])
         Membership.objects.get_or_create(tenant=tenant, user=user, defaults={"role": role, "campus": campus})
         return user
 
