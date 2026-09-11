@@ -18,6 +18,10 @@ export class ApiError extends Error {
 export function readError(data: unknown): string {
   if (typeof data === "string") return data;
   if (!data || typeof data !== "object") return "";
+  // DRF's exception handler sends a bare JSON array (not {"detail": ...}) when
+  // a ValidationError is raised directly with a single string, e.g.
+  // ValidationError("User does not have an active membership in this tenant").
+  if (Array.isArray(data)) return data.join(" ");
   const record = data as Record<string, unknown>;
   if (typeof record.detail === "string") return record.detail;
   if (Array.isArray(record.detail)) return record.detail.join(" ");
