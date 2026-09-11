@@ -236,8 +236,18 @@ No lost work (same row id throughout), no permanently stuck lease (reclaimed aut
 
 No defect found; `apps/activity/durable_work.py` required no changes.
 
-### Check 3 — Redelivery idempotency, proven not just reasoned
-*Not started.*
+### Check 3 — Redelivery idempotency, proven not just reasoned ✅ DONE
+
+**Claim under test**: `CELERY_TASK_ACKS_LATE=True` + `CELERY_TASK_REJECT_ON_WORKER_LOST=True` (Milestone 22.3) means a crashed worker's in-flight task message is redelivered to another worker — reasoned as safe "by construction" at the time (`select_for_update(skip_locked=True)`), never proven by actually triggering two overlapping executions of the same real task.
+
+**Method**: for these periodic sweep-style tasks, Celery-level redelivery would mean the *entire task function* (not a specific claimed row) runs again — so the faithful way to prove redelivery-safety is to run the real, registered task function itself concurrently from two workers, not just `claim_due()` in isolation (already exercised by Check 2).
+1. `docker compose stop celery-worker` (same reasoning as Check 2 — keeps the real scheduled consumer from claiming the row before the deliberate concurrent test).
+2. Created one fresh, genuine `NotificationOutbox` row via a real invite. Confirmed it was the *only* `PENDING` row in the table before the test (so the result is unambiguous).
+3. Launched two independent OS processes in the backend container, started within 2ms of each other, each calling the real `apps.notifications.tasks.dispatch_pending_notifications()` — the literal function Celery invokes, not a reimplementation — simulating the exact scenario where Celery redelivers the same task to two workers simultaneously.
+4. Process A's log shows the stub EMAIL gateway call (`EMAIL (stub): to rc-area5-check3@demo-academy.test`); process B's log shows no gateway call at all — `claim_due()`'s `select_for_update(skip_locked=True)` gave B an empty result set (the row was already locked by A), so B did nothing and exited cleanly with no error.
+5. Confirmed final state: `status=PROCESSED`, `attempts=1`, and **exactly one** `NotificationDeliveryAttempt` row (`SENT`).
+
+**Result**: PASS. Two genuinely concurrent real invocations of the actual task function produced exactly one delivery, zero duplicates, zero errors — not just "the code looks idempotent" but a real concurrent race decided correctly at the PostgreSQL row-lock level. No defect found; no code changes required.
 
 ### Check 4 — Mid-transaction DB-connection-drop recovery
 *Not started.*
