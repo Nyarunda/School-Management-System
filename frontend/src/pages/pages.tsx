@@ -96,7 +96,7 @@ export function LoginPage() {
             <Stack gap="xs" mt="sm">
               {[
                 "Instant WhatsApp & SMS Fee Receipts",
-                "Zero-Reconciliation Automated C2B Payments",
+                "Auditable, Evidence-Verified M-Pesa Reconciliation",
                 "Longitudinal Academic Trajectory & Report Cards",
                 "Campus-Scoped Access & Audit Trails",
               ].map((feat) => (
@@ -168,11 +168,11 @@ export function LoginPage() {
               <Divider label="Quick Demo Access" labelPosition="center" my="xs" />
 
               <Group justify="center" gap="xs">
-                <Button variant="default" size="xs" onClick={() => handleDemoFill("demo-admin", "demo12345")}>
+                <Button variant="default" size="xs" onClick={() => handleDemoFill("demo-admin", "demo-pass-12345")}>
                   ⚡ Fill Demo Admin
                 </Button>
-                <Button variant="default" size="xs" onClick={() => handleDemoFill("demo-bursar", "demo12345")}>
-                  ⚡ Fill Demo Bursar
+                <Button variant="default" size="xs" onClick={() => handleDemoFill("demo-teacher", "demo-pass-12345")}>
+                  ⚡ Fill Demo Teacher
                 </Button>
               </Group>
 
