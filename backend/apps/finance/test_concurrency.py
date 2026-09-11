@@ -10,7 +10,7 @@ from django.db import connection, connections, transaction
 from django.db.models import Sum
 from django.test import TransactionTestCase
 
-from apps.academics.models import AcademicLevel, AcademicYear
+from apps.academics.models import AcademicLevel, AcademicYear, Term
 from apps.students.models import Student
 from apps.tenancy.models import Membership, Role, Tenant, User
 
@@ -70,12 +70,13 @@ class PaymentAllocationConcurrencyTests(TransactionTestCase):
         Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role)
         year = AcademicYear.objects.create(tenant=self.school_a, name="2026", starts_on=date(2026, 1, 1), ends_on=date(2026, 12, 31))
         level = AcademicLevel.objects.create(tenant=self.school_a, name="Grade 8", code="G8", sequence=8)
+        term = Term.objects.create(tenant=self.school_a, academic_year=year, name="Term 1", starts_on=date(2026, 1, 1), ends_on=date(2026, 4, 30), sequence=1)
         self.payment_method = PaymentMethod.objects.create(tenant=self.school_a, name="Bank transfer", code="BANK")
         NumberSeries.objects.create(tenant=self.school_a, document_type="INVOICE", prefix="INV-2026-", padding=6)
         NumberSeries.objects.create(tenant=self.school_a, document_type="RECEIPT", prefix="RCT-2026-", padding=6)
         NumberSeries.objects.create(tenant=self.school_a, document_type="CREDIT_NOTE", prefix="CRN-2026-", padding=6)
         NumberSeries.objects.create(tenant=self.school_a, document_type="PAYMENT_REVERSAL", prefix="PRV-2026-", padding=6)
-        self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level)
+        self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level, term=term)
 
         from .models import FeeCategory, FeeItem
 
@@ -99,7 +100,8 @@ class PaymentAllocationConcurrencyTests(TransactionTestCase):
 
         year = self.structure.academic_year
         level = self.structure.academic_level
-        structure = create_fee_structure(user=self.user, tenant=self.school_a, name=name, academic_year=year, academic_level=level)
+        term = self.structure.term
+        structure = create_fee_structure(user=self.user, tenant=self.school_a, name=name, academic_year=year, academic_level=level, term=term)
         category = FeeCategory.objects.create(tenant=self.school_a, name=name, code=name.upper().replace(" ", "_"))
         item = FeeItem.objects.create(tenant=self.school_a, category=category, name=name, code=category.code)
         add_fee_structure_line(user=self.user, tenant=self.school_a, fee_structure=structure, fee_item=item, amount=Decimal("50000.00"))
@@ -375,7 +377,8 @@ class FeeAssignmentConcurrencyTests(TransactionTestCase):
         Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role)
         year = AcademicYear.objects.create(tenant=self.school_a, name="2026", starts_on=date(2026, 1, 1), ends_on=date(2026, 12, 31))
         level = AcademicLevel.objects.create(tenant=self.school_a, name="Grade 8", code="G8", sequence=8)
-        self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level)
+        term = Term.objects.create(tenant=self.school_a, academic_year=year, name="Term 1", starts_on=date(2026, 1, 1), ends_on=date(2026, 4, 30), sequence=1)
+        self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level, term=term)
 
         from .models import FeeCategory, FeeItem
 

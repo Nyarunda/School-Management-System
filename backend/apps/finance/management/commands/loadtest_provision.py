@@ -137,10 +137,16 @@ class Command(BaseCommand):
             tenant=tenant, name="Load Test Year", defaults={"starts_on": date(2026, 1, 1), "ends_on": date(2026, 12, 31)},
         )
         level, _ = AcademicLevel.objects.get_or_create(tenant=tenant, code="LT", defaults={"name": "Load Test Level", "sequence": 1})
+        # A fixed date (not date.today()), matching _provision_academic_fixtures'
+        # own attendance session date below -- same idempotency reasoning.
+        term, _ = Term.objects.get_or_create(
+            tenant=tenant, academic_year=year, sequence=1,
+            defaults={"name": "Load Test Term", "starts_on": year.starts_on, "ends_on": year.ends_on},
+        )
         category, _ = FeeCategory.objects.get_or_create(tenant=tenant, code="LT", defaults={"name": "Load Test Fees"})
         item, _ = FeeItem.objects.get_or_create(tenant=tenant, category=category, code="TUITION", defaults={"name": "Tuition"})
 
-        structure = _get_or_create_fee_structure(user=bursar, tenant=tenant, year=year, level=level, item=item)
+        structure = _get_or_create_fee_structure(user=bursar, tenant=tenant, year=year, level=level, term=term, item=item)
 
         students = []
         student_objects = []
@@ -158,7 +164,7 @@ class Command(BaseCommand):
             student_objects.append(student)
 
         attendance_session_id, assessment_id = self._provision_academic_fixtures(
-            bursar=bursar, tenant=tenant, year=year, level=level, students=student_objects,
+            bursar=bursar, tenant=tenant, year=year, level=level, term=term, students=student_objects,
         )
 
         return {
@@ -180,25 +186,23 @@ class Command(BaseCommand):
         Membership.objects.get_or_create(tenant=tenant, user=user, role=role)
         return {"username": username, "password": DEFAULT_PASSWORD}
 
-    def _provision_academic_fixtures(self, *, bursar, tenant, year, level, students):
+    def _provision_academic_fixtures(self, *, bursar, tenant, year, level, term, students):
         """RC Area 6 / 5E-3: real Student/Attendance/Assessment read-path
         traffic needs real data to read, not empty lists -- this closes the
         mixed-workload fixture gap the same way the rest of this command
-        already covers Finance. One campus/class/subject/term/session/
-        assessment per tenant, every already-provisioned student enrolled
-        and given a real attendance + assessment record, via the same
-        services.py functions the real API views call (not raw ORM writes
-        for the business objects), mirroring this file's existing pattern.
+        already covers Finance. One campus/class/subject/session/assessment
+        per tenant (term is provisioned by the caller now, shared with the
+        fee-structure fixture below), every already-provisioned student
+        enrolled and given a real attendance + assessment record, via the
+        same services.py functions the real API views call (not raw ORM
+        writes for the business objects), mirroring this file's existing
+        pattern.
         """
         campus, _ = Campus.objects.get_or_create(tenant=tenant, code="LT", defaults={"name": "Load Test Campus"})
         class_group, _ = ClassGroup.objects.get_or_create(
             tenant=tenant, code="LT-C1", defaults={"name": "Load Test Class", "academic_level": level, "campus": campus},
         )
         subject, _ = Subject.objects.get_or_create(tenant=tenant, code="LTSUB", defaults={"name": "Load Test Subject"})
-        term, _ = Term.objects.get_or_create(
-            tenant=tenant, academic_year=year, sequence=1,
-            defaults={"name": "Load Test Term", "starts_on": year.starts_on, "ends_on": year.ends_on},
-        )
         assessment_type, _ = AssessmentType.objects.get_or_create(tenant=tenant, code="LTAT", defaults={"name": "Load Test CAT"})
 
         already_enrolled = set(StudentEnrollment.objects.filter(
@@ -242,14 +246,14 @@ class Command(BaseCommand):
         return str(session.id), str(assessment.id)
 
 
-def _get_or_create_fee_structure(*, user, tenant, year, level, item):
+def _get_or_create_fee_structure(*, user, tenant, year, level, term, item):
     """One shared, approved fee structure per tenant -- created on first
     provisioning of that tenant, reused on every re-run (loadtest_provision
     is idempotent, mirroring configure_mpesa_gateway's own idempotency).
     """
-    structure = FeeStructure.objects.filter(tenant=tenant, academic_year=year, academic_level=level).first()
+    structure = FeeStructure.objects.filter(tenant=tenant, academic_year=year, academic_level=level, term=term).first()
     if structure is None:
-        structure = create_fee_structure(user=user, tenant=tenant, name="Load Test Structure", academic_year=year, academic_level=level)
+        structure = create_fee_structure(user=user, tenant=tenant, name="Load Test Structure", academic_year=year, academic_level=level, term=term)
     if not structure.lines.exists():
         add_fee_structure_line(user=user, tenant=tenant, fee_structure=structure, fee_item=item, amount=FEE_AMOUNT)
     if not structure.is_approved:

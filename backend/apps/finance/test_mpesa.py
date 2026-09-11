@@ -6,7 +6,7 @@ from django.core.exceptions import ValidationError
 from django.db import connection
 from django.test import TestCase, override_settings
 
-from apps.academics.models import AcademicLevel, AcademicYear
+from apps.academics.models import AcademicLevel, AcademicYear, Term
 from apps.activity.models import ActivityEvent
 from apps.students.models import Student
 from apps.tenancy.models import Membership, Role, Tenant, User
@@ -183,9 +183,10 @@ class MpesaCallbackHandlingTests(TestCase):
 
         year = AcademicYear.objects.create(tenant=self.tenant, name="2026", starts_on=date(2026, 1, 1), ends_on=date(2026, 12, 31))
         level = AcademicLevel.objects.create(tenant=self.tenant, name="Grade 8", code="G8", sequence=8)
+        term = Term.objects.create(tenant=self.tenant, academic_year=year, name="Term 1", starts_on=date(2026, 1, 1), ends_on=date(2026, 4, 30), sequence=1)
         category = FeeCategory.objects.create(tenant=self.tenant, name="Tuition", code="TUITION")
         item = FeeItem.objects.create(tenant=self.tenant, category=category, name="Tuition fee", code="TUITION")
-        structure = create_fee_structure(user=self.user, tenant=self.tenant, name="Grade 8 2026", academic_year=year, academic_level=level)
+        structure = create_fee_structure(user=self.user, tenant=self.tenant, name="Grade 8 2026", academic_year=year, academic_level=level, term=term)
         add_fee_structure_line(user=self.user, tenant=self.tenant, fee_structure=structure, fee_item=item, amount=Decimal("50000.00"))
         approve_fee_structure(user=self.user, tenant=self.tenant, fee_structure=structure)
         assignment = assign_fee_structure(user=self.user, tenant=self.tenant, student=self.student, fee_structure=structure)

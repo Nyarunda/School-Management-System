@@ -46,14 +46,17 @@ def _next_number(*, tenant, document_type):
     return number
 
 
-def create_fee_structure(*, user, tenant, name, academic_year, academic_level):
+def create_fee_structure(*, user, tenant, name, academic_year, academic_level, term):
     require_permission(user=user, tenant=tenant, permission="finance.fee_structure.create")
-    validate_same_tenant(tenant=tenant, academic_year=academic_year, academic_level=academic_level)
+    validate_same_tenant(tenant=tenant, academic_year=academic_year, academic_level=academic_level, term=term)
+    if term.academic_year_id != academic_year.id:
+        raise ValidationError("Term must belong to the selected academic year")
     return FeeStructure.objects.create(
         tenant=tenant,
         name=name,
         academic_year=academic_year,
         academic_level=academic_level,
+        term=term,
     )
 
 

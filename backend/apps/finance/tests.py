@@ -5,7 +5,7 @@ from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.test import TestCase
 
-from apps.academics.models import AcademicLevel, AcademicYear
+from apps.academics.models import AcademicLevel, AcademicYear, Term
 from apps.activity.models import ActivityEvent
 from apps.guardians.models import Guardian, StudentGuardian
 from apps.notifications.models import NotificationChannel, NotificationEvent, NotificationOutbox, NotificationRecipientType
@@ -71,6 +71,7 @@ class FinanceSetupTests(TestCase):
             ends_on=date(2026, 12, 31),
         )
         self.level_a = AcademicLevel.objects.create(tenant=self.school_a, name="Grade 8", code="G8", sequence=8)
+        self.term_a = Term.objects.create(tenant=self.school_a, academic_year=self.year_a, name="Term 1", starts_on=date(2026, 1, 1), ends_on=date(2026, 4, 30), sequence=1)
         self.category_a = FeeCategory.objects.create(tenant=self.school_a, name="Tuition", code="TUITION")
         self.item_a = FeeItem.objects.create(
             tenant=self.school_a,
@@ -101,6 +102,7 @@ class FinanceSetupTests(TestCase):
             name="Grade 8 2026",
             academic_year=self.year_a,
             academic_level=self.level_a,
+            term=self.term_a,
         )
 
         self.assertEqual(structure.tenant, self.school_a)
@@ -117,6 +119,7 @@ class FinanceSetupTests(TestCase):
                 name="Cross-tenant structure",
                 academic_year=other_year,
                 academic_level=self.level_a,
+                term=self.term_a,
             )
 
     def test_fee_structure_must_have_lines_before_approval_and_is_immutable_after(self):
@@ -126,6 +129,7 @@ class FinanceSetupTests(TestCase):
             name="Grade 8 2026",
             academic_year=self.year_a,
             academic_level=self.level_a,
+            term=self.term_a,
         )
         with self.assertRaises(ValidationError):
             approve_fee_structure(user=self.user, tenant=self.school_a, fee_structure=structure)
@@ -162,6 +166,7 @@ class FinanceSetupTests(TestCase):
                 name="Unauthorized",
                 academic_year=self.year_a,
                 academic_level=self.level_a,
+                term=self.term_a,
             )
 
     def _approved_structure(self):
@@ -171,6 +176,7 @@ class FinanceSetupTests(TestCase):
             name="Grade 8 2026",
             academic_year=self.year_a,
             academic_level=self.level_a,
+            term=self.term_a,
         )
         add_fee_structure_line(
             user=self.user,
@@ -214,7 +220,7 @@ class FinanceSetupTests(TestCase):
 
     def test_approve_fee_structure_records_one_activity_event(self):
         structure = create_fee_structure(
-            user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=self.year_a, academic_level=self.level_a,
+            user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=self.year_a, academic_level=self.level_a, term=self.term_a,
         )
         add_fee_structure_line(user=self.user, tenant=self.school_a, fee_structure=structure, fee_item=self.item_a, amount=Decimal("50000.00"))
 
@@ -297,6 +303,7 @@ class PaymentTests(TestCase):
         Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role)
         year = AcademicYear.objects.create(tenant=self.school_a, name="2026", starts_on=date(2026, 1, 1), ends_on=date(2026, 12, 31))
         level = AcademicLevel.objects.create(tenant=self.school_a, name="Grade 8", code="G8", sequence=8)
+        term = Term.objects.create(tenant=self.school_a, academic_year=year, name="Term 1", starts_on=date(2026, 1, 1), ends_on=date(2026, 4, 30), sequence=1)
         category = FeeCategory.objects.create(tenant=self.school_a, name="Tuition", code="TUITION")
         item = FeeItem.objects.create(tenant=self.school_a, category=category, name="Tuition fee", code="TUITION")
         self.student = Student.objects.create(tenant=self.school_a, admission_number="ADM-001", first_name="Amina", last_name="Otieno")
@@ -308,7 +315,7 @@ class PaymentTests(TestCase):
         NumberSeries.objects.create(tenant=self.school_a, document_type="RECEIPT", prefix="RCT-2026-", padding=6)
         NumberSeries.objects.create(tenant=self.school_a, document_type="PAYMENT_REVERSAL", prefix="PRV-2026-", padding=6)
 
-        self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level)
+        self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level, term=term)
         add_fee_structure_line(user=self.user, tenant=self.school_a, fee_structure=self.structure, fee_item=item, amount=Decimal("50000.00"))
         approve_fee_structure(user=self.user, tenant=self.school_a, fee_structure=self.structure)
         assignment = assign_fee_structure(user=self.user, tenant=self.school_a, student=self.student, fee_structure=self.structure)
@@ -455,10 +462,11 @@ class PaymentTests(TestCase):
     def _new_structure(self, name="Transport"):
         year = self.structure.academic_year
         level = self.structure.academic_level
+        term = self.structure.term
         code = name.upper().replace(" ", "_")
         category = FeeCategory.objects.create(tenant=self.school_a, name=name, code=code)
         item = FeeItem.objects.create(tenant=self.school_a, category=category, name=f"{name} fee", code=code)
-        structure = create_fee_structure(user=self.user, tenant=self.school_a, name=f"{name} 2026", academic_year=year, academic_level=level)
+        structure = create_fee_structure(user=self.user, tenant=self.school_a, name=f"{name} 2026", academic_year=year, academic_level=level, term=term)
         add_fee_structure_line(user=self.user, tenant=self.school_a, fee_structure=structure, fee_item=item, amount=Decimal("50000.00"))
         approve_fee_structure(user=self.user, tenant=self.school_a, fee_structure=structure)
         return structure
@@ -627,6 +635,7 @@ class ReconciliationTests(TestCase):
         Membership.objects.create(tenant=self.school_a, user=self.user, role=self.role)
         year = AcademicYear.objects.create(tenant=self.school_a, name="2026", starts_on=date(2026, 1, 1), ends_on=date(2026, 12, 31))
         level = AcademicLevel.objects.create(tenant=self.school_a, name="Grade 8", code="G8", sequence=8)
+        term = Term.objects.create(tenant=self.school_a, academic_year=year, name="Term 1", starts_on=date(2026, 1, 1), ends_on=date(2026, 4, 30), sequence=1)
         category = FeeCategory.objects.create(tenant=self.school_a, name="Tuition", code="TUITION")
         item = FeeItem.objects.create(tenant=self.school_a, category=category, name="Tuition fee", code="TUITION")
         self.student = Student.objects.create(tenant=self.school_a, admission_number="ADM-001", first_name="Amina", last_name="Otieno")
@@ -639,7 +648,7 @@ class ReconciliationTests(TestCase):
         NumberSeries.objects.create(tenant=self.school_a, document_type="INVOICE", prefix="INV-2026-", padding=6)
         NumberSeries.objects.create(tenant=self.school_a, document_type="RECEIPT", prefix="RCT-2026-", padding=6)
 
-        self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level)
+        self.structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level, term=term)
         add_fee_structure_line(user=self.user, tenant=self.school_a, fee_structure=self.structure, fee_item=item, amount=Decimal("50000.00"))
         approve_fee_structure(user=self.user, tenant=self.school_a, fee_structure=self.structure)
         assignment = assign_fee_structure(user=self.user, tenant=self.school_a, student=self.student, fee_structure=self.structure)

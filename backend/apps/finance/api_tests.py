@@ -5,7 +5,7 @@ from decimal import Decimal
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from apps.academics.models import AcademicLevel, AcademicYear
+from apps.academics.models import AcademicLevel, AcademicYear, Term
 from apps.activity.models import ActivityEvent
 from apps.students.models import Student
 from apps.tenancy.models import Membership, Role, Tenant, User
@@ -17,7 +17,7 @@ class FinanceApiTests(TestCase):
     def test_domain_validation_uses_shared_handler(self):
         from .models import FeeStructure
         structure = FeeStructure.objects.create(
-            tenant=self.school_a, name="Empty", academic_year=self.year, academic_level=self.level,
+            tenant=self.school_a, name="Empty", academic_year=self.year, academic_level=self.level, term=self.term,
         )
         response = self.client.post(
             f"/api/v1/finance/fee-structures/{structure.id}/approve/", **self.headers(),
@@ -66,6 +66,7 @@ class FinanceApiTests(TestCase):
             ends_on=date(2026, 12, 31),
         )
         self.level = AcademicLevel.objects.create(tenant=self.school_a, name="Grade 8", code="G8", sequence=8)
+        self.term = Term.objects.create(tenant=self.school_a, academic_year=self.year, name="Term 1", starts_on=date(2026, 1, 1), ends_on=date(2026, 4, 30), sequence=1)
         self.category = FeeCategory.objects.create(tenant=self.school_a, name="Tuition", code="TUITION")
         self.item = FeeItem.objects.create(
             tenant=self.school_a,
@@ -140,7 +141,7 @@ class FinanceApiTests(TestCase):
 
         structure_response = self.client.post(
             "/api/v1/finance/fee-structures/",
-            {"name": "Grade 8 2026", "academic_year": str(self.year.id), "academic_level": str(self.level.id)},
+            {"name": "Grade 8 2026", "academic_year": str(self.year.id), "academic_level": str(self.level.id), "term": str(self.term.id)},
             format="json",
             **self.headers(),
         )
@@ -202,7 +203,7 @@ class FinanceApiTests(TestCase):
 
         for index in range(3):
             structure = FeeStructure.objects.create(
-                tenant=self.school_a, name=f"Structure {index}", academic_year=self.year, academic_level=self.level, is_approved=True,
+                tenant=self.school_a, name=f"Structure {index}", academic_year=self.year, academic_level=self.level, term=self.term, is_approved=True,
             )
             assignment = StudentFeeAssignment.objects.create(tenant=self.school_a, student=self.student, fee_structure=structure)
             invoice = Invoice.objects.create(
@@ -241,7 +242,7 @@ class FinanceApiTests(TestCase):
     def _issued_invoice(self, structure_name="Grade 8 2026"):
         structure_response = self.client.post(
             "/api/v1/finance/fee-structures/",
-            {"name": structure_name, "academic_year": str(self.year.id), "academic_level": str(self.level.id)},
+            {"name": structure_name, "academic_year": str(self.year.id), "academic_level": str(self.level.id), "term": str(self.term.id)},
             format="json",
             **self.headers(),
         )

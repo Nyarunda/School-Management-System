@@ -5,7 +5,7 @@ from django.db import models
 from django.db.models import Q
 from django.utils import timezone
 
-from apps.academics.models import AcademicLevel, AcademicYear
+from apps.academics.models import AcademicLevel, AcademicYear, Term
 from apps.tenancy.models import Tenant, TenantOwnedModel, User
 
 from .fields import EncryptedCharField
@@ -47,11 +47,15 @@ class FeeStructure(TenantOwnedModel):
     name = models.CharField(max_length=160)
     academic_year = models.ForeignKey(AcademicYear, on_delete=models.PROTECT, related_name="fee_structures")
     academic_level = models.ForeignKey(AcademicLevel, on_delete=models.PROTECT, related_name="fee_structures")
+    # Different terms within the same year commonly charge different fee
+    # items/amounts (e.g. a one-off admission fee only in Term 1) -- a
+    # structure is scoped to one specific term, not the whole year.
+    term = models.ForeignKey(Term, on_delete=models.PROTECT, related_name="fee_structures")
     is_active = models.BooleanField(default=True)
     is_approved = models.BooleanField(default=False)
 
     class Meta:
-        constraints = [models.UniqueConstraint(fields=["tenant", "name", "academic_year", "academic_level"], name="unique_fee_structure_per_level_year")]
+        constraints = [models.UniqueConstraint(fields=["tenant", "name", "academic_year", "academic_level", "term"], name="unique_fee_structure_per_level_year_term")]
 
 
 class FeeStructureLine(TenantOwnedModel):

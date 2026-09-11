@@ -16,8 +16,9 @@ type Line={id:string;fee_item:string;fee_item_name:string;amount:string;is_requi
 type FeeItemOption={id:string;category:string;name:string;code:string;is_optional:boolean;is_active:boolean};
 type AcademicYear={id:string;name:string;starts_on:string;ends_on:string;is_current:boolean};
 type AcademicLevel={id:string;name:string;code:string;sequence:number};
+type AcademicTerm={id:string;academic_year:string;name:string;starts_on:string;ends_on:string;sequence:number};
 type PaymentMethod={id:string;name:string;code:string;is_active:boolean};
-type Structure={id:string;name:string;academic_year:string;academic_level:string;is_active:boolean;is_approved:boolean;lines:Line[]};
+type Structure={id:string;name:string;academic_year:string;academic_level:string;term:string;is_active:boolean;is_approved:boolean;lines:Line[]};
 type Assignment={id:string;student:string;student_name:string;fee_structure:string;fee_structure_name:string;status:string;assigned_at:string};
 type Invoice={id:string;invoice_number:string;student:string;assignment:string;status:string;subtotal:string;discount_total:string;total:string;issued_at:string|null;created_at:string};
 type Allocation={id:string;payment:string;invoice:string;amount:string;allocated_at:string};
@@ -43,6 +44,7 @@ export function FeeStructuresPage(){
 	const [name,setName]=useState("");
 	const [year,setYear]=useState("");
 	const [level,setLevel]=useState("");
+	const [term,setTerm]=useState("");
 	// Shared by the create dialog's pickers AND the table's year/level column
 	// labels below, so a viewer without create rights still sees names, not
 	// raw ids -- gated on the page's own view permission, not the create one.
@@ -54,9 +56,15 @@ export function FeeStructuresPage(){
 	// actual catalogue size, but noted rather than assumed safe forever.
 	const years=useQuery({queryKey:["academic-years"],queryFn:()=>api<Page<AcademicYear>>("/academics/academic-years/",{params:{page_size:100}}),enabled:canView});
 	const levels=useQuery({queryKey:["academic-levels"],queryFn:()=>api<Page<AcademicLevel>>("/academics/academic-levels/",{params:{page_size:100}}),enabled:canView});
+	const terms=useQuery({queryKey:["academic-terms"],queryFn:()=>api<Page<AcademicTerm>>("/academics/terms/",{params:{page_size:100}}),enabled:canView});
 	const yearName=(id:string)=>years.data?.results.find(y=>y.id===id)?.name??id;
 	const levelName=(id:string)=>levels.data?.results.find(l=>l.id===id)?.name??id;
-	const create=useMutation({mutationFn:()=>api<Structure>("/finance/fee-structures/",{method:"POST",body:JSON.stringify({name,academic_year:year,academic_level:level})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setCreateOpen(false);setName("");setYear("");setLevel("");notify.success("Fee structure created")},onError:error=>notify.error("Fee structure could not be created",error)});
+	const termName=(id:string)=>terms.data?.results.find(t=>t.id===id)?.name??id;
+	// A term only ever belongs to one academic year -- scoping the picker to
+	// the year already chosen avoids offering a combination create_fee_structure
+	// would reject server-side ("Term must belong to the selected academic year").
+	const termsForYear=(terms.data?.results??[]).filter(t=>t.academic_year===year);
+	const create=useMutation({mutationFn:()=>api<Structure>("/finance/fee-structures/",{method:"POST",body:JSON.stringify({name,academic_year:year,academic_level:level,term})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setCreateOpen(false);setName("");setYear("");setLevel("");setTerm("");notify.success("Fee structure created")},onError:error=>notify.error("Fee structure could not be created",error)});
 
 	// add_fee_structure_line raises "Approved fee structures cannot be edited"
 	// once is_approved is true (services.py:63-64) -- this gate reflects that
@@ -75,6 +83,7 @@ export function FeeStructuresPage(){
 	const columns:Column<Structure>[]=[
 		{key:"name",header:"Structure",cell:r=><><Text size="sm" fw={600}>{r.name}</Text><Text size="xs" c="dimmed">{r.lines.length} fee lines</Text></>},
 		{key:"year",header:"Academic year",cell:r=>yearName(r.academic_year)},
+		{key:"term",header:"Term",cell:r=>termName(r.term)},
 		{key:"level",header:"Level",cell:r=>levelName(r.academic_level)},
 		{key:"total",header:"Total",cell:r=>cash(r.lines.reduce((n,l)=>n+Number(l.amount),0))},
 		{key:"status",header:"Status",cell:r=><StatusBadge value={r.is_approved?"Approved":"Draft"}/>},
@@ -86,10 +95,11 @@ export function FeeStructuresPage(){
 			count={data.query.data?.count} page={data.page} previous={!!data.query.data?.previous} next={!!data.query.data?.next} onPage={data.setPage} onRow={setSelected}
 		/>
 
-		<ActionDialog open={createOpen} title="New fee structure" description="Choose the academic year and level this structure applies to." confirmLabel="Create structure" busy={create.isPending} onClose={()=>setCreateOpen(false)} onSubmit={e=>{e.preventDefault();create.mutate()}}>
+		<ActionDialog open={createOpen} title="New fee structure" description="Choose the academic year, term and level this structure applies to." confirmLabel="Create structure" busy={create.isPending} onClose={()=>setCreateOpen(false)} onSubmit={e=>{e.preventDefault();create.mutate()}}>
 			<Stack gap="sm">
 				<TextInput label="Name" required value={name} onChange={e=>setName(e.currentTarget.value)}/>
-				<Select label="Academic year" required placeholder="Select academic year" data={years.data?.results.map(y=>({value:y.id,label:`${y.name}${y.is_current?" · Current":""}`}))??[]} value={year||null} onChange={value=>setYear(value??"")}/>
+				<Select label="Academic year" required placeholder="Select academic year" data={years.data?.results.map(y=>({value:y.id,label:`${y.name}${y.is_current?" · Current":""}`}))??[]} value={year||null} onChange={value=>{setYear(value??"");setTerm("")}}/>
+				<Select label="Term" required placeholder={year?"Select term":"Select an academic year first"} disabled={!year} data={termsForYear.map(t=>({value:t.id,label:t.name}))} value={term||null} onChange={value=>setTerm(value??"")}/>
 				<Select label="Level" required placeholder="Select level" data={levels.data?.results.map(l=>({value:l.id,label:l.name}))??[]} value={level||null} onChange={value=>setLevel(value??"")}/>
 			</Stack>
 		</ActionDialog>
@@ -134,6 +144,8 @@ export function AssignmentsPage(){
 	// unapproved structure with "Only approved fee structures can be
 	// assigned"; is_active is never checked, so it's not filtered on here).
 	const structures=useQuery({queryKey:["assignment-structures"],queryFn:()=>api<Page<Structure>>("/finance/fee-structures/",{params:{page_size:100}}),enabled:canAssign});
+	const terms=useQuery({queryKey:["academic-terms"],queryFn:()=>api<Page<AcademicTerm>>("/academics/terms/",{params:{page_size:100}}),enabled:canAssign});
+	const termName=(id:string)=>terms.data?.results.find(t=>t.id===id)?.name??id;
 	const [open,setOpen]=useState(false);
 	// Student: a raw exact-id field, not the old page_size:100 dropdown --
 	// students are an unbounded, realistically >100 population per tenant
@@ -162,7 +174,7 @@ export function AssignmentsPage(){
 		<ActionDialog open={open} title="Assign fee structure" description="Only approved structures are offered. Assigning the same student and structure again is safe -- it returns the existing assignment rather than creating a duplicate." confirmLabel="Assign fees" busy={create.isPending} onClose={()=>setOpen(false)} onSubmit={e=>{e.preventDefault();create.mutate()}}>
 			<Stack gap="sm">
 				<TextInput label="Student id" required placeholder="Exact student id" value={studentId} onChange={e=>setStudentId(e.currentTarget.value)}/>
-				<Select label="Approved fee structure" required placeholder="Select structure" data={structures.data?.results.filter(s=>s.is_approved).map(s=>({value:s.id,label:s.name}))??[]} value={structure||null} onChange={value=>setStructure(value??"")}/>
+				<Select label="Approved fee structure" required placeholder="Select structure" data={structures.data?.results.filter(s=>s.is_approved).map(s=>({value:s.id,label:`${s.name} · ${termName(s.term)}`}))??[]} value={structure||null} onChange={value=>setStructure(value??"")}/>
 			</Stack>
 		</ActionDialog>
 	</>;

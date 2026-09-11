@@ -6,7 +6,7 @@ from unittest.mock import patch
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from apps.academics.models import AcademicLevel, AcademicYear
+from apps.academics.models import AcademicLevel, AcademicYear, Term
 from apps.students.models import Student
 from apps.tenancy.models import Membership, Role, Tenant, User
 
@@ -105,11 +105,12 @@ class MpesaApiTests(TestCase):
     def _issued_invoice(self):
         year = AcademicYear.objects.create(tenant=self.school_a, name="2026", starts_on=date(2026, 1, 1), ends_on=date(2026, 12, 31))
         level = AcademicLevel.objects.create(tenant=self.school_a, name="Grade 8", code="G8", sequence=8)
+        term = Term.objects.create(tenant=self.school_a, academic_year=year, name="Term 1", starts_on=date(2026, 1, 1), ends_on=date(2026, 4, 30), sequence=1)
         category = FeeCategory.objects.create(tenant=self.school_a, name="Tuition", code="TUITION")
         item = FeeItem.objects.create(tenant=self.school_a, category=category, name="Tuition fee", code="TUITION")
         NumberSeries.objects.create(tenant=self.school_a, document_type="INVOICE", prefix="INV-2026-", padding=6)
         NumberSeries.objects.create(tenant=self.school_a, document_type="RECEIPT", prefix="RCT-2026-", padding=6)
-        structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level)
+        structure = create_fee_structure(user=self.user, tenant=self.school_a, name="Grade 8 2026", academic_year=year, academic_level=level, term=term)
         add_fee_structure_line(user=self.user, tenant=self.school_a, fee_structure=structure, fee_item=item, amount=Decimal("50000.00"))
         approve_fee_structure(user=self.user, tenant=self.school_a, fee_structure=structure)
         assignment = assign_fee_structure(user=self.user, tenant=self.school_a, student=self.student, fee_structure=structure)

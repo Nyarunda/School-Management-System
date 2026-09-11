@@ -5,7 +5,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.academics.models import (
-    AcademicLevel, AcademicYear, ClassGroup, EnrollmentStatus, StudentEnrollment, Subject, TeacherAssignment,
+    AcademicLevel, AcademicYear, ClassGroup, EnrollmentStatus, StudentEnrollment, Subject, TeacherAssignment, Term,
 )
 from apps.finance.models import NumberSeries, PaymentMethod
 from apps.leave.models import LeaveApprovalWorkflow, LeaveApprovalWorkflowStage, LeaveType
@@ -32,6 +32,11 @@ DEMO_PASSWORD = "demo-pass-12345"
 # not meant to be imported from.
 BURSAR_PERMISSIONS = [
     "students.view",
+    # Needed to populate the fee-structure-creation picker (academic years,
+    # levels, terms) -- without it every one of those catalogue endpoints
+    # 403s for a bursar, silently leaving the "New fee structure" dialog's
+    # pickers empty even though finance.fee_structure.create is granted.
+    "academics.setup.view",
     "finance.setup.view", "finance.setup.manage",
     "finance.fee_structure.view", "finance.fee_structure.create", "finance.fee_structure.edit", "finance.fee_structure.approve",
     "finance.invoice.view", "finance.invoice.create", "finance.invoice.issue",
@@ -83,6 +88,7 @@ class Command(BaseCommand):
         bursar_user = self._provision_user(tenant=tenant, role=bursar_role, campus=None, username=f"{slug}-bursar", first_name="Bursar")
 
         year = self._provision_academic_year(tenant)
+        self._provision_terms(tenant, year)
         levels = self._provision_levels(tenant)
         subject = self._provision_subject(tenant)
         class_groups = self._provision_class_groups(tenant, campus, levels)
@@ -163,6 +169,25 @@ class Command(BaseCommand):
             tenant=tenant, name="Current", defaults={"starts_on": today - timedelta(days=180), "ends_on": today + timedelta(days=180), "is_current": True},
         )
         return year
+
+    def _provision_terms(self, tenant, year):
+        # Three terms spanning the academic year -- gives Finance's
+        # fee-structure-creation UI (term-scoped) real data to pick from,
+        # and different terms a real chance to carry different fee items.
+        span_days = (year.ends_on - year.starts_on).days
+        third = span_days // 3
+        bounds = [
+            (year.starts_on, year.starts_on + timedelta(days=third)),
+            (year.starts_on + timedelta(days=third + 1), year.starts_on + timedelta(days=2 * third)),
+            (year.starts_on + timedelta(days=2 * third + 1), year.ends_on),
+        ]
+        return [
+            Term.objects.get_or_create(
+                tenant=tenant, academic_year=year, sequence=sequence,
+                defaults={"name": f"Term {sequence}", "starts_on": starts_on, "ends_on": ends_on},
+            )[0]
+            for sequence, (starts_on, ends_on) in enumerate(bounds, start=1)
+        ]
 
     def _provision_levels(self, tenant):
         return [

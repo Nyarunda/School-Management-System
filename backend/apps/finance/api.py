@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.academics.models import AcademicLevel, AcademicYear
+from apps.academics.models import AcademicLevel, AcademicYear, Term
 from apps.activity.services import record_activity
 from apps.students.models import Student
 from apps.platform.services import require_module_enabled
@@ -209,7 +209,7 @@ class FeeStructureSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = FeeStructure
-        fields = ["id", "name", "academic_year", "academic_level", "is_active", "is_approved", "lines"]
+        fields = ["id", "name", "academic_year", "academic_level", "term", "is_active", "is_approved", "lines"]
         read_only_fields = ["id", "is_approved", "lines"]
 
 
@@ -220,19 +220,21 @@ class FeeStructureListCreateView(ListCreateAPIView):
 
     def get_queryset(self):
         tenant = resolve_finance_tenant(self.request, "finance.fee_structure.view")
-        return FeeStructure.objects.for_tenant(tenant).select_related("academic_year", "academic_level").prefetch_related("lines__fee_item").order_by("name")
+        return FeeStructure.objects.for_tenant(tenant).select_related("academic_year", "academic_level", "term").prefetch_related("lines__fee_item").order_by("name")
 
     def create(self, request, *args, **kwargs):
         tenant = resolve_finance_tenant(request, "finance.fee_structure.create")
         try:
             academic_year = get_object_or_404(AcademicYear.objects.for_tenant(tenant), pk=request.data.get("academic_year"))
             academic_level = get_object_or_404(AcademicLevel.objects.for_tenant(tenant), pk=request.data.get("academic_level"))
+            term = get_object_or_404(Term.objects.for_tenant(tenant), pk=request.data.get("term"))
             structure = create_fee_structure(
                 user=request.user,
                 tenant=tenant,
                 name=request.data["name"],
                 academic_year=academic_year,
                 academic_level=academic_level,
+                term=term,
             )
         except (KeyError, ValidationError, IntegrityError) as error:
             return api_validation_error(error if isinstance(error, ValidationError) else ValidationError(str(error)))

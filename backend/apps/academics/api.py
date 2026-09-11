@@ -8,7 +8,7 @@ from rest_framework.permissions import IsAuthenticated
 from apps.platform.services import require_module_enabled
 from apps.tenancy.services import require_permission
 
-from .models import AcademicLevel, AcademicYear, ClassGroup, TeacherAssignment
+from .models import AcademicLevel, AcademicYear, ClassGroup, TeacherAssignment, Term
 
 
 def resolve_academics_tenant(request, permission):
@@ -87,6 +87,33 @@ class AcademicLevelListView(ListAPIView):
     def get_queryset(self):
         tenant = resolve_academics_tenant(self.request, "academics.setup.view")
         return AcademicLevel.objects.for_tenant(tenant).order_by("sequence")
+
+
+class TermSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Term
+        fields = ["id", "academic_year", "name", "starts_on", "ends_on", "sequence"]
+        read_only_fields = fields
+
+
+class TermListView(ListAPIView):
+    """Read-only reference catalogue -- same purpose as AcademicYearListView
+    above (populating Finance's fee-structure-creation picker, now that fee
+    structures are term-scoped), plus optional ?academic_year= filtering
+    since a term only ever makes sense within one specific year.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = TermSerializer
+    pagination_class = AcademicsPagination
+
+    def get_queryset(self):
+        tenant = resolve_academics_tenant(self.request, "academics.setup.view")
+        queryset = Term.objects.for_tenant(tenant)
+        academic_year_id = self.request.query_params.get("academic_year")
+        if academic_year_id:
+            queryset = queryset.filter(academic_year_id=academic_year_id)
+        return queryset.order_by("-academic_year__starts_on", "sequence")
 
 
 class ClassGroupSerializer(serializers.ModelSerializer):
