@@ -176,6 +176,40 @@ Formal credit-note/invoice void/reversal workflow — an unimplemented capabilit
 SQLite: 830 tests, OK (45 skipped — Postgres-only cases, including the one new `FeeAssignmentConcurrencyTests` test). PostgreSQL 17 (`postgres:17`, disposable container `school-rc-area4-pg`): 830 tests, OK (0 skipped), including a full re-run of every existing Finance/M-Pesa concurrency and recovery suite as this area's evidence. No schema changes — `makemigrations --check --dry-run` clean.
 
 ## Area 5 — Concurrency & failure recovery
+*In progress.*
+
+**Baseline under test:** `80503dd` (Staff campus-scope defect fix, applied ahead of this area — see Findings below). **Date started:** 2026-09-11.
+Scope: proving failure-recovery behavior that was previously established by design/code-reading but never verified under an actual induced failure, through the real `docker compose` stack (not simulated in Python). Four checks, run one at a time with recorded evidence.
+
+### Findings (pre-Area-5, applied before this area's own checks)
+
+| Finding | Classification | Resolution |
+|---|---|---|
+| A "candidate Area 5 finding" queued in project memory (Staff employee document list/download skipping the campus check upload/delete apply) turned out broader on direct code reading: `EmployeeListCreateView`, `EmployeeDetailView.get`, and `EmployeeQualificationListCreateView` were *also* unscoped, not just the two document endpoints originally recorded | **DEFECT, fixed ahead of this area (`80503dd`)** | Same shape as the Area 3 Students fix. New `resolve_staff_membership`/`campus_scoped` (mirroring `apps.students.api`'s pattern) applied to all five read paths; cross-campus access now 404s. Reclassified out of Area 5 proper — this is an authorization/data-scope defect, not concurrency/failure-recovery, and is recorded here only because it was queued under Area 5's name before this area started. |
+
+### Check 1 — Redis/broker-loss proof for financial writes ✅ DONE
+
+**Claim under test**: PostgreSQL is financial truth; losing Redis must never lose or block a confirmed Payment/M-Pesa/Invoice/Allocation write (standing rule, generalizes the Milestone 22.3 fail-open `/readyz/` design). Previously true by design (a grep of `apps/finance/` found no `@shared_task`/`.delay()`/`apply_async()` anywhere in the request-handling path — the only Celery task there is the hourly `resweep_unmatched_incoming_payments` reconciliation *helper*, not the primary write path) but never proven under an actual outage.
+
+**Method**: against the live `docker compose` stack —
+1. Recorded a baseline `IncomingPayment` (`POST /api/v1/finance/incoming-payments/`, `ingest_incoming_payment`) with Redis up. `201`, persisted.
+2. `docker compose stop redis` — Redis container fully stopped, not just paused.
+3. Repeated the same write (different reference) while Redis was down. `201`, persisted.
+4. Also checked `/readyz/` (still `200`, `status: ok` — this dev compose config has no `DJANGO_CACHE_URL` set, so `cache: not configured`; see caveat below) and `POST /api/v1/auth/login/` (still `200`, so the login throttle's cache touch didn't block on a dead Redis either).
+5. Queried PostgreSQL directly (`manage.py shell`, not the API) and confirmed both `IncomingPayment` rows exist with the expected `external_reference`/`status=UNMATCHED`.
+6. `docker compose start redis` — Celery worker reconnected on its own (`Connected to redis://redis:6379/0`, then correctly processed its next scheduled beat tasks) with no manual restart needed.
+
+**Result**: PASS. A financial write (M-Pesa/incoming-payment ingest) completes and persists to PostgreSQL with the Celery broker completely down, and the worker recovers automatically once Redis returns.
+
+**Caveat, recorded honestly**: this dev `docker-compose.yml` doesn't set `DJANGO_CACHE_URL`, so `/readyz/`'s "cache: not configured" here is a different code path than the `FailOpenRedisCache` behavior Area 1 already proved under an actual Redis-backed cache. This check's real claim is narrower and specifically about the *Celery broker* not being on the financial-write critical path — confirmed both statically (grep) and dynamically (write succeeded with the broker fully down). Proving `FailOpenRedisCache` itself under this exact stack (a production-like config with `DJANGO_CACHE_URL` actually pointed at Redis) remains covered by Area 1's existing evidence, not repeated here.
+
+### Check 2 — Real worker-crash lease reclaim
+*Not started.*
+
+### Check 3 — Redelivery idempotency, proven not just reasoned
+*Not started.*
+
+### Check 4 — Mid-transaction DB-connection-drop recovery
 *Not started.*
 
 ## Area 6 — Performance & capacity
