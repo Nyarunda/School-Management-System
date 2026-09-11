@@ -365,18 +365,26 @@ export function PaymentsPage(){
 function StudentSearchSelect({value,onChange,label="Student",required}:{value:string;onChange:(id:string)=>void;label?:string;required?:boolean}){
 	const [query,setQuery]=useState("");
 	const [debounced]=useDebouncedValue(query,250);
+	// The option that produced the current `value`, kept independent of the
+	// live search results -- without this, clearing/changing the search text
+	// after picking a student drops that id out of `data`, and Mantine falls
+	// back to rendering the raw 36-character id in the input since it can no
+	// longer resolve a label for the selected value.
+	const [selectedOption,setSelectedOption]=useState<{value:string;label:string}|null>(null);
 	const search=useQuery({
 		queryKey:["student-search",debounced],
 		queryFn:()=>api<Page<Student>>("/students/",{params:{search:debounced,page_size:10}}),
 		enabled:debounced.trim().length>=2,
 	});
 	const options=(search.data?.results??[]).map(s=>({value:s.id,label:`${s.full_name} · ${s.admission_number}`}));
+	const data=selectedOption&&!options.some(o=>o.value===selectedOption.value)?[selectedOption,...options]:options;
 	return <Select label={label} required={required} searchable clearable
-		placeholder="Search by admission number or name"
+		placeholder="Search admission no. or name"
 		searchValue={query} onSearchChange={setQuery}
-		data={options} filter={({options})=>options}
+		data={data} filter={({options})=>options}
 		nothingFoundMessage={debounced.trim().length<2?"Type at least 2 characters":search.isFetching?"Searching…":"No matching student"}
-		value={value||null} onChange={v=>onChange(v??"")}/>;
+		value={value||null}
+		onChange={(v,option)=>{onChange(v??"");setSelectedOption(v?option:null)}}/>;
 }
 
 const INCOMING_TABS=[{value:"UNMATCHED",label:"Unmatched"},{value:"MATCHED",label:"Matched"},{value:"IGNORED",label:"Ignored"}];
