@@ -30,14 +30,9 @@ export function App(){
  if(loading)return (
   <main className="boot-screen">
    <Stack align="center" gap="md">
-    <Box style={{
-     width: 50, height: 50, borderRadius: 14,
-     background: "linear-gradient(145deg,#6366f1,#4338ca)",
-     display: "grid", placeItems: "center", color: "#fff", fontWeight: 900,
-     fontSize: 24, boxShadow: "0 8px 24px rgba(99,102,241,0.4)"
-    }}>S</Box>
+    <img src="/logo.png" alt="" width={50} height={50} style={{ borderRadius: 14, boxShadow: "0 8px 24px rgba(99,102,241,0.4)", objectFit: "cover" }} />
     <Box>
-     <Text fw={800} size="xl" c="white" style={{ letterSpacing: "-0.02em" }}>Scholaris</Text>
+     <Text fw={800} size="xl" c="white" style={{ letterSpacing: "-0.02em" }}>Stemic Schools</Text>
      <Text size="xs" c="indigo.2" fw={500}>School ERP & Fintech</Text>
     </Box>
     <Loader type="dots" color="indigo" size="md" mt="xs" />

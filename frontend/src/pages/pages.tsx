@@ -70,14 +70,9 @@ export function LoginPage() {
 
         <Stack justify="space-between" h="100%" style={{ position: "relative", zIndex: 1 }}>
           <Group gap="sm" wrap="nowrap">
-            <Box style={{
-              width: 42, height: 42, borderRadius: 12,
-              background: "linear-gradient(145deg,#6366f1,#4338ca)",
-              display: "grid", placeItems: "center", color: "#fff", fontWeight: 900,
-              fontSize: 20, boxShadow: "0 8px 24px rgba(99,102,241,0.4)"
-            }}>S</Box>
+            <img src="/logo.png" alt="" width={42} height={42} style={{ borderRadius: 12, boxShadow: "0 8px 24px rgba(99,102,241,0.4)", objectFit: "cover" }} />
             <Box>
-              <Text fw={800} size="lg" c="white" style={{ letterSpacing: "-0.02em" }}>Scholaris</Text>
+              <Text fw={800} size="lg" c="white" style={{ letterSpacing: "-0.02em" }}>Stemic Schools</Text>
               <Text size="xs" c="indigo.2" fw={500}>Next-Gen School ERP & Fintech</Text>
             </Box>
           </Group>
@@ -184,7 +179,7 @@ export function LoginPage() {
 }
 
 
-export function InvitePage(){const token=new URLSearchParams(location.search).get("token")??"";const [password,setPassword]=useState("");const [message,setMessage]=useState("");const [busy,setBusy]=useState(false);async function submit(e:FormEvent){e.preventDefault();setBusy(true);try{const r=await api<{token:string}>("/auth/invites/accept/",{method:"POST",tenant:false,body:JSON.stringify({token,password})});localStorage.setItem("school-erp-token",r.token);location.href="/"}catch(e){setMessage(e instanceof Error?e.message:"Invitation could not be accepted")}finally{setBusy(false)}}return <main className="center-page"><form className="auth-form card" onSubmit={submit}><div className="brand standalone"><div className="brand-mark">S</div><strong>Scholaris</strong></div><div><p className="eyebrow">School invitation</p><h2>Set up your access</h2><p>Choose a password if this is your first Scholaris account. Existing users may leave it blank.</p></div>{!token&&<div className="form-error">This invitation link has no token.</div>}{message&&<div className="form-error">{message}</div>}<label>Password<input type="password" autoComplete="new-password" value={password} onChange={e=>setPassword(e.target.value)}/></label><button className="button primary wide" disabled={!token||busy}>{busy?"Activating…":"Accept invitation"}</button></form></main>}
+export function InvitePage(){const token=new URLSearchParams(location.search).get("token")??"";const [password,setPassword]=useState("");const [message,setMessage]=useState("");const [busy,setBusy]=useState(false);async function submit(e:FormEvent){e.preventDefault();setBusy(true);try{const r=await api<{token:string}>("/auth/invites/accept/",{method:"POST",tenant:false,body:JSON.stringify({token,password})});localStorage.setItem("school-erp-token",r.token);location.href="/"}catch(e){setMessage(e instanceof Error?e.message:"Invitation could not be accepted")}finally{setBusy(false)}}return <main className="center-page"><form className="auth-form card" onSubmit={submit}><div className="brand standalone"><img className="brand-mark" src="/logo.png" alt="" style={{objectFit:"cover"}} /><strong>Stemic Schools</strong></div><div><p className="eyebrow">School invitation</p><h2>Set up your access</h2><p>Choose a password if this is your first Stemic Schools account. Existing users may leave it blank.</p></div>{!token&&<div className="form-error">This invitation link has no token.</div>}{message&&<div className="form-error">{message}</div>}<label>Password<input type="password" autoComplete="new-password" value={password} onChange={e=>setPassword(e.target.value)}/></label><button className="button primary wide" disabled={!token||busy}>{busy?"Activating…":"Accept invitation"}</button></form></main>}
 
 function MetricCard({ label, value, meta, tone, icon: IconComponent }: { label: string; value: React.ReactNode; meta: string; tone: "blue" | "teal" | "yellow" | "violet"; icon: any }) {
   return (

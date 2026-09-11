@@ -117,9 +117,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <Menu.Target>
               <UnstyledButton style={{ borderRadius: 8, padding: 6 }}>
                 <Group gap={10} wrap="nowrap">
-                  <Box style={{ width: 30, height: 30, borderRadius: 8, background: "linear-gradient(145deg,#7180ff,#4254d8)", display: "grid", placeItems: "center", color: "#fff", fontWeight: 800, flexShrink: 0, fontSize: 13 }}>S</Box>
+                  <img src="/logo.png" alt="" width={30} height={30} style={{ borderRadius: 8, flexShrink: 0, objectFit: "cover" }} />
                   <Box style={{ minWidth: 0, textAlign: "left" }} visibleFrom="sm">
-                    <Text fw={700} size="sm" c={theme.other.textPrimary} lineClamp={1}>{session?.active_tenant?.name ?? "Scholaris"}</Text>
+                    <Text fw={700} size="sm" c={theme.other.textPrimary} lineClamp={1}>{session?.active_tenant?.name ?? "Stemic Schools"}</Text>
                     <Text size="xs" c="dimmed" lineClamp={1}>School workspace</Text>
                   </Box>
                   {(session?.memberships?.length ?? 0) > 1 && <IconChevronDown size={14} color="var(--mantine-color-dimmed)" />}
@@ -239,8 +239,8 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
       <MantineAppShell.Navbar className="app-shell-navbar" style={{ background: theme.other.sidebarBg, borderRight: `1px solid ${theme.other.sidebarBorder}` }}>
         <MantineAppShell.Section p="md">
           <Group gap={11} wrap="nowrap">
-            <Box style={{ width: 34, height: 34, borderRadius: 9, background: "linear-gradient(145deg,#9b8cff,#684ac7)", display: "grid", placeItems: "center", color: "#fff", fontWeight: 800, flexShrink: 0 }}>P</Box>
-            <Box><Text fw={700} size="sm" c={theme.other.sidebarForeground}>Scholaris Platform</Text><Text size="xs" c={theme.other.sidebarMuted}>Super administration</Text></Box>
+            <img src="/logo.png" alt="" width={34} height={34} style={{ borderRadius: 9, flexShrink: 0, objectFit: "cover" }} />
+            <Box><Text fw={700} size="sm" c={theme.other.sidebarForeground}>Stemic Schools Platform</Text><Text size="xs" c={theme.other.sidebarMuted}>Super administration</Text></Box>
           </Group>
         </MantineAppShell.Section>
         <MantineAppShell.Section grow px="sm">
