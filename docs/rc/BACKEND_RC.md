@@ -203,8 +203,38 @@ Scope: proving failure-recovery behavior that was previously established by desi
 
 **Caveat, recorded honestly**: this dev `docker-compose.yml` doesn't set `DJANGO_CACHE_URL`, so `/readyz/`'s "cache: not configured" here is a different code path than the `FailOpenRedisCache` behavior Area 1 already proved under an actual Redis-backed cache. This check's real claim is narrower and specifically about the *Celery broker* not being on the financial-write critical path — confirmed both statically (grep) and dynamically (write succeeded with the broker fully down). Proving `FailOpenRedisCache` itself under this exact stack (a production-like config with `DJANGO_CACHE_URL` actually pointed at Redis) remains covered by Area 1's existing evidence, not repeated here.
 
-### Check 2 — Real worker-crash lease reclaim
-*Not started.*
+### Check 2 — Real worker-crash lease reclaim ✅ DONE
+
+**Claim under test**: if a Celery worker is killed abruptly after claiming a piece of durable work but before finishing it, no work is lost, the lease doesn't stay stuck forever, the real `reap_stale`/Beat schedule reclaims it, and it's reprocessed exactly once — with no manually edited PostgreSQL rows anywhere in the sequence.
+
+**Method** (real process kill, not a simulated exception — against the live `docker compose` stack):
+1. `docker compose stop celery-worker` (celery-beat stays running throughout, so its schedule keeps ticking on real wall-clock time) — done so the real worker can't race the manual claim below.
+2. Created a genuine `NotificationOutbox` row via a real business action: `POST /api/v1/tenancy/users/invite/` (demo-academy tenant). Confirmed `PENDING`, `attempts=0`, no lease.
+3. Ran a driver process inside the backend container that calls the actual `apps.activity.durable_work.claim_due()` primitive directly (`lease_seconds=10`, otherwise identical to what `dispatch_pending_notifications` itself calls), then blocks (`time.sleep(600)`) — standing in for a worker that has claimed the row and is now mid-task. Confirmed via a separate query: `PROCESSING`, `attempts=1`, real `lease_expires_at` committed to PostgreSQL.
+4. Found the driver process by scanning `/proc/*/cmdline` **inside the container's own PID namespace** (its host-visible PID from `docker top`, 2726, was confirmed to differ from its container-internal PID, 170 — a real illustration of why "kill by host PID" doesn't work here) and sent it a real `SIGKILL` (`os.kill(170, signal.SIGKILL)`). Confirmed gone from `docker top` immediately after.
+5. Re-queried the row immediately post-kill: **still `PROCESSING`, lease already expired, nothing has reclaimed it yet** — PostgreSQL genuinely retained the claimed-work state exactly as the crashed process left it.
+6. `docker compose start celery-worker` (the "new worker").
+7. Polled the row's real status every 5s (no manual intervention) for up to 380s:
+
+   | Time | Status | Attempts | Lease |
+   |---|---|---|---|
+   | 11:23:08 | `PROCESSING` (unchanged) | 1 | `08:21:57` (already expired) |
+   | 11:24:13 | `PENDING` | 1 | `None` — reclaimed by the real, Beat-scheduled `reap_stale_notifications` task |
+   | 11:24:38 | `PROCESSED` | 2 | `None` — reclaimed and reprocessed by the real, Beat-scheduled `dispatch_pending_notifications` task |
+
+8. Checked `NotificationDeliveryAttempt` for this outbox row: **exactly one** row (`attempt_number=2`, `status=SENT`, `provider=EMAIL`) — the crashed claim (`attempt_number` would have been 1) never got far enough to create a delivery attempt at all, so there is no duplicate and no dangling attempt row.
+
+**Result**: PASS, matching the full expected sequence —
+
+```
+PENDING → worker claims → PROCESSING+lease → WORKER KILLED (real SIGKILL)
+   → lease expires → real Beat-scheduled reaper reclaims → PENDING
+   → real worker claims → PROCESSING → PROCESSED (attempts=2, 1 delivery attempt)
+```
+
+No lost work (same row id throughout), no permanently stuck lease (reclaimed automatically, no manual DB edit), no duplicate business side effect (1 delivery attempt, not 2), bounded retry (`attempts=2`, well under `MAX_ATTEMPTS=5`), and full recovery driven entirely by the existing scheduled tasks — total wall-clock time from kill to `PROCESSED` was under 2 minutes (`reap_stale_notifications`'s 300s Beat interval happened to be partway through its cycle, not a worst-case 5-minute wait).
+
+No defect found; `apps/activity/durable_work.py` required no changes.
 
 ### Check 3 — Redelivery idempotency, proven not just reasoned
 *Not started.*
