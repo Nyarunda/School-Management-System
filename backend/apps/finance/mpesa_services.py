@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
 
 from apps.activity.services import record_activity
@@ -31,6 +31,25 @@ SYSTEM_ROLE_PERMISSIONS = [
     "finance.payment.record",
     "finance.payment.allocate",
 ]
+
+
+_LOCK_NOT_AVAILABLE_SQLSTATE = "55P03"
+
+
+def _select_for_update_or_conflict(fetch, message):
+    """Runs a select_for_update() fetch (a zero-arg callable) and turns a
+    lock_timeout expiry (config.settings' DATABASES OPTIONS -- see its
+    comment for the RC Area 6/5E-3 finding this fixes) into a clean,
+    retryable ValidationError instead of an opaque 500. Any other
+    OperationalError (e.g. a dropped connection) is not this condition and
+    is left to propagate.
+    """
+    try:
+        return fetch()
+    except OperationalError as error:
+        if getattr(error.__cause__, "sqlstate", None) == _LOCK_NOT_AVAILABLE_SQLSTATE:
+            raise ValidationError(message) from error
+        raise
 
 
 def _normalize_msisdn(raw):
@@ -320,7 +339,10 @@ def verify_mpesa_callback(*, user, tenant, callback_id, evidence):
     require_permission(user=user, tenant=tenant, permission="finance.mpesa.callback.verify")
     evidence = _text(evidence, "verification reference", 240)
     try:
-        callback = MpesaCallbackLog.objects.select_for_update().get(tenant=tenant, pk=callback_id)
+        callback = _select_for_update_or_conflict(
+            lambda: MpesaCallbackLog.objects.select_for_update().get(tenant=tenant, pk=callback_id),
+            "This callback is currently being verified or processed by another request; try again",
+        )
     except MpesaCallbackLog.DoesNotExist:
         raise ValidationError("Callback is not available in this school") from None
     if callback.status == MpesaCallbackStatus.REJECTED:
@@ -341,7 +363,10 @@ def process_mpesa_callback(*, user, tenant, callback_id):
     unexpected = None
     with transaction.atomic():
         try:
-            callback = MpesaCallbackLog.objects.select_for_update().get(tenant=tenant, pk=callback_id)
+            callback = _select_for_update_or_conflict(
+                lambda: MpesaCallbackLog.objects.select_for_update().get(tenant=tenant, pk=callback_id),
+                "This callback is currently being verified or processed by another request; try again",
+            )
         except MpesaCallbackLog.DoesNotExist:
             raise ValidationError("Callback is not available in this school") from None
         if callback.status == MpesaCallbackStatus.PROCESSED:
@@ -381,7 +406,10 @@ def process_mpesa_callback(*, user, tenant, callback_id):
 def reject_mpesa_callback(*, user, tenant, callback_id, reason):
     require_permission(user=user, tenant=tenant, permission="finance.mpesa.callback.verify")
     reason = _text(reason, "reason", 240)
-    callback = MpesaCallbackLog.objects.select_for_update().filter(tenant=tenant, pk=callback_id).first()
+    callback = _select_for_update_or_conflict(
+        lambda: MpesaCallbackLog.objects.select_for_update().filter(tenant=tenant, pk=callback_id).first(),
+        "This callback is currently being verified or processed by another request; try again",
+    )
     if callback is None or callback.status == MpesaCallbackStatus.PROCESSED:
         raise ValidationError("Callback cannot be rejected")
     callback.status = MpesaCallbackStatus.REJECTED

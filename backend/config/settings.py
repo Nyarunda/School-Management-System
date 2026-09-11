@@ -120,6 +120,24 @@ else:
             # (e.g. PgBouncer) in front of Postgres, not a setting here.
             "CONN_MAX_AGE": int(os.getenv("DB_CONN_MAX_AGE", "60")),
             "CONN_HEALTH_CHECKS": True,
+            # RC Area 6/5E-3 finding: a select_for_update() has no bound on
+            # how long it waits for a contended row lock unless one is set
+            # here -- Postgres's own lock_timeout defaults to 0 (wait
+            # forever). A live chaos run observed a ~110s stall (39 requests
+            # across callback_verify/callback_process/c2b_confirmation,
+            # corroborated by an independent direct-DB sampler) that never
+            # self-recovered; only an unrelated forced connection kill
+            # incidentally cleared it. Without this, a single stuck lock
+            # holder can pin a gunicorn worker thread indefinitely. 5s
+            # matches the bound apps/finance/test_mpesa_concurrency.py's
+            # tests already impose locally per-connection -- legitimate
+            # select_for_update() contention here (racing to
+            # verify/process the same callback) resolves in milliseconds,
+            # not seconds, so this only ever fires on a genuine stuck
+            # holder. See mpesa_services._select_for_update_or_conflict for
+            # where this becomes a clean, retryable error instead of a raw
+            # 500.
+            "OPTIONS": {"options": "-c lock_timeout=5000"},
         }
     }
 

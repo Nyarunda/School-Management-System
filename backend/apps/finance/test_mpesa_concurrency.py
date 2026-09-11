@@ -1,17 +1,18 @@
+import time
 from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
-from threading import Barrier
+from threading import Barrier, Event
 from unittest import skipUnless
 from unittest.mock import patch
 
 from django.core.exceptions import ValidationError
-from django.db import connection, connections
+from django.db import connection, connections, transaction
 from django.test import TransactionTestCase
 
 from apps.tenancy.models import Membership, Role, Tenant, User
 from . import test_mpesa as fixtures
-from .models import MpesaStkPushRequest, Payment, Receipt, TenantMpesaConfiguration
-from .mpesa_services import configure_mpesa_gateway, handle_stk_callback, initiate_stk_push
+from .models import MpesaCallbackLog, MpesaCallbackType, MpesaStkPushRequest, Payment, Receipt, TenantMpesaConfiguration
+from .mpesa_services import configure_mpesa_gateway, handle_stk_callback, initiate_stk_push, verify_mpesa_callback
 
 
 @skipUnless(connection.vendor == "postgresql", "Requires PostgreSQL transactions")
@@ -82,6 +83,59 @@ class GatewayConcurrencyTests(TransactionTestCase):
             self.assertEqual(outcomes[0][1], outcomes[1][1])
             self.assertEqual(client.return_value.stk_push.call_count, 1)
         self.assertEqual(MpesaStkPushRequest.objects.count(), 1)
+
+    def test_stuck_lock_holder_on_a_callback_fails_fast_instead_of_hanging(self):
+        """RC Area 6/5E-3 finding: an unbounded select_for_update() wait let
+        one stuck holder block a request indefinitely -- a live chaos run
+        observed a ~110s stall that never self-recovered on its own.
+        config.settings' lock_timeout plus mpesa_services.
+        _select_for_update_or_conflict turn that into a fast, clean,
+        retryable error. Proven here by holding the lock for 8s (longer
+        than the 5s lock_timeout, deliberately not set manually on either
+        connection so this exercises the real global default) and
+        confirming the waiter fails well before that, with a clear
+        message -- not a hang.
+        """
+        self.role.permissions = self.role.permissions + ["finance.mpesa.callback.verify"]
+        self.role.save(update_fields=["permissions"])
+        callback = MpesaCallbackLog.objects.create(
+            tenant=self.tenant, callback_type=MpesaCallbackType.C2B_CONFIRMATION, raw_payload={},
+        )
+        barrier = Barrier(2)
+        release_holder = Event()
+
+        def holder():
+            connections.close_all()
+            with transaction.atomic():
+                MpesaCallbackLog.objects.select_for_update().get(pk=callback.pk)
+                barrier.wait(timeout=5)
+                release_holder.wait(timeout=8)
+            connections.close_all()
+
+        def waiter():
+            connections.close_all()
+            barrier.wait(timeout=5)
+            started = time.monotonic()
+            try:
+                verify_mpesa_callback(user=self.user, tenant=self.tenant, callback_id=callback.pk, evidence="ref")
+                outcome = ("ok", None)
+            except ValidationError as error:
+                outcome = ("conflict", str(error))
+            finally:
+                elapsed = time.monotonic() - started
+                connections.close_all()
+            return outcome, elapsed
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            holder_future = pool.submit(holder)
+            waiter_future = pool.submit(waiter)
+            (status, message), elapsed = waiter_future.result(timeout=15)
+            release_holder.set()
+            holder_future.result(timeout=15)
+
+        self.assertEqual(status, "conflict")
+        self.assertIn("try again", message)
+        self.assertLess(elapsed, 7)
 
     def test_simultaneous_first_configuration_creates_one_identity(self):
         tenant = Tenant.objects.create(name="Fresh", slug="fresh")
