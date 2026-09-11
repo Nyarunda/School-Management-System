@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useLocation } from "react-router-dom";
-import { Alert, Badge, Button, Loader, Modal as MantineModal, Stack, Text, Title } from "@mantine/core";
+import { Alert, Badge, Box, Button, Group, Loader, Modal as MantineModal, Skeleton, Stack, Text, Title } from "@mantine/core";
 import { IconAlertCircle, IconInbox } from "@tabler/icons-react";
 import { ApiError } from "../api/client";
 
@@ -18,7 +18,33 @@ const glyphs:Record<string,React.ReactNode>={
 export function Icon({name,size=18}:{name:string;size?:number}){return <svg className="icon" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">{glyphs[name]??glyphs.grid}</svg>}
 export function PageHeader({eyebrow,title,description,action}:{eyebrow?:string;title:string;description?:string;action?:React.ReactNode}){return <header className="page-header"><div>{eyebrow&&<p className="eyebrow">{eyebrow}</p>}<h1>{title}</h1>{description&&<p className="page-description">{description}</p>}</div>{action&&<div className="page-actions">{action}</div>}</header>}
 export function StatusBadge({value}:{value:string|boolean|null|undefined}){const text=typeof value==="boolean"?(value?"Active":"Inactive"):(value||"Unknown");const key=text.toLowerCase();const color=/active|paid|approved|issued|sent|complete|success|present|published/.test(key)?"teal":/pending|draft|open|processing|unallocated|degraded/.test(key)?"yellow":/failed|rejected|reversed|inactive|cancel|absent|error/.test(key)?"red":"gray";return <Badge color={color} variant="light" size="sm">{text.replace(/_/g," ")}</Badge>}
-export function Loading({label="Loading records"}:{label?:string}){return <Stack className="state" align="center" gap="xs"><Loader size="sm"/><Text size="sm" c="dimmed">{label}</Text></Stack>}
+
+export function Loading({ label }: { label?: string }) {
+  if (label) {
+    return (
+      <Stack align="center" justify="center" py="xl" gap="xs">
+        <Loader size="sm" type="dots" color="indigo" />
+        <Text size="xs" fw={500} c="dimmed">
+          {label}
+        </Text>
+      </Stack>
+    );
+  }
+
+  return (
+    <Stack gap="xs" p="md">
+      <Group justify="space-between" mb={4}>
+        <Skeleton height={18} width={140} radius="xs" />
+        <Skeleton height={18} width={70} radius="xs" />
+      </Group>
+      <Skeleton height={34} radius="xs" />
+      <Skeleton height={34} radius="xs" />
+      <Skeleton height={34} radius="xs" />
+      <Skeleton height={34} radius="xs" />
+    </Stack>
+  );
+}
+
 export function Empty({title="No records found",message="Records will appear here when they are available."}:{title?:string;message?:string}){return <Stack className="state" align="center" gap={4}><IconInbox size={28}/><Title order={3} size="sm">{title}</Title><Text size="sm" c="dimmed">{message}</Text></Stack>}
 export function ErrorState({error,retry}:{error:unknown;retry?:()=>void}){const message=error instanceof ApiError?error.message:error instanceof Error?error.message:"The request could not be completed.";return <Alert className="state-error" color="red" icon={<IconAlertCircle size={18}/>} title="Unable to load this workspace">{message}{retry&&<Button display="block" mt="sm" variant="light" color="red" onClick={retry}>Try again</Button>}</Alert>}
 export function Modal({open,title,children,onClose}:{open:boolean;title:string;children:React.ReactNode;onClose():void}){return <MantineModal opened={open} onClose={onClose} title={title} centered>{children}</MantineModal>}

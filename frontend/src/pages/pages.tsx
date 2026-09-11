@@ -1,6 +1,7 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Group, NumberInput, Paper, Select, Stack, Table, Text } from "@mantine/core";
+import { Alert, Badge, Box, Button, Card, Divider, Grid, Group, NumberInput, Paper, PasswordInput, Select, SimpleGrid, Stack, Table, Text, ThemeIcon, TextInput, Title, UnstyledButton } from "@mantine/core";
+import { IconAlertCircle, IconArrowRight, IconBell, IconCalendar, IconCheck, IconFileText, IconInbox, IconLock, IconRefresh, IconSparkles, IconUser, IconUsers, IconWallet } from "@tabler/icons-react";
 import { api, Page } from "../api/client";
 import { useAccess, useAuth } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
@@ -18,15 +19,340 @@ const money=new Intl.NumberFormat("en-KE",{style:"currency",currency:"KES",maxim
 const pretty=(key:string)=>key.replace(/_/g," ").replace(/\b\w/g,(x:string)=>x.toUpperCase());
 function display(value:unknown):React.ReactNode{if(value===null||value===undefined||value==="")return <span className="quiet">—</span>;if(typeof value==="boolean")return <StatusBadge value={value}/>;if(Array.isArray(value))return value.length?`${value.length} items`:<span className="quiet">None</span>;if(typeof value==="object"){const r=value as Row;return String(r.name??r.label??r.username??r.id??"Details")};const text=String(value);if(/^(active|inactive|draft|issued|paid|pending|approved|published|failed|rejected|open|submitted|processed|unmatched|matched)$/i.test(text))return <StatusBadge value={text}/>;return text}
 
-export function LoginPage(){const {login}=useAuth();const [username,setUsername]=useState("");const [password,setPassword]=useState("");const [error,setError]=useState("");const [busy,setBusy]=useState(false);async function submit(e:FormEvent){e.preventDefault();setBusy(true);setError("");try{await login(username,password);go("/")}catch(caught){setError(caught instanceof Error?caught.message:"Sign in failed")}finally{setBusy(false)}}return <main className="auth-page"><section className="auth-brand"><div className="brand"><div className="brand-mark">S</div><div><strong>Scholaris</strong><small>School ERP</small></div></div><div><p className="eyebrow light">One school. One operating picture.</p><h1>Run the school day with confidence.</h1><p>Student records, learning, staff and finance stay connected under one secure tenant context.</p></div><div className="auth-proof"><span>Tenant isolated</span><span>Permission controlled</span><span>Audit ready</span></div></section><section className="auth-form-wrap"><form className="auth-form" onSubmit={submit}><div><p className="eyebrow">Welcome back</p><h2>Sign in to your workspace</h2><p>Use the account provided by your school administrator.</p></div>{error&&<div className="form-error" role="alert">{error}</div>}<label>Username or email<input autoFocus autoComplete="username" value={username} onChange={e=>setUsername(e.target.value)} required/></label><label>Password<input type="password" autoComplete="current-password" value={password} onChange={e=>setPassword(e.target.value)} required/></label><button className="button primary wide" disabled={busy}>{busy?"Signing in…":"Sign in"}</button><p className="auth-help">Invited to a school? Use the secure link in your invitation email.</p></form></section></main>}
+export function LoginPage() {
+  const { login } = useAuth();
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      await login(username, password);
+      go("/");
+    } catch (caught) {
+      const msg = caught instanceof Error ? caught.message : "Sign in failed";
+      setError(msg);
+      notify.error(msg, caught);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function handleDemoFill(user: string, pass: string) {
+    setUsername(user);
+    setPassword(pass);
+    setError("");
+  }
+
+  return (
+    <main className="auth-page">
+      <section className="auth-brand" style={{
+        background: "linear-gradient(135deg, #0b1329 0%, #162447 40%, #1f4068 100%)",
+        position: "relative",
+        overflow: "hidden",
+      }}>
+        <Box style={{
+          position: "absolute", top: -80, right: -80, width: 320, height: 320,
+          borderRadius: "50%", background: "radial-gradient(circle, rgba(99,102,241,0.18) 0%, rgba(0,0,0,0) 70%)",
+          pointerEvents: "none"
+        }} />
+        <Box style={{
+          position: "absolute", bottom: -60, left: -60, width: 280, height: 280,
+          borderRadius: "50%", background: "radial-gradient(circle, rgba(16,185,129,0.12) 0%, rgba(0,0,0,0) 70%)",
+          pointerEvents: "none"
+        }} />
+
+        <Stack justify="space-between" h="100%" style={{ position: "relative", zIndex: 1 }}>
+          <Group gap="sm" wrap="nowrap">
+            <Box style={{
+              width: 42, height: 42, borderRadius: 12,
+              background: "linear-gradient(145deg,#6366f1,#4338ca)",
+              display: "grid", placeItems: "center", color: "#fff", fontWeight: 900,
+              fontSize: 20, boxShadow: "0 8px 24px rgba(99,102,241,0.4)"
+            }}>S</Box>
+            <Box>
+              <Text fw={800} size="lg" c="white" style={{ letterSpacing: "-0.02em" }}>Scholaris</Text>
+              <Text size="xs" c="indigo.2" fw={500}>Next-Gen School ERP & Fintech</Text>
+            </Box>
+          </Group>
+
+          <Stack gap="md" my="auto" style={{ maxWidth: 520 }}>
+            <Badge color="indigo" variant="light" size="lg" radius="sm" style={{ width: "fit-content" }} leftSection={<IconSparkles size={14} />}>
+              Kenyan Enterprise School Operations
+            </Badge>
+
+            <Title order={1} c="white" style={{ fontSize: "2.6rem", lineHeight: 1.15, fontWeight: 800, letterSpacing: "-0.03em" }}>
+              Run the school day with complete financial & academic clarity.
+            </Title>
+
+            <Text size="sm" c="gray.3" lh={1.6}>
+              Automated M-Pesa & Bank Paybill collection, CBC assessment rubrics, 8-4-4 exam analytics, and immutable ledger audit trails—unified under one multi-tenant workspace.
+            </Text>
+
+            <Stack gap="xs" mt="sm">
+              {[
+                "Instant WhatsApp & SMS Fee Receipts",
+                "Zero-Reconciliation Automated C2B Payments",
+                "Longitudinal Academic Trajectory & Report Cards",
+                "Campus-Scoped Access & Audit Trails",
+              ].map((feat) => (
+                <Group gap="xs" key={feat}>
+                  <ThemeIcon size={20} radius="xl" color="indigo" variant="light">
+                    <IconCheck size={13} />
+                  </ThemeIcon>
+                  <Text size="xs" c="gray.2" fw={500}>{feat}</Text>
+                </Group>
+              ))}
+            </Stack>
+          </Stack>
+
+          <Group gap="xs" wrap="wrap">
+            <Badge variant="outline" color="gray" c="gray.4" radius="xl" size="sm">Multi-Tenant Isolated</Badge>
+            <Badge variant="outline" color="gray" c="gray.4" radius="xl" size="sm">RBAC Protected</Badge>
+            <Badge variant="outline" color="gray" c="gray.4" radius="xl" size="sm">Audit Ready</Badge>
+          </Group>
+        </Stack>
+      </section>
+
+      <section className="auth-form-wrap">
+        <Paper p="xl" radius="md" withBorder style={{ width: "min(420px, 100%)", boxShadow: "0 12px 36px rgba(0,0,0,0.06)" }}>
+          <form onSubmit={submit}>
+            <Stack gap="md">
+              <Box>
+                <Text size="xs" fw={700} tt="uppercase" c="indigo" style={{ letterSpacing: "0.08em" }}>
+                  Workspace Sign In
+                </Text>
+                <Title order={2} size="h3" fw={800} mt={2}>
+                  Welcome back
+                </Title>
+                <Text size="xs" c="dimmed" mt={2}>
+                  Enter your credentials provided by your school administrator.
+                </Text>
+              </Box>
+
+              {error && (
+                <Alert color="red" variant="light" title="Authentication Error" icon={<IconAlertCircle size={16} />}>
+                  {error}
+                </Alert>
+              )}
+
+              <TextInput
+                label="Username or Email"
+                placeholder="e.g. demo-admin"
+                autoFocus
+                autoComplete="username"
+                value={username}
+                onChange={(e) => setUsername(e.currentTarget.value)}
+                required
+                leftSection={<IconUser size={16} color="var(--mantine-color-dimmed)" />}
+              />
+
+              <PasswordInput
+                label="Password"
+                placeholder="Enter your password"
+                autoComplete="current-password"
+                value={password}
+                onChange={(e) => setPassword(e.currentTarget.value)}
+                required
+                leftSection={<IconLock size={16} color="var(--mantine-color-dimmed)" />}
+              />
+
+              <Button type="submit" color="indigo" size="sm" radius="sm" fullWidth loading={busy} rightSection={<IconArrowRight size={16} />}>
+                Sign in to workspace
+              </Button>
+
+              <Divider label="Quick Demo Access" labelPosition="center" my="xs" />
+
+              <Group justify="center" gap="xs">
+                <Button variant="default" size="xs" onClick={() => handleDemoFill("demo-admin", "demo12345")}>
+                  ⚡ Fill Demo Admin
+                </Button>
+                <Button variant="default" size="xs" onClick={() => handleDemoFill("demo-bursar", "demo12345")}>
+                  ⚡ Fill Demo Bursar
+                </Button>
+              </Group>
+
+              <Text size="xs" c="dimmed" ta="center" mt="xs">
+                Invited to a school? Use the link in your email invitation.
+              </Text>
+            </Stack>
+          </form>
+        </Paper>
+      </section>
+    </main>
+  );
+}
+
 
 export function InvitePage(){const token=new URLSearchParams(location.search).get("token")??"";const [password,setPassword]=useState("");const [message,setMessage]=useState("");const [busy,setBusy]=useState(false);async function submit(e:FormEvent){e.preventDefault();setBusy(true);try{const r=await api<{token:string}>("/auth/invites/accept/",{method:"POST",tenant:false,body:JSON.stringify({token,password})});localStorage.setItem("school-erp-token",r.token);location.href="/"}catch(e){setMessage(e instanceof Error?e.message:"Invitation could not be accepted")}finally{setBusy(false)}}return <main className="center-page"><form className="auth-form card" onSubmit={submit}><div className="brand standalone"><div className="brand-mark">S</div><strong>Scholaris</strong></div><div><p className="eyebrow">School invitation</p><h2>Set up your access</h2><p>Choose a password if this is your first Scholaris account. Existing users may leave it blank.</p></div>{!token&&<div className="form-error">This invitation link has no token.</div>}{message&&<div className="form-error">{message}</div>}<label>Password<input type="password" autoComplete="new-password" value={password} onChange={e=>setPassword(e.target.value)}/></label><button className="button primary wide" disabled={!token||busy}>{busy?"Activating…":"Accept invitation"}</button></form></main>}
 
-function Metric({label,value,meta,tone="blue"}:{label:string;value:React.ReactNode;meta:string;tone?:string}){return <article className="metric card"><span className={`metric-icon ${tone}`}><Icon name={tone==="green"?"check":tone==="amber"?"inbox":"chart"}/></span><div><p>{label}</p><strong>{value}</strong><small>{meta}</small></div></article>}
+function MetricCard({ label, value, meta, tone, icon: IconComponent }: { label: string; value: React.ReactNode; meta: string; tone: "blue" | "teal" | "yellow" | "violet"; icon: any }) {
+  return (
+    <Paper p="md" radius="md" withBorder style={{ boxShadow: "0 1px 3px rgba(0,0,0,0.04)" }}>
+      <Group justify="space-between" align="flex-start" wrap="nowrap">
+        <Stack gap={2}>
+          <Text size="xs" fw={700} c="dimmed" tt="uppercase" style={{ letterSpacing: "0.05em" }}>
+            {label}
+          </Text>
+          <Text size="xl" fw={800} c="dark.8">
+            {value}
+          </Text>
+          <Text size="xs" c="dimmed">
+            {meta}
+          </Text>
+        </Stack>
+        <ThemeIcon size={38} radius="md" color={tone} variant="light">
+          <IconComponent size={20} />
+        </ThemeIcon>
+      </Group>
+    </Paper>
+  );
+}
 
-export function DashboardPage(){const {session}=useAuth();const {can}=useAccess();const students=useQuery({queryKey:["students-count"],queryFn:()=>api<Page<Row>>("/students/",{params:{page_size:1}}),enabled:can("students.view")});const invoices=useQuery({queryKey:["invoice-count"],queryFn:()=>api<Page<Row>>("/finance/invoices/",{params:{page_size:5}}),enabled:can("finance.invoice.view")});const payments=useQuery({queryKey:["payment-count"],queryFn:()=>api<Page<Row>>("/finance/payments/",{params:{page_size:5}}),enabled:can("finance.payment.view")});const incoming=useQuery({queryKey:["incoming-count"],queryFn:()=>api<Page<Row>>("/finance/incoming-payments/",{params:{page_size:5}}),enabled:can("finance.reconciliation.view")});return <><PageHeader eyebrow={session?.active_tenant?.name} title={`Good day, ${session?.user?.name.split(" ")[0]??""}`} description="Here is the current operating picture for your school." action={<button className="button secondary" onClick={()=>location.reload()}>Refresh</button>}/><div className="metrics"><Metric label="Students" value={students.data?.count??"—"} meta="Visible in your campus scope"/><Metric label="Invoices" value={invoices.data?.count??"—"} meta="Billing records" tone="green"/><Metric label="Payments" value={payments.data?.count??"—"} meta="Recorded transactions"/><Metric label="Needs matching" value={incoming.data?.count??"—"} meta="Incoming payment queue" tone="amber"/></div><div className="dashboard-grid"><section className="card panel-card"><div className="card-heading"><div><h2>Recent invoices</h2><p>Latest billing activity</p></div><button className="text-link" onClick={()=>go("/finance/invoices")}>View all →</button></div><MiniRows rows={invoices.data?.results??[]} primary="invoice_number" secondary="status" value="total"/></section><section className="card panel-card"><div className="card-heading"><div><h2>Work queue</h2><p>Items that may need attention</p></div></div><div className="queue-list"><button onClick={()=>go("/finance/incoming")}><span className="queue-icon amber"><Icon name="inbox"/></span><span><strong>Incoming payments</strong><small>Review and match receipts</small></span><b>{incoming.data?.count??"—"}</b></button><button onClick={()=>go("/communications/inbox")}><span className="queue-icon blue"><Icon name="bell"/></span><span><strong>Notifications</strong><small>Open your personal inbox</small></span><b>→</b></button><button onClick={()=>go("/leave")}><span className="queue-icon green"><Icon name="calendar"/></span><span><strong>Leave requests</strong><small>Review current requests</small></span><b>→</b></button></div></section></div></>}
+export function DashboardPage() {
+  const { session } = useAuth();
+  const { can } = useAccess();
+  const students = useQuery({
+    queryKey: ["students-count"],
+    queryFn: () => api<Page<Row>>("/students/", { params: { page_size: 1 } }),
+    enabled: can("students.view"),
+  });
+  const invoices = useQuery({
+    queryKey: ["invoice-count"],
+    queryFn: () => api<Page<Row>>("/finance/invoices/", { params: { page_size: 5 } }),
+    enabled: can("finance.invoice.view"),
+  });
+  const payments = useQuery({
+    queryKey: ["payment-count"],
+    queryFn: () => api<Page<Row>>("/finance/payments/", { params: { page_size: 5 } }),
+    enabled: can("finance.payment.view"),
+  });
+  const incoming = useQuery({
+    queryKey: ["incoming-count"],
+    queryFn: () => api<Page<Row>>("/finance/incoming-payments/", { params: { page_size: 5 } }),
+    enabled: can("finance.reconciliation.view"),
+  });
 
-function MiniRows({rows,primary,secondary,value}:{rows:Row[];primary:string;secondary:string;value:string}){if(!rows.length)return <Empty title="No recent activity" message="New records will appear here."/>;return <div className="mini-rows">{rows.slice(0,5).map((row,i)=><div key={String(row.id??i)}><span><strong>{display(row[primary])}</strong><small>{display(row[secondary])}</small></span><b>{value==="total"?money.format(Number(row[value]??0)):display(row[value])}</b></div>)}</div>}
+  const firstName = session?.user?.name.split(" ")[0] ?? "";
+
+  return (
+    <Stack gap="lg">
+      <WorkspaceHeader
+        eyebrow={session?.active_tenant?.name ?? "School Workspace"}
+        title={`Good day, ${firstName}`}
+        description="Here is the live operating picture for your school workspace."
+        action={
+          <Button variant="default" size="xs" leftSection={<IconRefresh size={14} />} onClick={() => location.reload()}>
+            Refresh workspace
+          </Button>
+        }
+      />
+
+      <SimpleGrid cols={{ base: 1, sm: 2, md: 4 }} spacing="md">
+        <MetricCard label="Students" value={students.data?.count ?? "—"} meta="Enrolled in campus scope" tone="blue" icon={IconUsers} />
+        <MetricCard label="Invoices" value={invoices.data?.count ?? "—"} meta="Billing records issued" tone="teal" icon={IconFileText} />
+        <MetricCard label="Payments" value={payments.data?.count ?? "—"} meta="Recorded fee receipts" tone="violet" icon={IconWallet} />
+        <MetricCard label="Needs Matching" value={incoming.data?.count ?? "—"} meta="Incoming payment queue" tone="yellow" icon={IconInbox} />
+      </SimpleGrid>
+
+      <Grid>
+        <Grid.Col span={{ base: 12, md: 7 }}>
+          <Paper p="md" radius="md" withBorder h="100%">
+            <Group justify="space-between" mb="sm">
+              <Box>
+                <Title order={3} size="h4" fw={700}>Recent Invoices</Title>
+                <Text size="xs" c="dimmed">Latest billing activity</Text>
+              </Box>
+              <Button variant="subtle" size="xs" color="indigo" rightSection={<IconArrowRight size={14} />} onClick={() => go("/finance/invoices")}>
+                View all
+              </Button>
+            </Group>
+            <MiniRows rows={invoices.data?.results ?? []} primary="invoice_number" secondary="status" value="total" />
+          </Paper>
+        </Grid.Col>
+
+        <Grid.Col span={{ base: 12, md: 5 }}>
+          <Paper p="md" radius="md" withBorder h="100%">
+            <Box mb="sm">
+              <Title order={3} size="h4" fw={700}>Action Queue</Title>
+              <Text size="xs" c="dimmed">Operational tasks needing attention</Text>
+            </Box>
+            <Stack gap="xs">
+              <UnstyledButton onClick={() => go("/finance/incoming")} style={{ borderRadius: 8, padding: 10, border: "1px solid var(--mantine-color-gray-2)", transition: "background 150ms ease" }}>
+                <Group justify="space-between" wrap="nowrap">
+                  <Group gap="sm" wrap="nowrap">
+                    <ThemeIcon size={34} radius="md" color="yellow" variant="light">
+                      <IconInbox size={18} />
+                    </ThemeIcon>
+                    <Box>
+                      <Text size="sm" fw={600}>Incoming Payments</Text>
+                      <Text size="xs" c="dimmed">Review and match incoming receipts</Text>
+                    </Box>
+                  </Group>
+                  <Badge color="yellow" variant="light">{incoming.data?.count ?? "—"}</Badge>
+                </Group>
+              </UnstyledButton>
+
+              <UnstyledButton onClick={() => go("/communications/inbox")} style={{ borderRadius: 8, padding: 10, border: "1px solid var(--mantine-color-gray-2)" }}>
+                <Group justify="space-between" wrap="nowrap">
+                  <Group gap="sm" wrap="nowrap">
+                    <ThemeIcon size={34} radius="md" color="indigo" variant="light">
+                      <IconBell size={18} />
+                    </ThemeIcon>
+                    <Box>
+                      <Text size="sm" fw={600}>Notifications</Text>
+                      <Text size="xs" c="dimmed">Open your personal inbox</Text>
+                    </Box>
+                  </Group>
+                  <IconArrowRight size={16} color="var(--mantine-color-dimmed)" />
+                </Group>
+              </UnstyledButton>
+
+              <UnstyledButton onClick={() => go("/leave")} style={{ borderRadius: 8, padding: 10, border: "1px solid var(--mantine-color-gray-2)" }}>
+                <Group justify="space-between" wrap="nowrap">
+                  <Group gap="sm" wrap="nowrap">
+                    <ThemeIcon size={34} radius="md" color="teal" variant="light">
+                      <IconCalendar size={18} />
+                    </ThemeIcon>
+                    <Box>
+                      <Text size="sm" fw={600}>Leave Requests</Text>
+                      <Text size="xs" c="dimmed">Review staff leave submissions</Text>
+                    </Box>
+                  </Group>
+                  <IconArrowRight size={16} color="var(--mantine-color-dimmed)" />
+                </Group>
+              </UnstyledButton>
+            </Stack>
+          </Paper>
+        </Grid.Col>
+      </Grid>
+    </Stack>
+  );
+}
+
+function MiniRows({ rows, primary, secondary, value }: { rows: Row[]; primary: string; secondary: string; value: string }) {
+  if (!rows.length) return <Empty title="No recent billing activity" message="New invoices will appear here." />;
+  return (
+    <Stack gap={0}>
+      {rows.slice(0, 5).map((row, i) => (
+        <Group key={String(row.id ?? i)} justify="space-between" py="xs" style={{ borderBottom: i < 4 ? "1px solid var(--mantine-color-gray-1)" : undefined }}>
+          <Box>
+            <Text size="sm" fw={600}>{display(row[primary])}</Text>
+            <Box mt={2}>{display(row[secondary])}</Box>
+          </Box>
+          <Text size="sm" fw={700}>
+            {value === "total" ? money.format(Number(row[value] ?? 0)) : display(row[value])}
+          </Text>
+        </Group>
+      ))}
+    </Stack>
+  );
+}
+
 
 export type ResourceConfig={title:string;description:string;endpoint:string;permission?:string;columns:string[];eyebrow?:string;actionLabel?:string};
 export function ResourcePage({config}:{config:ResourceConfig}){const [page,setPage]=useState(1);const [search,setSearch]=useState("");const query=useQuery({queryKey:[config.endpoint,page,search],queryFn:()=>api<Page<Row>|Row[]>(config.endpoint,{params:{page,search:search||undefined}})});const data=Array.isArray(query.data)?query.data:query.data?.results??[];const count=Array.isArray(query.data)?query.data.length:query.data?.count??0;return <><PageHeader eyebrow={config.eyebrow} title={config.title} description={config.description} action={config.actionLabel?<button className="button primary">+ {config.actionLabel}</button>:undefined}/><section className="card data-card"><div className="table-tools"><label className="search-field"><Icon name="search"/><input placeholder={`Search ${config.title.toLowerCase()}`} value={search} onChange={e=>{setSearch(e.target.value);setPage(1)}}/></label><span>{count.toLocaleString()} records</span></div>{query.isLoading?<Loading/>:query.isError?<ErrorState error={query.error} retry={()=>void query.refetch()}/>:!data.length?<Empty/>:<div className="table-scroll"><table><thead><tr>{config.columns.map(column=><th key={column}>{pretty(column)}</th>)}</tr></thead><tbody>{data.map((row,index)=><tr key={String(row.id??index)}>{config.columns.map(column=><td key={column}>{display(row[column])}</td>)}</tr>)}</tbody></table></div>} {!Array.isArray(query.data)&&query.data&&<div className="pagination"><button disabled={!query.data.previous} onClick={()=>setPage(p=>p-1)}>Previous</button><span>Page {page}</span><button disabled={!query.data.next} onClick={()=>setPage(p=>p+1)}>Next</button></div>}</section></>}

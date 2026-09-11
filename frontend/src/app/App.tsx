@@ -1,4 +1,5 @@
 import { lazy, Suspense } from "react";
+import { Box, Loader, Stack, Text } from "@mantine/core";
 import { AppShell, PlatformShell } from "../components/Shell";
 import { Loading, usePath } from "../components/ui";
 import { DashboardPage, EmployeePage, InvitePage, LoginPage, MissingPage, PlatformHome, ResourcePage, resources, SetupPage, StaffPage, StudentPage, StudentsPage } from "../pages/pages";
@@ -26,7 +27,24 @@ const UsersPage=lazy(()=>import("../features/tenancy").then(m=>({default:m.Users
 export function App(){
  const path=usePath();const {session,loading,platformAccess}=useAuth();
  if(path==="/accept-invite")return <InvitePage/>;
- if(loading)return <main className="boot-screen"><div className="brand standalone"><div className="brand-mark">S</div><strong>Scholaris</strong></div><Loading label="Opening your workspace"/></main>;
+ if(loading)return (
+  <main className="boot-screen">
+   <Stack align="center" gap="md">
+    <Box style={{
+     width: 50, height: 50, borderRadius: 14,
+     background: "linear-gradient(145deg,#6366f1,#4338ca)",
+     display: "grid", placeItems: "center", color: "#fff", fontWeight: 900,
+     fontSize: 24, boxShadow: "0 8px 24px rgba(99,102,241,0.4)"
+    }}>S</Box>
+    <Box>
+     <Text fw={800} size="xl" c="white" style={{ letterSpacing: "-0.02em" }}>Scholaris</Text>
+     <Text size="xs" c="indigo.2" fw={500}>School ERP & Fintech</Text>
+    </Box>
+    <Loader type="dots" color="indigo" size="md" mt="xs" />
+    <Text size="xs" c="gray.4" fw={500}>Opening your workspace...</Text>
+   </Stack>
+  </main>
+ );
  if(!session)return <LoginPage/>;
  if(path.startsWith("/platform")){
   if(!platformAccess)return <AppShell><MissingPage/></AppShell>;

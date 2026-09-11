@@ -7,6 +7,17 @@ COPY requirements/base.txt requirements/base.txt
 RUN pip install --no-cache-dir -r requirements/base.txt
 
 COPY . .
+
+# Runs as root by default otherwise -- a container escape would then hand an
+# attacker root on the host's container runtime, not just app-level access.
+# Fixed UID/GID (not just a name) because some platforms (e.g. Kubernetes
+# PodSecurityContext) match on numeric id, and a byte-for-byte reproducible
+# id is easier to reason about across environments than "whatever useradd
+# picked this build."
+RUN groupadd --gid 1000 app && useradd --uid 1000 --gid app --home-dir /app --no-create-home app \
+    && chown -R app:app /app
+USER app
+
 EXPOSE 8000
 
 # Production-safe default -- Django's own docs say runserver must never be
