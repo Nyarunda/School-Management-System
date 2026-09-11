@@ -184,20 +184,41 @@ def generate_invoice(*, user, tenant, assignment):
         return replay
 
 
-def bulk_assign_fee_structure(*, user, tenant, fee_structure, class_group=None):
+def _issue_if_requested(*, user, tenant, invoice, issue):
+    """Shared by both bulk actions below: a freshly (or previously) generated
+    invoice is still DRAFT -- no outstanding balance exists until it's
+    issued (issue_invoice is what actually posts the debit ledger entry).
+    Only attempt issuing a still-DRAFT invoice; a replay against an
+    already-issued one would otherwise raise "Only draft invoices can be
+    issued" on every re-run.
+    """
+    if not issue or invoice.status != InvoiceStatus.DRAFT:
+        return False
+    issue_invoice(user=user, tenant=tenant, invoice=invoice)
+    return True
+
+
+def bulk_assign_fee_structure(*, user, tenant, fee_structure, class_group=None, issue=False):
     """Assign fee_structure -- and generate the invoice -- for every actively
     enrolled student in the structure's own academic year + level (or, if
     class_group is given, just that one class within it). The individual
     assign_fee_structure/generate_invoice calls above already require one
     click each; this is the rollout action once a structure is approved.
 
-    One student's invoice failing (e.g. a structure line was later
-    deactivated) does not abort the rest of the batch -- each failure is
-    collected and returned rather than raised, since a partial success is
+    issue=True also posts (issues) each invoice in the same pass -- the
+    generated invoice is a DRAFT by itself and carries no outstanding
+    balance until issued, so a caller who wants students to actually owe
+    money after this call, not just have a prepared invoice, sets this.
+
+    One student's invoice (or issue) failing (e.g. a structure line was
+    later deactivated) does not abort the rest of the batch -- each failure
+    is collected and returned rather than raised, since a partial success is
     far more useful here than an all-or-nothing rollback for a run that may
     touch hundreds of students.
     """
     require_permission(user=user, tenant=tenant, permission="finance.invoice.create")
+    if issue:
+        require_permission(user=user, tenant=tenant, permission="finance.invoice.issue")
     validate_same_tenant(tenant=tenant, fee_structure=fee_structure)
     if not fee_structure.is_approved:
         raise ValidationError("Only approved fee structures can be assigned")
@@ -216,6 +237,7 @@ def bulk_assign_fee_structure(*, user, tenant, fee_structure, class_group=None):
     students_matched = 0
     assignments_created = 0
     invoices_created = 0
+    invoices_issued = 0
     failures = []
     for enrollment in enrollments:
         students_matched += 1
@@ -229,29 +251,41 @@ def bulk_assign_fee_structure(*, user, tenant, fee_structure, class_group=None):
             assignments_created += 1
         had_invoice = Invoice.objects.filter(tenant=tenant, assignment=assignment).exists()
         try:
-            generate_invoice(user=user, tenant=tenant, assignment=assignment)
+            invoice = generate_invoice(user=user, tenant=tenant, assignment=assignment)
         except ValidationError as error:
             failures.append({"student": enrollment.student.full_name, "reason": "; ".join(error.messages)})
             continue
         if not had_invoice:
             invoices_created += 1
+        try:
+            if _issue_if_requested(user=user, tenant=tenant, invoice=invoice, issue=issue):
+                invoices_issued += 1
+        except ValidationError as error:
+            failures.append({"student": enrollment.student.full_name, "reason": f"Generated but not issued: {'; '.join(error.messages)}"})
     return {
         "students_matched": students_matched,
         "assignments_created": assignments_created,
         "invoices_created": invoices_created,
+        "invoices_issued": invoices_issued,
         "failures": failures,
     }
 
 
-def bulk_generate_invoices_for_term(*, user, tenant, term):
+def bulk_generate_invoices_for_term(*, user, tenant, term, issue=False):
     """Sweep every active fee assignment whose structure belongs to `term`
     and generate the invoice if it doesn't already have one. Unlike
     bulk_assign_fee_structure above, this is invoice-only and spans every
     class/level in the term at once -- it catches up any assignment however
     it was created (individually, or via bulk_assign_fee_structure for a
     different class), so it's the "close out the term's billing" action.
+
+    issue=True also posts (issues) whatever is still DRAFT -- see
+    _issue_if_requested above for why generating alone leaves the student's
+    balance untouched.
     """
     require_permission(user=user, tenant=tenant, permission="finance.invoice.create")
+    if issue:
+        require_permission(user=user, tenant=tenant, permission="finance.invoice.issue")
     validate_same_tenant(tenant=tenant, term=term)
     assignments = StudentFeeAssignment.objects.filter(
         tenant=tenant,
@@ -260,20 +294,27 @@ def bulk_generate_invoices_for_term(*, user, tenant, term):
     ).select_related("student", "fee_structure")
     assignments_matched = 0
     invoices_created = 0
+    invoices_issued = 0
     failures = []
     for assignment in assignments:
         assignments_matched += 1
         had_invoice = Invoice.objects.filter(tenant=tenant, assignment=assignment).exists()
         try:
-            generate_invoice(user=user, tenant=tenant, assignment=assignment)
+            invoice = generate_invoice(user=user, tenant=tenant, assignment=assignment)
         except ValidationError as error:
             failures.append({"student": assignment.student.full_name, "reason": "; ".join(error.messages)})
             continue
         if not had_invoice:
             invoices_created += 1
+        try:
+            if _issue_if_requested(user=user, tenant=tenant, invoice=invoice, issue=issue):
+                invoices_issued += 1
+        except ValidationError as error:
+            failures.append({"student": assignment.student.full_name, "reason": f"Generated but not issued: {'; '.join(error.messages)}"})
     return {
         "assignments_matched": assignments_matched,
         "invoices_created": invoices_created,
+        "invoices_issued": invoices_issued,
         "failures": failures,
     }
 

@@ -21,8 +21,8 @@ type AcademicTerm={id:string;academic_year:string;name:string;starts_on:string;e
 type PaymentMethod={id:string;name:string;code:string;is_active:boolean};
 type Structure={id:string;name:string;academic_year:string;academic_level:string;term:string;is_active:boolean;is_approved:boolean;lines:Line[]};
 type ClassGroupOption={id:string;name:string;code:string;stream:string;academic_level:string};
-type BulkAssignResult={students_matched:number;assignments_created:number;invoices_created:number;failures:{student:string;reason:string}[]};
-type BulkTermInvoiceResult={assignments_matched:number;invoices_created:number;failures:{student:string;reason:string}[]};
+type BulkAssignResult={students_matched:number;assignments_created:number;invoices_created:number;invoices_issued:number;failures:{student:string;reason:string}[]};
+type BulkTermInvoiceResult={assignments_matched:number;invoices_created:number;invoices_issued:number;failures:{student:string;reason:string}[]};
 type Assignment={id:string;student:string;student_name:string;fee_structure:string;fee_structure_name:string;status:string;assigned_at:string};
 type Invoice={id:string;invoice_number:string;student:string;assignment:string;status:string;subtotal:string;discount_total:string;total:string;issued_at:string|null;created_at:string};
 type Allocation={id:string;payment:string;invoice:string;amount:string;allocated_at:string};
@@ -90,17 +90,23 @@ export function FeeStructuresPage(){
 	// The catalogue endpoint (not attendance's teacher-scoped one) so a bursar
 	// sees every class in the level, not just ones they teach.
 	const [bulkClassGroup,setBulkClassGroup]=useState("");
+	// Generating an invoice alone leaves it DRAFT -- no outstanding balance
+	// posts until it's issued (see issue_invoice). Offering this here closes
+	// the loop in one click: without it, a bursar doing a mass rollout would
+	// still have to open every invoice individually just to bill it.
+	const [bulkIssue,setBulkIssue]=useState(true);
+	const canIssue=can("finance.invoice.issue");
 	const classGroups=useQuery({queryKey:["class-groups-catalogue",selected?.academic_level],queryFn:()=>api<Page<ClassGroupOption>>("/academics/class-groups/catalogue/",{params:{academic_level:selected!.academic_level,page_size:100}}),enabled:!!selected?.is_approved});
 	const bulkAssign=useMutation({
-		mutationFn:()=>api<BulkAssignResult>(`/finance/fee-structures/${selected!.id}/bulk-assign/`,{method:"POST",body:JSON.stringify(bulkClassGroup?{class_group:bulkClassGroup}:{})}),
+		mutationFn:()=>api<BulkAssignResult>(`/finance/fee-structures/${selected!.id}/bulk-assign/`,{method:"POST",body:JSON.stringify({...(bulkClassGroup?{class_group:bulkClassGroup}:{}),issue:canIssue&&bulkIssue})}),
 		onSuccess:result=>{
 			void qc.invalidateQueries({queryKey:["fee-structures"]});
 			void qc.invalidateQueries({queryKey:["assignments"]});
 			void qc.invalidateQueries({queryKey:["invoices"]});
 			setSelected(null);
 			setBulkClassGroup("");
-			const summary=`Matched ${result.students_matched} students -- ${result.assignments_created} new assignments, ${result.invoices_created} new invoices`;
-			if(result.failures.length)notify.warning(`${summary}. ${result.failures.length} invoice(s) failed: ${result.failures.map(f=>`${f.student} (${f.reason})`).join("; ")}`);
+			const summary=`Matched ${result.students_matched} students -- ${result.assignments_created} new assignments, ${result.invoices_created} new invoices${canIssue&&bulkIssue?`, ${result.invoices_issued} posted (billed)`:""}`;
+			if(result.failures.length)notify.warning(`${summary}. ${result.failures.length} failed: ${result.failures.map(f=>`${f.student} (${f.reason})`).join("; ")}`);
 			else notify.success(summary);
 		},
 		onError:error=>notify.error("Bulk assignment could not be completed",error),
@@ -144,6 +150,7 @@ export function FeeStructuresPage(){
 				{selected?.is_approved&&can("finance.invoice.create")&&<Stack gap="sm" mt="sm">
 					<Text size="sm" c="dimmed">Assign this structure and generate invoices for every actively enrolled student in this level, or just one class.</Text>
 					<Select label="Class" placeholder={classGroups.isLoading?"Loading classes…":"Entire level (every class)"} clearable data={classGroups.data?.results.map(c=>({value:c.id,label:`${c.name}${c.stream?" · "+c.stream:""}`}))??[]} value={bulkClassGroup||null} onChange={value=>setBulkClassGroup(value??"")}/>
+					{canIssue&&<Checkbox label="Post (issue) the invoices immediately -- students will owe this balance right away" checked={bulkIssue} onChange={e=>setBulkIssue(e.currentTarget.checked)}/>}
 					<Button disabled={bulkAssign.isPending} onClick={()=>bulkAssign.mutate()}>{bulkClassGroup?"Assign & invoice this class":"Assign & invoice entire level"}</Button>
 				</Stack>}
 				{selected&&!selected.is_approved&&canEdit&&<Stack gap="sm" mt="sm">
@@ -189,14 +196,18 @@ export function AssignmentsPage(){
 	// or via a fee structure's own Assign & invoice bulk action).
 	const [termOpen,setTermOpen]=useState(false);
 	const [generateTerm,setGenerateTerm]=useState("");
+	// Same reasoning as FeeStructuresPage's bulk-assign checkbox: a generated
+	// invoice is DRAFT and carries no outstanding balance until issued.
+	const [termIssue,setTermIssue]=useState(true);
+	const canIssue=can("finance.invoice.issue");
 	const generateForTerm=useMutation({
-		mutationFn:()=>api<BulkTermInvoiceResult>(`/finance/terms/${generateTerm}/generate-invoices/`,{method:"POST"}),
+		mutationFn:()=>api<BulkTermInvoiceResult>(`/finance/terms/${generateTerm}/generate-invoices/`,{method:"POST",body:JSON.stringify({issue:canIssue&&termIssue})}),
 		onSuccess:result=>{
 			void qc.invalidateQueries({queryKey:["assignments"]});
 			void qc.invalidateQueries({queryKey:["invoices"]});
 			setTermOpen(false);
 			setGenerateTerm("");
-			const summary=`Checked ${result.assignments_matched} assignments -- ${result.invoices_created} new invoices`;
+			const summary=`Checked ${result.assignments_matched} assignments -- ${result.invoices_created} new invoices${canIssue&&termIssue?`, ${result.invoices_issued} posted (billed)`:""}`;
 			if(result.failures.length)notify.warning(`${summary}. ${result.failures.length} failed: ${result.failures.map(f=>`${f.student} (${f.reason})`).join("; ")}`);
 			else notify.success(summary);
 		},
@@ -220,6 +231,7 @@ export function AssignmentsPage(){
 		<ActionDialog open={termOpen} title="Generate invoices for term" description="Generates an invoice for every active fee assignment in the chosen term that doesn't already have one, across every class and level." confirmLabel="Generate invoices" busy={generateForTerm.isPending} onClose={()=>setTermOpen(false)} onSubmit={e=>{e.preventDefault();if(generateTerm)generateForTerm.mutate()}}>
 			<Stack gap="sm">
 				<Select label="Term" required placeholder="Select term" data={terms.data?.results.map(t=>({value:t.id,label:t.name}))??[]} value={generateTerm||null} onChange={value=>setGenerateTerm(value??"")}/>
+				{canIssue&&<Checkbox label="Post (issue) the invoices immediately -- students will owe this balance right away" checked={termIssue} onChange={e=>setTermIssue(e.currentTarget.checked)}/>}
 			</Stack>
 		</ActionDialog>
 

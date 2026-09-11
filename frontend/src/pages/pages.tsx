@@ -368,15 +368,47 @@ type StudentFinanceSummary={
 	recent_payments:{id:string;payment_method:string;amount:string;status:string;received_at:string;receipt:{receipt_number:string}|null;unallocated_amount:string}[];
 	recent_ledger_entries:{id:string;entry_type:string;amount:string;posted_at:string}[];
 };
-function StudentFinancePanel({query}:{query:{isLoading:boolean;isError:boolean;error:unknown;data?:StudentFinanceSummary}}){
+type FeeStatementRow={entry_date:string;description:string;debit:string;credit:string;running_balance:string};
+function FeeStatementDialog({studentId,open,onClose}:{studentId:string;open:boolean;onClose:()=>void}){
+	const [asOf,setAsOf]=useState(()=>new Date().toISOString().slice(0,10));
+	const [page,setPage]=useState(1);
+	const statement=useQuery({
+		queryKey:["fee-statement",studentId,asOf,page],
+		queryFn:()=>api<{columns:[string,string][];rows:FeeStatementRow[];has_more:boolean}>("/reports/finance.fee_statement/preview/",{params:{student_id:studentId,as_of:asOf,page,page_size:25}}),
+		enabled:open,
+	});
+	return <ActionDialog open={open} title="Fee statement" description="A running balance of every invoice, credit note, payment allocation and reversal posted for this student, as of the chosen date." confirmLabel="Close" onClose={onClose} onSubmit={e=>{e.preventDefault();onClose()}}>
+		<Stack gap="sm">
+			<TextInput type="date" label="As of" value={asOf} onChange={e=>{setAsOf(e.currentTarget.value);setPage(1)}}/>
+			{statement.isLoading?<Loading label="Loading statement"/>:statement.isError?<ErrorState error={statement.error} retry={()=>void statement.refetch()}/>:
+				!statement.data?.rows.length?<Empty title="No activity" message="No ledger activity has posted for this student as of this date."/>:
+				<Stack gap="xs">
+					<Table.ScrollContainer minWidth={480}>
+						<Table withTableBorder verticalSpacing="xs">
+							<Table.Thead><Table.Tr><Table.Th>Date</Table.Th><Table.Th>Description</Table.Th><Table.Th>Debit</Table.Th><Table.Th>Credit</Table.Th><Table.Th>Balance</Table.Th></Table.Tr></Table.Thead>
+							<Table.Tbody>{statement.data.rows.map((row,index)=><Table.Tr key={index}><Table.Td>{whenDate(row.entry_date)}</Table.Td><Table.Td>{row.description||"—"}</Table.Td><Table.Td>{Number(row.debit)?kes.format(Number(row.debit)):"—"}</Table.Td><Table.Td>{Number(row.credit)?kes.format(Number(row.credit)):"—"}</Table.Td><Table.Td fw={600}>{kes.format(Number(row.running_balance))}</Table.Td></Table.Tr>)}</Table.Tbody>
+						</Table>
+					</Table.ScrollContainer>
+					<Group justify="flex-end">
+						<Button size="xs" variant="default" disabled={page<=1} onClick={()=>setPage(p=>p-1)}>Previous</Button>
+						<Text size="xs" c="dimmed">Page {page}</Text>
+						<Button size="xs" variant="default" disabled={!statement.data.has_more} onClick={()=>setPage(p=>p+1)}>Next</Button>
+					</Group>
+				</Stack>}
+		</Stack>
+	</ActionDialog>;
+}
+function StudentFinancePanel({studentId,query}:{studentId:string;query:{isLoading:boolean;isError:boolean;error:unknown;data?:StudentFinanceSummary}}){
+	const {can}=useAccess();
 	const paymentMethods=useQuery({queryKey:["payment-methods-lookup"],queryFn:()=>api<Page<{id:string;name:string}>>("/finance/payment-methods/",{params:{page_size:100}}),enabled:!!query.data});
 	const methodName=(id:string)=>paymentMethods.data?.results.find(m=>m.id===id)?.name??id;
+	const [statementOpen,setStatementOpen]=useState(false);
 	if(query.isLoading)return <Loading label="Loading finance summary"/>;
 	if(query.isError)return <ErrorState error={query.error}/>;
 	if(!query.data)return <Empty/>;
 	const data=query.data;
 	return <Stack gap="lg">
-		<KeyValueSection title="Balance">
+		<KeyValueSection title="Balance" action={can("reports.finance.view")?<Button size="xs" variant="default" onClick={()=>setStatementOpen(true)}>Fee statement</Button>:undefined}>
 			<KeyValueGrid>
 				<KeyValueItem label="Outstanding balance" value={kes.format(Number(data.summary.outstanding_balance))}/>
 				<KeyValueItem label="Total invoiced" value={kes.format(Number(data.summary.total_invoiced))}/>
@@ -385,6 +417,7 @@ function StudentFinancePanel({query}:{query:{isLoading:boolean;isError:boolean;e
 				<KeyValueItem label="Unapplied cash" value={kes.format(Number(data.summary.unapplied_cash))}/>
 			</KeyValueGrid>
 		</KeyValueSection>
+		<FeeStatementDialog studentId={studentId} open={statementOpen} onClose={()=>setStatementOpen(false)}/>
 		<Box>
 			<Text fz={11} fw={600} tt="uppercase" c="dimmed" mb={6}>Recent invoices</Text>
 			{!data.recent_invoices.length?<Text size="sm" c="dimmed">No invoices yet.</Text>:
@@ -478,7 +511,7 @@ export function StudentPage({id}:{id:string}){const student=JSON.parse(sessionSt
  <RecordTabs tabs={tabs} value={tab} onChange={setTab}/>
  <Paper p="lg">
   {tab==="Overview"&&<KeyValueSection title="Overview"><KeyValueGrid><KeyValueItem label="Admission number" value={display(student.admission_number)}/><KeyValueItem label="Campus" value={display(student.campus)}/><KeyValueItem label="Current status" value={display(student.status)}/></KeyValueGrid></KeyValueSection>}
-  {tab==="Fees"&&<StudentFinancePanel query={finance}/>}
+  {tab==="Fees"&&<StudentFinancePanel studentId={id} query={finance}/>}
   {tab==="Documents"&&<DocumentsPanel basePath="/students" ownerId={id} viewPermission="students.document.view" managePermission="students.document.manage" can={can}/>}
   {tab==="Attendance"&&<StudentAttendancePanel query={attendance}/>}
   {tab==="Assessments"&&<StudentAssessmentsPanel query={assessments}/>}

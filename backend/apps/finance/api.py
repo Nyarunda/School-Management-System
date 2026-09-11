@@ -285,7 +285,7 @@ class FeeStructureBulkAssignView(APIView):
         if class_group_id:
             class_group = resolve_tenant_object(ClassGroup.objects.for_tenant(tenant), class_group_id)
         try:
-            result = bulk_assign_fee_structure(user=request.user, tenant=tenant, fee_structure=structure, class_group=class_group)
+            result = bulk_assign_fee_structure(user=request.user, tenant=tenant, fee_structure=structure, class_group=class_group, issue=bool(request.data.get("issue")))
         except ValidationError as error:
             return api_validation_error(error)
         return Response(result, status=status.HTTP_200_OK)
@@ -370,7 +370,7 @@ class TermInvoiceGenerateView(APIView):
         tenant = resolve_finance_tenant(request, "finance.invoice.create")
         term = resolve_tenant_object(Term.objects.for_tenant(tenant), term_id)
         try:
-            result = bulk_generate_invoices_for_term(user=request.user, tenant=tenant, term=term)
+            result = bulk_generate_invoices_for_term(user=request.user, tenant=tenant, term=term, issue=bool(request.data.get("issue")))
         except ValidationError as error:
             return api_validation_error(error)
         return Response(result, status=status.HTTP_200_OK)

@@ -1,10 +1,13 @@
 import { ReactNode } from "react";
-import { Box, Divider, SimpleGrid, Text } from "@mantine/core";
+import { Box, Divider, Group, SimpleGrid, Text } from "@mantine/core";
 
-export function KeyValueSection({ title, children }: { title: string; children: ReactNode }) {
+export function KeyValueSection({ title, action, children }: { title: string; action?: ReactNode; children: ReactNode }) {
   return (
     <Box mb="lg">
-      <Text fz={13} fw={600} tt="uppercase" c="dimmed" mb={6} style={{ letterSpacing: "0.05em" }}>{title}</Text>
+      <Group justify="space-between" align="center" mb={6}>
+        <Text fz={13} fw={600} tt="uppercase" c="dimmed" style={{ letterSpacing: "0.05em" }}>{title}</Text>
+        {action}
+      </Group>
       <Divider mb="sm" color="indigo.3" />
       {children}
     </Box>
