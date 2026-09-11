@@ -1,8 +1,8 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Box, Button, Group, NumberInput, Select, Stack, Tabs, Text, Textarea, TextInput } from "@mantine/core";
+import { Box, Button, Group, NumberInput, Select, Stack, Tabs, Text, Textarea, TextInput } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
-import { api, ApiError, Page } from "../api/client";
+import { api, Page } from "../api/client";
 import { useAccess } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
 import { Column, DataTable } from "../components/DataTable";
@@ -27,7 +27,6 @@ const kes=new Intl.NumberFormat("en-KE",{style:"currency",currency:"KES",minimum
 const cash=(v:string|number)=>kes.format(Number(v));
 const when=(v:string|null)=>v?new Intl.DateTimeFormat("en-KE",{dateStyle:"medium",timeStyle:"short"}).format(new Date(v)):"—";
 function usePaged<T>(key:string,path:string,params?:Record<string,string|number|undefined>){const [page,setPage]=useState(1);const query=useQuery({queryKey:[key,page,params],queryFn:()=>api<Page<T>>(path,{params:{page,...params}})});return {page,setPage,query,rows:query.data?.results??[]};}
-const errorText=(error:unknown)=>error instanceof ApiError?error.message:error instanceof Error?error.message:"The action failed";
 
 export function FinanceOverview(){return <><PageHeader eyebrow="Finance" title="Finance operations" description="Move from approved charges to invoices, collections and reconciled student accounts."/><div className="workflow-strip"><a href="/finance/fees"><b>1</b><span><strong>Set fees</strong><small>Approve charging schedules</small></span></a><a href="/finance/assignments"><b>2</b><span><strong>Assign & invoice</strong><small>Generate student charges</small></span></a><a href="/finance/payments"><b>3</b><span><strong>Collect & allocate</strong><small>Apply money to invoices</small></span></a><a href="/finance/incoming"><b>4</b><span><strong>Reconcile</strong><small>Resolve incoming money</small></span></a></div></>}
 
@@ -36,7 +35,7 @@ export function FeeStructuresPage(){
 	const qc=useQueryClient();
 	const data=usePaged<Structure>("fee-structures","/finance/fee-structures/");
 	const [selected,setSelected]=useState<Structure|null>(null);
-	const approve=useMutation({mutationFn:(id:string)=>api(`/finance/fee-structures/${id}/approve/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setSelected(null);notify.success("Fee structure approved")}});
+	const approve=useMutation({mutationFn:(id:string)=>api(`/finance/fee-structures/${id}/approve/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setSelected(null);notify.success("Fee structure approved")},onError:error=>notify.error("Fee structure could not be approved",error)});
 
 	const canView=can("finance.fee_structure.view");
 	const canCreate=can("finance.fee_structure.create");
@@ -57,7 +56,7 @@ export function FeeStructuresPage(){
 	const levels=useQuery({queryKey:["academic-levels"],queryFn:()=>api<Page<AcademicLevel>>("/academics/academic-levels/",{params:{page_size:100}}),enabled:canView});
 	const yearName=(id:string)=>years.data?.results.find(y=>y.id===id)?.name??id;
 	const levelName=(id:string)=>levels.data?.results.find(l=>l.id===id)?.name??id;
-	const create=useMutation({mutationFn:()=>api<Structure>("/finance/fee-structures/",{method:"POST",body:JSON.stringify({name,academic_year:year,academic_level:level})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setCreateOpen(false);setName("");setYear("");setLevel("");notify.success("Fee structure created")}});
+	const create=useMutation({mutationFn:()=>api<Structure>("/finance/fee-structures/",{method:"POST",body:JSON.stringify({name,academic_year:year,academic_level:level})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setCreateOpen(false);setName("");setYear("");setLevel("");notify.success("Fee structure created")},onError:error=>notify.error("Fee structure could not be created",error)});
 
 	// add_fee_structure_line raises "Approved fee structures cannot be edited"
 	// once is_approved is true (services.py:63-64) -- this gate reflects that
@@ -70,6 +69,7 @@ export function FeeStructuresPage(){
 	const addLine=useMutation({
 		mutationFn:()=>api<Line>(`/finance/fee-structures/${selected!.id}/lines/`,{method:"POST",body:JSON.stringify({fee_item:lineItem,amount:lineAmount})}),
 		onSuccess:newLine=>{setSelected(prev=>prev?{...prev,lines:[...prev.lines,newLine]}:prev);setLineItem("");setLineAmount("");void qc.invalidateQueries({queryKey:["fee-structures"]});notify.success("Fee line added")},
+		onError:error=>notify.error("Fee line could not be added",error),
 	});
 
 	const columns:Column<Structure>[]=[
@@ -88,7 +88,6 @@ export function FeeStructuresPage(){
 
 		<ActionDialog open={createOpen} title="New fee structure" description="Choose the academic year and level this structure applies to." confirmLabel="Create structure" busy={create.isPending} onClose={()=>setCreateOpen(false)} onSubmit={e=>{e.preventDefault();create.mutate()}}>
 			<Stack gap="sm">
-				{create.error&&<Alert color="red" variant="light">{errorText(create.error)}</Alert>}
 				<TextInput label="Name" required value={name} onChange={e=>setName(e.currentTarget.value)}/>
 				<Select label="Academic year" required placeholder="Select academic year" data={years.data?.results.map(y=>({value:y.id,label:`${y.name}${y.is_current?" · Current":""}`}))??[]} value={year||null} onChange={value=>setYear(value??"")}/>
 				<Select label="Level" required placeholder="Select level" data={levels.data?.results.map(l=>({value:l.id,label:l.name}))??[]} value={level||null} onChange={value=>setLevel(value??"")}/>
@@ -97,7 +96,6 @@ export function FeeStructuresPage(){
 
 		<ActionDialog open={!!selected} title={selected?.name??"Fee structure"} description="Approval makes this structure available for student assignment." confirmLabel="Approve structure" busy={approve.isPending} onClose={()=>setSelected(null)} onSubmit={e=>{e.preventDefault();if(selected&&!selected.is_approved)approve.mutate(selected.id)}}>
 			<Stack gap="sm">
-				{approve.error&&<Alert color="red" variant="light">{errorText(approve.error)}</Alert>}
 				<Stack gap={4}>
 					{selected?.lines.map(l=>
 						<Group key={l.id} justify="space-between" wrap="nowrap">
@@ -109,7 +107,6 @@ export function FeeStructuresPage(){
 				</Stack>
 				{selected?.is_approved&&<Text size="sm" c="dimmed">This structure is already approved.</Text>}
 				{selected&&!selected.is_approved&&canEdit&&<Stack gap="sm" mt="sm">
-					{addLine.error&&<Alert color="red" variant="light">{errorText(addLine.error)}</Alert>}
 					<Select label="Fee item" placeholder="Select fee item" data={feeItems.data?.results.map(i=>({value:i.id,label:i.name}))??[]} value={lineItem||null} onChange={value=>setLineItem(value??"")}/>
 					<NumberInput label="Amount (KES)" min={0.01} decimalScale={2} value={lineAmount} onChange={value=>setLineAmount(value===""||value===undefined?"":Number(value))}/>
 					<Button variant="default" disabled={!lineItem||!lineAmount||addLine.isPending} onClick={()=>addLine.mutate()}>Add line</Button>
@@ -145,7 +142,7 @@ export function AssignmentsPage(){
 	// Payments' Match dialog.
 	const [studentId,setStudentId]=useState("");
 	const [structure,setStructure]=useState("");
-	const create=useMutation({mutationFn:()=>api("/finance/student-fee-assignments/",{method:"POST",body:JSON.stringify({student:studentId,fee_structure:structure})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});setOpen(false);notify.success("Fee structure assigned to student")}});
+	const create=useMutation({mutationFn:()=>api("/finance/student-fee-assignments/",{method:"POST",body:JSON.stringify({student:studentId,fee_structure:structure})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});setOpen(false);notify.success("Fee structure assigned to student")},onError:error=>notify.error("Fee assignment could not be created",error)});
 	const generate=useMutation({mutationFn:(id:string)=>api(`/finance/student-fee-assignments/${id}/generate-invoice/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});void qc.invalidateQueries({queryKey:["invoices"]});notify.success("Invoice generated")},onError:error=>notify.error("Invoice could not be generated",error)});
 
 	const columns:Column<Assignment>[]=[
@@ -164,7 +161,6 @@ export function AssignmentsPage(){
 
 		<ActionDialog open={open} title="Assign fee structure" description="Only approved structures are offered. Assigning the same student and structure again is safe -- it returns the existing assignment rather than creating a duplicate." confirmLabel="Assign fees" busy={create.isPending} onClose={()=>setOpen(false)} onSubmit={e=>{e.preventDefault();create.mutate()}}>
 			<Stack gap="sm">
-				{create.error&&<Alert color="red" variant="light">{errorText(create.error)}</Alert>}
 				<TextInput label="Student id" required placeholder="Exact student id" value={studentId} onChange={e=>setStudentId(e.currentTarget.value)}/>
 				<Select label="Approved fee structure" required placeholder="Select structure" data={structures.data?.results.filter(s=>s.is_approved).map(s=>({value:s.id,label:s.name}))??[]} value={structure||null} onChange={value=>setStructure(value??"")}/>
 			</Stack>
@@ -189,6 +185,7 @@ export function InvoicesPage(){
 	const createCredit=useMutation({
 		mutationFn:()=>api("/finance/credit-notes/",{method:"POST",body:JSON.stringify({student:creditTarget!.student,invoice:creditTarget!.id,amount:creditAmount,reason:creditReason})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["invoices"]});setCreditTarget(null);notify.success("Credit note issued")},
+		onError:error=>notify.error("Credit note could not be issued",error),
 	});
 
 	const columns:Column<Invoice>[]=[
@@ -217,7 +214,6 @@ export function InvoicesPage(){
 		/>
 		<ActionDialog open={!!creditTarget} title="Create credit note" description={creditTarget?`Issues a credit note against invoice ${creditTarget.invoice_number}. This cannot be undone.`:undefined} confirmLabel="Create credit note" busy={createCredit.isPending} onClose={()=>setCreditTarget(null)} onSubmit={e=>{e.preventDefault();createCredit.mutate()}}>
 			<Stack gap="sm">
-				{createCredit.error&&<Alert color="red" variant="light">{errorText(createCredit.error)}</Alert>}
 				<NumberInput label="Amount (KES)" required min={0.01} decimalScale={2} value={creditAmount} onChange={value=>setCreditAmount(value===""||value===undefined?"":Number(value))}/>
 				<Textarea label="Reason" required maxLength={240} value={creditReason} onChange={e=>setCreditReason(e.currentTarget.value)}/>
 			</Stack>
@@ -245,7 +241,7 @@ export function PaymentsPage(){
 	// just the Allocate dropdown.
 	const invoices=useQuery({queryKey:["payment-invoices",selected?.student],queryFn:()=>api<Page<Invoice>>("/finance/invoices/",{params:{student:selected!.student,page_size:100}}),enabled:!!selected});
 	const invoiceNumber=(id:string)=>invoices.data?.results.find(i=>i.id===id)?.invoice_number??id;
-	const mutate=useMutation({mutationFn:()=>api(mode==="allocate"?`/finance/payments/${selected!.id}/allocate/`:`/finance/payments/${selected!.id}/reverse/`,{method:"POST",body:JSON.stringify(mode==="allocate"?{invoice,amount}:{reason})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["payments"]});const done=mode;setMode(null);setSelected(null);notify.success(done==="allocate"?"Payment allocated":"Payment reversed")}});
+	const mutate=useMutation({mutationFn:()=>api(mode==="allocate"?`/finance/payments/${selected!.id}/allocate/`:`/finance/payments/${selected!.id}/reverse/`,{method:"POST",body:JSON.stringify(mode==="allocate"?{invoice,amount}:{reason})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["payments"]});const done=mode;setMode(null);setSelected(null);notify.success(done==="allocate"?"Payment allocated":"Payment reversed")},onError:error=>notify.error(mode==="allocate"?"Payment could not be allocated":"Payment could not be reversed",error)});
 
 	// Allocation Reversal (finance.allocation.reverse) is deliberately kept
 	// separate from whole-Payment Reversal above: it corrects one misapplied
@@ -262,6 +258,7 @@ export function PaymentsPage(){
 	const reverseAllocation=useMutation({
 		mutationFn:()=>api(`/finance/payment-allocations/${reversingAllocation!.id}/reverse/`,{method:"POST",body:JSON.stringify({amount:allocationReversalAmount,reason:allocationReversalReason})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["payments"]});setReversingAllocation(null);notify.success("Allocation reversed")},
+		onError:error=>notify.error("Allocation could not be reversed",error),
 	});
 
 	const canRecord=can("finance.payment.record");
@@ -286,6 +283,7 @@ export function PaymentsPage(){
 	const record=useMutation({
 		mutationFn:()=>api("/finance/payments/",{method:"POST",body:JSON.stringify({student:payStudent,payment_method:payMethod,amount:payAmount,idempotency_key:idempotencyKey,external_reference:payReference})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["payments"]});setRecordOpen(false);notify.success("Payment recorded successfully")},
+		onError:error=>notify.error("Payment could not be recorded",error),
 	});
 
 	const columns:Column<Payment>[]=[
@@ -308,7 +306,6 @@ export function PaymentsPage(){
 
 		<ActionDialog open={recordOpen} title="Record payment" description="Creates a received payment for a student, ready to allocate against an invoice." confirmLabel="Record payment" busy={record.isPending} onClose={()=>setRecordOpen(false)} onSubmit={e=>{e.preventDefault();record.mutate()}}>
 			<Stack gap="sm">
-				{record.error&&<Alert color="red" variant="light">{errorText(record.error)}</Alert>}
 				<Select label="Student" required searchable data={students.data?.results.map(s=>({value:s.id,label:`${s.full_name} · ${s.admission_number}`}))??[]} value={payStudent||null} onChange={value=>setPayStudent(value??"")}/>
 				<Select label="Payment method" required data={paymentMethods.data?.results.map(m=>({value:m.id,label:m.name}))??[]} value={payMethod||null} onChange={value=>setPayMethod(value??"")}/>
 				<NumberInput label="Amount (KES)" required min={0.01} decimalScale={2} value={payAmount} onChange={value=>setPayAmount(value===""||value===undefined?"":Number(value))}/>
@@ -342,7 +339,6 @@ export function PaymentsPage(){
 
 		<ActionDialog open={!!selected&&!!mode} title={mode==="allocate"?"Allocate payment":"Reverse payment"} description={mode==="reverse"?"Invalidates the payment and reverses every currently active allocation on it. A reason is required.":"Apply available money to one issued invoice."} confirmLabel={mode==="allocate"?"Allocate":"Reverse payment"} danger={mode==="reverse"} busy={mutate.isPending} onClose={()=>setMode(null)} onSubmit={e=>{e.preventDefault();mutate.mutate()}}>
 			<Stack gap="sm">
-				{mutate.error&&<Alert color="red" variant="light">{errorText(mutate.error)}</Alert>}
 				{mode==="allocate"?<>
 					<Select label="Invoice" required placeholder="Select issued invoice" data={invoices.data?.results.filter(i=>i.status==="ISSUED").map(i=>({value:i.id,label:`${i.invoice_number} · ${cash(i.total)}`}))??[]} value={invoice||null} onChange={value=>setInvoice(value??"")}/>
 					<NumberInput label="Amount (KES)" required min={0.01} max={selected?Number(selected.unallocated_amount):undefined} decimalScale={2} value={amount} onChange={value=>setAmount(value===""||value===undefined?"":Number(value))}/>
@@ -353,7 +349,6 @@ export function PaymentsPage(){
 
 		<ActionDialog open={!!reversingAllocation} title="Reverse allocation" description={reversingAllocation?`Reverses money allocated to invoice ${invoiceNumber(reversingAllocation.invoice)} on ${when(reversingAllocation.allocated_at)}. This affects only this one allocation -- the payment itself and its other allocations are not touched.`:undefined} confirmLabel="Reverse allocation" danger busy={reverseAllocation.isPending} onClose={()=>setReversingAllocation(null)} onSubmit={e=>{e.preventDefault();reverseAllocation.mutate()}}>
 			<Stack gap="sm">
-				{reverseAllocation.error&&<Alert color="red" variant="light">{errorText(reverseAllocation.error)}</Alert>}
 				{reversingAllocation&&<Text size="sm" c="dimmed">Originally allocated: {cash(reversingAllocation.amount)}</Text>}
 				<NumberInput label="Amount to reverse (KES)" required min={0.01} decimalScale={2} value={allocationReversalAmount} onChange={value=>setAllocationReversalAmount(value===""||value===undefined?"":Number(value))}/>
 				<Textarea label="Reason" required maxLength={240} value={allocationReversalReason} onChange={e=>setAllocationReversalReason(e.currentTarget.value)}/>
@@ -407,6 +402,7 @@ export function IncomingPage(){
 	const match=useMutation({
 		mutationFn:()=>api(`/finance/incoming-payments/${matchTarget!.id}/match/`,{method:"POST",body:JSON.stringify({student:matchStudentId})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["incoming"]});setMatchTarget(null);notify.success("Incoming payment matched")},
+		onError:error=>notify.error("Incoming payment could not be matched",error),
 	});
 
 	const [ignoreTarget,setIgnoreTarget]=useState<Incoming|null>(null);
@@ -414,6 +410,7 @@ export function IncomingPage(){
 	const ignore=useMutation({
 		mutationFn:()=>api(`/finance/incoming-payments/${ignoreTarget!.id}/ignore/`,{method:"POST",body:JSON.stringify({reason:ignoreReason})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["incoming"]});setIgnoreTarget(null);notify.success("Incoming payment ignored")},
+		onError:error=>notify.error("Incoming payment could not be ignored",error),
 	});
 
 	const paymentMethods=useQuery({queryKey:["incoming-payment-methods-lookup"],queryFn:()=>api<Page<PaymentMethod>>("/finance/payment-methods/",{params:{page_size:100}}),enabled:can("finance.reconciliation.view")});
@@ -448,14 +445,12 @@ export function IncomingPage(){
 
 		<ActionDialog open={!!matchTarget} title="Match incoming payment" description={matchTarget?`Creates a real student payment for ${cash(matchTarget.amount)}. Check the student id carefully -- this cannot be undone from here.`:undefined} confirmLabel="Confirm match" busy={match.isPending} onClose={()=>setMatchTarget(null)} onSubmit={e=>{e.preventDefault();match.mutate()}}>
 			<Stack gap="sm">
-				{match.error&&<Alert color="red" variant="light">{errorText(match.error)}</Alert>}
 				<StudentSearchSelect required value={matchStudentId} onChange={setMatchStudentId}/>
 			</Stack>
 		</ActionDialog>
 
 		<ActionDialog open={!!ignoreTarget} title="Ignore incoming payment" description="The entry remains in the audit trail and will not become a payment." confirmLabel="Ignore entry" danger busy={ignore.isPending} onClose={()=>setIgnoreTarget(null)} onSubmit={e=>{e.preventDefault();ignore.mutate()}}>
 			<Stack gap="sm">
-				{ignore.error&&<Alert color="red" variant="light">{errorText(ignore.error)}</Alert>}
 				<Textarea label="Reason" required maxLength={240} value={ignoreReason} onChange={e=>setIgnoreReason(e.currentTarget.value)}/>
 			</Stack>
 		</ActionDialog>

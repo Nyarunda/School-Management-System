@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Button, Checkbox, Grid, Group, Paper, Select, SimpleGrid, Stack, Text, TextInput, Tooltip, UnstyledButton } from "@mantine/core";
-import { api, ApiError, Page } from "../api/client";
+import { Button, Checkbox, Grid, Group, Paper, Select, SimpleGrid, Stack, Text, TextInput, Tooltip, UnstyledButton } from "@mantine/core";
+import { api, Page } from "../api/client";
 import { useAccess, useAuth } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
 import { Column, DataTable } from "../components/DataTable";
@@ -11,7 +11,6 @@ import { ErrorState, Loading, StatusBadge } from "../components/ui";
 
 type Role={id:number;name:string;permissions:string[]};
 type PermissionEntry={code:string;label:string;domain:string};
-const errorText=(error:unknown)=>error instanceof ApiError?error.message:error instanceof Error?error.message:"The action failed";
 
 export function RolesPage(){
 	const {can}=useAccess();
@@ -74,6 +73,7 @@ export function RolesPage(){
 	const save=useMutation({
 		mutationFn:()=>api<Role>(`/tenancy/roles/${selectedId}/`,{method:"PATCH",body:JSON.stringify({name,permissions:[...preserved,...editableSelected]})}),
 		onSuccess:updated=>{void qc.invalidateQueries({queryKey:["tenancy-roles"]});selectRole(updated);notify.success("Role updated")},
+		onError:error=>notify.error("Role could not be updated",error),
 	});
 
 	const [createOpen,setCreateOpen]=useState(false);
@@ -81,12 +81,14 @@ export function RolesPage(){
 	const create=useMutation({
 		mutationFn:()=>api<Role>("/tenancy/roles/",{method:"POST",body:JSON.stringify({name:createName,permissions:[]})}),
 		onSuccess:created=>{void qc.invalidateQueries({queryKey:["tenancy-roles"]});setCreateOpen(false);selectRole(created)},
+		onError:error=>notify.error("Role could not be created",error),
 	});
 
 	const [deleteTarget,setDeleteTarget]=useState<Role|null>(null);
 	const remove=useMutation({
 		mutationFn:()=>api(`/tenancy/roles/${deleteTarget!.id}/`,{method:"DELETE"}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["tenancy-roles"]});setDeleteTarget(null);if(selectedId===deleteTarget?.id)setSelectedId(null);notify.success("Role deleted")},
+		onError:error=>notify.error("Role could not be deleted",error),
 	});
 
 	const grouped=Object.entries(
@@ -137,8 +139,6 @@ export function RolesPage(){
 						<Stack gap="lg">
 							<TextInput label="Role name" required maxLength={100} value={name} onChange={e=>setName(e.currentTarget.value)} disabled={!manage} w={{base:"100%",sm:320}}/>
 
-							{save.error&&<Alert color="red" variant="light">{errorText(save.error)}</Alert>}
-
 							{catalogue.isLoading?<Loading label="Loading permission catalogue"/>:catalogue.isError?<ErrorState error={catalogue.error} retry={()=>void catalogue.refetch()}/>:
 								<Stack gap="md">
 									{grouped.map(([domain,entries])=>
@@ -176,14 +176,11 @@ export function RolesPage(){
 
 		<ActionDialog open={createOpen} title="Create role" description="Configure its permissions after creating it." confirmLabel="Create role" busy={create.isPending} onClose={()=>setCreateOpen(false)} onSubmit={e=>{e.preventDefault();if(!createName)return;create.mutate()}}>
 			<Stack gap="sm">
-				{create.error&&<Alert color="red" variant="light">{errorText(create.error)}</Alert>}
 				<TextInput label="Role name" required maxLength={100} value={createName} onChange={e=>setCreateName(e.currentTarget.value)}/>
 			</Stack>
 		</ActionDialog>
 
-		<ActionDialog open={!!deleteTarget} title="Delete role" danger description={`Delete "${deleteTarget?.name}" permanently? This cannot be undone.`} confirmLabel="Delete role" busy={remove.isPending} onClose={()=>setDeleteTarget(null)} onSubmit={e=>{e.preventDefault();remove.mutate()}}>
-			{remove.error&&<Alert color="red" variant="light">{errorText(remove.error)}</Alert>}
-		</ActionDialog>
+		<ActionDialog open={!!deleteTarget} title="Delete role" danger description={`Delete "${deleteTarget?.name}" permanently? This cannot be undone.`} confirmLabel="Delete role" busy={remove.isPending} onClose={()=>setDeleteTarget(null)} onSubmit={e=>{e.preventDefault();remove.mutate()}}/>
 	</Stack>;
 }
 
@@ -235,6 +232,7 @@ export function UsersPage(){
 	const invite=useMutation({
 		mutationFn:()=>api<UserMembership>("/tenancy/users/invite/",{method:"POST",body:JSON.stringify({email:inviteForm.email,role:Number(inviteForm.role),campus:inviteForm.campus?Number(inviteForm.campus):null})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["tenancy-memberships"]});setInviteOpen(false);notify.success("Invitation sent")},
+		onError:error=>notify.error("Invitation could not be sent",error),
 	});
 
 	const [reassignTarget,setReassignTarget]=useState<UserMembership|null>(null);
@@ -245,6 +243,7 @@ export function UsersPage(){
 			campus:reassignForm.campus?Number(reassignForm.campus):null,
 		})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["tenancy-memberships"]});setReassignTarget(null);notify.success("Member updated")},
+		onError:error=>notify.error("Member could not be updated",error),
 	});
 
 	// Activation is only ever offered for a membership that already accepted
@@ -257,6 +256,7 @@ export function UsersPage(){
 	const setStatus=useMutation({
 		mutationFn:()=>api<UserMembership>(`/tenancy/memberships/${statusTarget!.membership.id}/${statusTarget!.action}/`,{method:"POST"}),
 		onSuccess:()=>{const action=statusTarget?.action;void qc.invalidateQueries({queryKey:["tenancy-memberships"]});setStatusTarget(null);notify.success(action==="activate"?"Member activated":"Member deactivated")},
+		onError:error=>notify.error(statusTarget?.action==="activate"?"Member could not be activated":"Member could not be deactivated",error),
 	});
 
 	const columns:Column<UserMembership>[]=[
@@ -285,7 +285,6 @@ export function UsersPage(){
 
 		<ActionDialog open={inviteOpen} title="Invite user" description="They'll receive an email with a secure link to accept and set up access." confirmLabel="Send invite" busy={invite.isPending} onClose={()=>setInviteOpen(false)} onSubmit={e=>{e.preventDefault();if(!inviteForm.email||!inviteForm.role)return;invite.mutate()}}>
 			<Stack gap="sm">
-				{invite.error&&<Alert color="red" variant="light">{errorText(invite.error)}</Alert>}
 				<TextInput label="Email" type="email" required value={inviteForm.email} onChange={e=>setInviteForm({...inviteForm,email:e.currentTarget.value})}/>
 				<Select label="Role" required placeholder={roles.isLoading?"Loading…":"Select role"} disabled={roles.isLoading} data={roleOptions} value={inviteForm.role||null} onChange={value=>setInviteForm({...inviteForm,role:value??""})}/>
 				<Select label="Campus" placeholder={campuses.isLoading?"Loading…":"All campuses"} disabled={campuses.isLoading} data={campusOptions} value={inviteForm.campus||null} onChange={value=>setInviteForm({...inviteForm,campus:value??""})} clearable/>
@@ -294,7 +293,6 @@ export function UsersPage(){
 
 		<ActionDialog open={!!reassignTarget} title="Reassign member" description={`Change ${reassignTarget?.user.username}'s role or campus.`} confirmLabel="Save changes" busy={reassign.isPending} onClose={()=>setReassignTarget(null)} onSubmit={e=>{e.preventDefault();reassign.mutate()}}>
 			<Stack gap="sm">
-				{reassign.error&&<Alert color="red" variant="light">{errorText(reassign.error)}</Alert>}
 				{canViewRoles?
 					<Select label="Role" required placeholder={roles.isLoading?"Loading…":"Select role"} disabled={roles.isLoading} data={roleOptions} value={reassignForm.role||null} onChange={value=>setReassignForm({...reassignForm,role:value??""})}/>
 				:<Text size="sm" c="dimmed">You don't have permission to view roles, so this member's role cannot be changed here.</Text>}
@@ -304,8 +302,6 @@ export function UsersPage(){
 
 		<ActionDialog open={!!statusTarget} title={statusTarget?.action==="activate"?"Activate member":"Deactivate member"} danger={statusTarget?.action==="deactivate"}
 			description={statusTarget?.action==="activate"?"Restore this member's access to the workspace.":"This member will immediately lose access to the workspace."}
-			confirmLabel={statusTarget?.action==="activate"?"Activate":"Deactivate"} busy={setStatus.isPending} onClose={()=>setStatusTarget(null)} onSubmit={e=>{e.preventDefault();setStatus.mutate()}}>
-			{setStatus.error&&<Alert color="red" variant="light">{errorText(setStatus.error)}</Alert>}
-		</ActionDialog>
+			confirmLabel={statusTarget?.action==="activate"?"Activate":"Deactivate"} busy={setStatus.isPending} onClose={()=>setStatusTarget(null)} onSubmit={e=>{e.preventDefault();setStatus.mutate()}}/>
 	</Stack>;
 }

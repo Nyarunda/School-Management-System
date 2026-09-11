@@ -32,14 +32,7 @@ export function LoginPage() {
       await login(username, password);
       go("/");
     } catch (caught) {
-      const msg = caught instanceof Error ? caught.message : "Sign in failed";
-      // Don't pass `caught` through to notify.error: its blanket 403 ->
-      // "You do not have permission..." override is meant for an action
-      // denied by a missing permission. A 403 here means "no active
-      // membership in this tenant" (apps/tenancy/api.py's SessionView) --
-      // a distinct condition the user needs to actually see, not a
-      // permission check on something they tried to do.
-      notify.error(msg);
+      notify.error("Sign in failed", caught);
     } finally {
       setBusy(false);
     }
@@ -442,13 +435,13 @@ function SetupCard({name,endpoint,managePermission}:{name:string;endpoint:string
 	const save=useMutation({
 		mutationFn:()=>api<Row>(endpoint,{method:"PATCH",body:JSON.stringify({default_retention_days:retentionDays===""?null:retentionDays})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:[endpoint]});setEditOpen(false);notify.success(`${name} setup updated`)},
+		onError:error=>notify.error(`${name} setup could not be updated`,error),
 	});
 	return <section className="card setup-card">
 		<div className="card-heading"><div><h2>{name}</h2><p>Current configuration</p></div>{canManage&&<button className="button secondary" onClick={()=>{setRetentionDays((q.data?.default_retention_days as number|null)??"");setEditOpen(true)}}>Edit</button>}</div>
 		{q.isLoading?<Loading label="Loading setup"/>:q.isError?<ErrorState error={q.error}/>:<div className="config-list">{Object.entries(q.data??{}).slice(0,6).map(([k,v])=><div key={k}><span>{pretty(k)}</span><strong>{display(v)}</strong></div>)}</div>}
 		{canManage&&<ActionDialog open={editOpen} title={`Edit ${name.toLowerCase()} setup`} confirmLabel="Save" busy={save.isPending} onClose={()=>setEditOpen(false)} onSubmit={e=>{e.preventDefault();save.mutate()}}>
 			<Stack gap="sm">
-				{save.error&&<Alert color="red" variant="light">{save.error instanceof Error?save.error.message:"The action failed"}</Alert>}
 				<NumberInput label="Default retention (days)" description="Leave blank for no automatic expiry." min={1} value={retentionDays} onChange={value=>setRetentionDays(value===""?"":Number(value))}/>
 			</Stack>
 		</ActionDialog>}

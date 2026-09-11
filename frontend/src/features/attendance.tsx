@@ -40,6 +40,7 @@ export function AttendancePage(){
 	const openSession=useMutation({
 		mutationFn:()=>api<SessionDetail>("/attendance/sessions/open/",{method:"POST",body:JSON.stringify({class_group:classGroupId,session_date:sessionDate,force})}),
 		onSuccess:detail=>{qc.setQueryData(["attendance-session",detail.session.id],detail);void qc.invalidateQueries({queryKey:["attendance-sessions"]});setOpenDialog(false);setSelected(detail.session.id);notify.success("Attendance register opened")},
+		onError:error=>notify.error("Attendance register could not be opened",error),
 	});
 	const columns:Column<Session>[]=[
 		{key:"date",header:"Date",cell:r=><Text size="sm" fw={600}>{r.session_date}</Text>},
@@ -65,7 +66,6 @@ export function AttendancePage(){
 		/>
 		<ActionDialog open={openDialog} title="Open attendance register" description="Opening an existing session for this class and date is safe to repeat -- it returns the same register rather than creating a duplicate." confirmLabel="Open register" busy={openSession.isPending} onClose={()=>setOpenDialog(false)} onSubmit={e=>{e.preventDefault();if(!classGroupId||!sessionDate)return;openSession.mutate()}}>
 			<Stack gap="sm">
-				{openSession.error&&<Alert color="red" variant="light">{errorText(openSession.error)}</Alert>}
 				{classGroups.isError&&<Alert color="red" variant="light">{errorText(classGroups.error)}</Alert>}
 				<Select label="Class group" placeholder={classGroups.isLoading?"Loading…":"Select class group"} required searchable disabled={classGroups.isLoading} data={classGroupData} value={classGroupId} onChange={value=>setClassGroupId(value??"")}/>
 				{!classGroups.isLoading&&!classGroups.isError&&!classGroupData.length&&<Text size="xs" c="dimmed">No class groups are available for your account. Contact an administrator if you should be assigned to one.</Text>}

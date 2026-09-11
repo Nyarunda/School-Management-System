@@ -1,8 +1,8 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ActionIcon, Alert, Box, Button, Divider, Grid, Group, Menu, NumberInput, Paper, Select, Stack, Text, TextInput, UnstyledButton } from "@mantine/core";
+import { ActionIcon, Box, Button, Divider, Grid, Group, Menu, NumberInput, Paper, Select, Stack, Text, TextInput, UnstyledButton } from "@mantine/core";
 import { IconDots } from "@tabler/icons-react";
-import { api, ApiError, Page } from "../api/client";
+import { api, Page } from "../api/client";
 import { useAccess } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
 import { KeyValueGrid, KeyValueItem, KeyValueSection } from "../components/KeyValueGrid";
@@ -15,7 +15,6 @@ type Stage={id:string;sequence:number;name:string;approver_role:number};
 type Role={id:number;name:string};
 type LeaveType={id:string;approval_workflow:string|null};
 type StageDialogState={mode:"add"}|{mode:"edit";stage:Stage};
-const errorText=(error:unknown)=>error instanceof ApiError?error.message:error instanceof Error?error.message:"The action failed";
 
 export function LeaveWorkflowPage(){
 	const {can}=useAccess();
@@ -43,18 +42,22 @@ export function LeaveWorkflowPage(){
 	const createWorkflow=useMutation({
 		mutationFn:()=>api<Workflow>("/leave/workflows/",{method:"POST",body:JSON.stringify({name:workflowName})}),
 		onSuccess:w=>{void qc.invalidateQueries({queryKey:["leave-workflows"]});setSelected(w);setWorkflowDialog(false);notify.success("Leave workflow created")},
+		onError:error=>notify.error("Leave workflow could not be created",error),
 	});
 	const createStage=useMutation({
 		mutationFn:()=>api<Stage>(`/leave/workflows/${selected!.id}/stages/`,{method:"POST",body:JSON.stringify({name:stageName,sequence:stageSequence,approver_role:Number(stageRole)})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["leave-workflow-stages",selected?.id]});setStageDialog(null);notify.success("Approval stage added")},
+		onError:error=>notify.error("Approval stage could not be added",error),
 	});
 	const updateStage=useMutation({
 		mutationFn:(stage:Stage)=>api<Stage>(`/leave/workflows/${selected!.id}/stages/${stage.id}/`,{method:"PATCH",body:JSON.stringify({name:stageName,approver_role:Number(stageRole)})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["leave-workflow-stages",selected?.id]});setStageDialog(null);notify.success("Approval stage updated")},
+		onError:error=>notify.error("Approval stage could not be updated",error),
 	});
 	const deleteStage=useMutation({
 		mutationFn:(id:string)=>api(`/leave/workflows/${selected!.id}/stages/${id}/`,{method:"DELETE"}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["leave-workflow-stages",selected?.id]});setDeleteTarget(null);notify.success("Approval stage removed")},
+		onError:error=>notify.error("Approval stage could not be removed",error),
 	});
 
 	const stageRows=stages.data?.results??[];
@@ -160,7 +163,6 @@ export function LeaveWorkflowPage(){
 
 		<ActionDialog open={workflowDialog} title="Create leave workflow" confirmLabel="Create workflow" busy={createWorkflow.isPending} onClose={()=>setWorkflowDialog(false)} onSubmit={e=>{e.preventDefault();if(!workflowName)return;createWorkflow.mutate()}}>
 			<Stack gap="sm">
-				{createWorkflow.error&&<Alert color="red" variant="light">{errorText(createWorkflow.error)}</Alert>}
 				<TextInput label="Workflow name" required maxLength={120} value={workflowName} onChange={e=>setWorkflowName(e.currentTarget.value)}/>
 			</Stack>
 		</ActionDialog>
@@ -169,7 +171,6 @@ export function LeaveWorkflowPage(){
 			confirmLabel={stageDialog?.mode==="edit"?"Save changes":"Add stage"} busy={createStage.isPending||updateStage.isPending} onClose={()=>setStageDialog(null)}
 			onSubmit={e=>{e.preventDefault();if(!stageName||!stageRole)return;if(stageDialog?.mode==="edit")updateStage.mutate(stageDialog.stage);else createStage.mutate()}}>
 			<Stack gap="sm">
-				{(createStage.error||updateStage.error)&&<Alert color="red" variant="light">{errorText(createStage.error||updateStage.error)}</Alert>}
 				{stageDialog?.mode==="add"&&<NumberInput label="Sequence" required min={1} value={stageSequence} onChange={value=>setStageSequence(Number(value)||1)}/>}
 				<TextInput label="Stage name" required maxLength={80} value={stageName} onChange={e=>setStageName(e.currentTarget.value)}/>
 				<Select label="Approver role" required placeholder={roles.isLoading?"Loading…":"Select role"} disabled={roles.isLoading} data={(roles.data?.results??[]).map(r=>({value:String(r.id),label:r.name}))} value={stageRole} onChange={value=>setStageRole(value??"")}/>
@@ -177,8 +178,6 @@ export function LeaveWorkflowPage(){
 		</ActionDialog>
 
 		<ActionDialog open={!!deleteTarget} title="Delete approval stage" danger description={`Delete "${deleteTarget?.name}"? Requests already using this workflow keep their own snapshotted stages -- only future submissions are affected. This cannot be undone.`}
-			confirmLabel="Delete stage" busy={deleteStage.isPending} onClose={()=>setDeleteTarget(null)} onSubmit={e=>{e.preventDefault();deleteStage.mutate(deleteTarget!.id)}}>
-			{deleteStage.error&&<Alert color="red" variant="light">{errorText(deleteStage.error)}</Alert>}
-		</ActionDialog>
+			confirmLabel="Delete stage" busy={deleteStage.isPending} onClose={()=>setDeleteTarget(null)} onSubmit={e=>{e.preventDefault();deleteStage.mutate(deleteTarget!.id)}}/>
 	</Stack>;
 }

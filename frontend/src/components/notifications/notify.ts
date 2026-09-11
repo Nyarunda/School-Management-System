@@ -17,10 +17,14 @@ function show(kind: Kind, message: string): void {
 // centrally controlled.
 export const notify = {
 	success: (message: string) => show("success", message),
-	// A permission-denied response is always shown as such, regardless of the
-	// domain-specific message the call site passed in.
+	// Prefers the real backend message (ApiError.message is already the
+	// server's own detail, e.g. "User lacks permission: leave.request.view")
+	// over the caller's generic fallback -- a blanket "You do not have
+	// permission to perform this action" for every 403 was hiding genuinely
+	// useful detail the backend already provided. `message` is only used
+	// when there's no error object to read from.
 	error: (message: string, error?: unknown) => {
-		const text = error instanceof ApiError && error.status === 403 ? "You do not have permission to perform this action" : message;
+		const text = error instanceof ApiError || error instanceof Error ? error.message : message;
 		show("error", text);
 	},
 	warning: (message: string) => show("warning", message),
