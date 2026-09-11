@@ -305,6 +305,30 @@ Root cause, confirmed by direct code reading: `apps/finance/mpesa_api.py`'s thre
 
 Full per-phase/traffic-class latency table and per-5s server-side samples: `backend/loadtest/reports/area6-5e1.md` (generated, not reproduced in full here).
 
+### 5E-1-explore — Callback-ingestion capacity, throttle raised ✅ MEASURED
+
+**Run:** `area6-5e1-explore`, same 20-tenant manifest and full ramp (`100,500,1000,2500,5000` events/min × 300s/step) as the as-configured run above, but launched with `docker-compose.loadtest.throttle-explore.yml` (`THROTTLE_RATE_MPESA_CALLBACK=100000/min`, load-test environment only — `5f566f3`). Purpose: with the 120/min-per-IP throttle out of the way, find the *next* bottleneck layer (HTTP/DB/Celery) beneath it, per the plan recorded above. Clearly labeled exploratory — never to be conflated with the as-configured 120/min finding.
+
+**Result: no deeper bottleneck found at the ramp levels tested.** 44,708 total requests, overall error rate **0.02%** (8 client-side timeouts/exceptions, zero non-2xx HTTP responses across the entire run):
+
+| Ramp step (events/min) | n | HTTP errors | p50 | p95 | p99 | max |
+|---|---|---|---|---|---|---|
+| 100 | 514 | 0 | 63ms | 125ms | 1,485ms | 1,625ms |
+| 500 | 2,381 | 0 (2 client-side) | 63ms | 172ms | 406ms | 1,890ms |
+| 1000 | 4,796 | 0 (1 client-side) | 78ms | 156ms | 437ms | 1,125ms |
+| 2500 | 11,947 | 0 (5 client-side) | 94ms | 219ms | 454ms | 3,656ms |
+| 5000 | 25,070 | 0 | 109ms | 235ms | 625ms | 2,344ms |
+
+The top step actually achieved ~83.6 req/s (25,070 requests / 300s), matching its 5,000/min target — the harness kept pace and the backend absorbed it. Latency grows mildly but stays well bounded even at the top step. Server-side samples: PostgreSQL stayed essentially idle throughout (1-2 active connections, 0 deadlocks, 0 lock waits) — confirming the ingestion HTTP view + `MpesaCallbackLog` insert is cheap and was never DB-bound, at any tested rate.
+
+**Honest capacity statement (per scope — no invented target):** callback-ingestion capacity is *at least* ~83.6 req/s sustained for 5 minutes with negligible errors and bounded latency. The exploratory run did **not** locate the true ingestion-layer ceiling — it was never reached at the ramp levels tested. Establishing the actual ceiling would require pushing the ramp beyond 5,000 events/min, which is out of scope for this run (the documented ramp tops out at 5,000/min); recorded as a capacity-planning note, not fabricated as a number we didn't measure.
+
+**Important scope note — the growing `MpesaCallbackLog` backlog is expected here, not a defect:** the sampler's `callback_backlog_count` climbed to 52,286 by the end of the run and did not drain, including ~2 minutes of idle sampling after the harness stopped sending. This is **by design for the 5e1 phase**, confirmed by direct code reading: `harness.py`'s `5e1` phase only runs `run_ramp` (raw C2B confirmations into the unverified inbox) and explicitly sets `expect_payment=False` — it never runs the operator pool that performs `CallbackVerifyView`/`CallbackProcessView` (`apps/finance/mpesa_api.py`), which are authenticated, evidence-required, human/bursar-driven actions per the frozen 5C.1 trust boundary (callback → durable unverified inbox → **verification** → **process** → `IncomingPayment` → settlement) — there is no automatic Celery task that drains this backlog, deliberately, since an unverified callback must never become money on its own. Verified financial-processing capacity is a distinct, not-yet-measured number — that's what 5E-2 (operator-pool-driven verify/process throughput) tests next, per Area 6 scope's "distinguish callback ingestion / verified financial-processing / sustainable mixed end-to-end" instruction.
+
+`loadtest_reconcile` PASS — no violations, confirming the high-volume ingestion itself produced no duplicate/missing-payment integrity issues even before any verification occurred.
+
+Full latency table and per-5s server-side samples: `backend/loadtest/reports/area6-5e1-explore.md` (generated, not reproduced in full here).
+
 ## Area 7 — Operational resilience
 *Not started.*
 
