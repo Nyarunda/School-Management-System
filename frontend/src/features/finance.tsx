@@ -20,6 +20,9 @@ type AcademicLevel={id:string;name:string;code:string;sequence:number};
 type AcademicTerm={id:string;academic_year:string;name:string;starts_on:string;ends_on:string;sequence:number};
 type PaymentMethod={id:string;name:string;code:string;is_active:boolean};
 type Structure={id:string;name:string;academic_year:string;academic_level:string;term:string;is_active:boolean;is_approved:boolean;lines:Line[]};
+type ClassGroupOption={id:string;name:string;code:string;stream:string;academic_level:string};
+type BulkAssignResult={students_matched:number;assignments_created:number;invoices_created:number;failures:{student:string;reason:string}[]};
+type BulkTermInvoiceResult={assignments_matched:number;invoices_created:number;failures:{student:string;reason:string}[]};
 type Assignment={id:string;student:string;student_name:string;fee_structure:string;fee_structure_name:string;status:string;assigned_at:string};
 type Invoice={id:string;invoice_number:string;student:string;assignment:string;status:string;subtotal:string;discount_total:string;total:string;issued_at:string|null;created_at:string};
 type Allocation={id:string;payment:string;invoice:string;amount:string;allocated_at:string};
@@ -81,6 +84,28 @@ export function FeeStructuresPage(){
 		onError:error=>notify.error("Fee line could not be added",error),
 	});
 
+	// Bulk rollout: assigns the (approved) structure to every actively
+	// enrolled student in its own academic year + level -- or just one class
+	// within it -- and generates each of their invoices in the same action.
+	// The catalogue endpoint (not attendance's teacher-scoped one) so a bursar
+	// sees every class in the level, not just ones they teach.
+	const [bulkClassGroup,setBulkClassGroup]=useState("");
+	const classGroups=useQuery({queryKey:["class-groups-catalogue",selected?.academic_level],queryFn:()=>api<Page<ClassGroupOption>>("/academics/class-groups/catalogue/",{params:{academic_level:selected!.academic_level,page_size:100}}),enabled:!!selected?.is_approved});
+	const bulkAssign=useMutation({
+		mutationFn:()=>api<BulkAssignResult>(`/finance/fee-structures/${selected!.id}/bulk-assign/`,{method:"POST",body:JSON.stringify(bulkClassGroup?{class_group:bulkClassGroup}:{})}),
+		onSuccess:result=>{
+			void qc.invalidateQueries({queryKey:["fee-structures"]});
+			void qc.invalidateQueries({queryKey:["assignments"]});
+			void qc.invalidateQueries({queryKey:["invoices"]});
+			setSelected(null);
+			setBulkClassGroup("");
+			const summary=`Matched ${result.students_matched} students -- ${result.assignments_created} new assignments, ${result.invoices_created} new invoices`;
+			if(result.failures.length)notify.warning(`${summary}. ${result.failures.length} invoice(s) failed: ${result.failures.map(f=>`${f.student} (${f.reason})`).join("; ")}`);
+			else notify.success(summary);
+		},
+		onError:error=>notify.error("Bulk assignment could not be completed",error),
+	});
+
 	const columns:Column<Structure>[]=[
 		{key:"name",header:"Structure",cell:r=><><Text size="sm" fw={600}>{r.name}</Text><Text size="xs" c="dimmed">{r.lines.length} fee lines</Text></>},
 		{key:"year",header:"Academic year",cell:r=>yearName(r.academic_year)},
@@ -105,7 +130,7 @@ export function FeeStructuresPage(){
 			</Stack>
 		</ActionDialog>
 
-		<ActionDialog open={!!selected} title={selected?.name??"Fee structure"} description="Approval makes this structure available for student assignment." confirmLabel="Approve structure" busy={approve.isPending} onClose={()=>setSelected(null)} onSubmit={e=>{e.preventDefault();if(selected&&!selected.is_approved)approve.mutate(selected.id)}}>
+		<ActionDialog open={!!selected} title={selected?.name??"Fee structure"} description="Approval makes this structure available for student assignment." confirmLabel="Approve structure" busy={approve.isPending} onClose={()=>{setSelected(null);setBulkClassGroup("")}} onSubmit={e=>{e.preventDefault();if(selected&&!selected.is_approved)approve.mutate(selected.id)}}>
 			<Stack gap="sm">
 				<Stack gap={4}>
 					{selected?.lines.map(l=>
@@ -116,7 +141,11 @@ export function FeeStructuresPage(){
 					)}
 					{!selected?.lines.length&&<Text size="sm" c="dimmed">No lines yet.</Text>}
 				</Stack>
-				{selected?.is_approved&&<Text size="sm" c="dimmed">This structure is already approved.</Text>}
+				{selected?.is_approved&&can("finance.invoice.create")&&<Stack gap="sm" mt="sm">
+					<Text size="sm" c="dimmed">Assign this structure and generate invoices for every actively enrolled student in this level, or just one class.</Text>
+					<Select label="Class" placeholder={classGroups.isLoading?"Loading classes…":"Entire level (every class)"} clearable data={classGroups.data?.results.map(c=>({value:c.id,label:`${c.name}${c.stream?" · "+c.stream:""}`}))??[]} value={bulkClassGroup||null} onChange={value=>setBulkClassGroup(value??"")}/>
+					<Button disabled={bulkAssign.isPending} onClick={()=>bulkAssign.mutate()}>{bulkClassGroup?"Assign & invoice this class":"Assign & invoice entire level"}</Button>
+				</Stack>}
 				{selected&&!selected.is_approved&&canEdit&&<Stack gap="sm" mt="sm">
 					<Select label="Fee item" placeholder="Select fee item" data={feeItems.data?.results.map(i=>({value:i.id,label:i.name}))??[]} value={lineItem||null} onChange={value=>setLineItem(value??"")}/>
 					<NumberInput label="Amount (KES)" min={0.01} decimalScale={2} value={lineAmount} onChange={value=>setLineAmount(value===""||value===undefined?"":Number(value))}/>
@@ -158,6 +187,27 @@ export function AssignmentsPage(){
 	const create=useMutation({mutationFn:()=>api("/finance/student-fee-assignments/",{method:"POST",body:JSON.stringify({student:studentId,fee_structure:structure})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});setOpen(false);notify.success("Fee structure assigned to student")},onError:error=>notify.error("Fee assignment could not be created",error)});
 	const generate=useMutation({mutationFn:(id:string)=>api(`/finance/student-fee-assignments/${id}/generate-invoice/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});void qc.invalidateQueries({queryKey:["invoices"]});notify.success("Invoice generated")},onError:error=>notify.error("Invoice could not be generated",error)});
 
+	// Term-wide catch-up: sweeps every active assignment across every
+	// class/level whose fee structure belongs to the chosen term and invoices
+	// whatever doesn't already have one -- the "close out this term's billing"
+	// action, independent of how each assignment was created (individually,
+	// or via a fee structure's own Assign & invoice bulk action).
+	const [termOpen,setTermOpen]=useState(false);
+	const [generateTerm,setGenerateTerm]=useState("");
+	const generateForTerm=useMutation({
+		mutationFn:()=>api<BulkTermInvoiceResult>(`/finance/terms/${generateTerm}/generate-invoices/`,{method:"POST"}),
+		onSuccess:result=>{
+			void qc.invalidateQueries({queryKey:["assignments"]});
+			void qc.invalidateQueries({queryKey:["invoices"]});
+			setTermOpen(false);
+			setGenerateTerm("");
+			const summary=`Checked ${result.assignments_matched} assignments -- ${result.invoices_created} new invoices`;
+			if(result.failures.length)notify.warning(`${summary}. ${result.failures.length} failed: ${result.failures.map(f=>`${f.student} (${f.reason})`).join("; ")}`);
+			else notify.success(summary);
+		},
+		onError:error=>notify.error("Term invoices could not be generated",error),
+	});
+
 	const columns:Column<Assignment>[]=[
 		{key:"student",header:"Student",cell:r=><Text size="sm" fw={600}>{r.student_name}</Text>},
 		{key:"structure",header:"Fee structure",cell:r=>r.fee_structure_name},
@@ -167,10 +217,16 @@ export function AssignmentsPage(){
 	];
 
 	return <>
-		<WorkspaceHeader title="Fee assignments" description="Assign an approved fee structure, then generate the student's draft invoice." action={canAssign?<Button onClick={()=>{setStudentId("");setStructure("");setOpen(true)}}>+ Assign fees</Button>:undefined}/>
+		<WorkspaceHeader title="Fee assignments" description="Assign an approved fee structure, then generate the student's draft invoice." action={canAssign?<Group gap="sm"><Button variant="default" onClick={()=>{setGenerateTerm("");setTermOpen(true)}}>Generate invoices for term</Button><Button onClick={()=>{setStudentId("");setStructure("");setOpen(true)}}>+ Assign fees</Button></Group>:undefined}/>
 		<DataTable title="Fee assignments" columns={columns} rows={data.query.data?.results??[]} rowKey={r=>r.id} loading={data.query.isLoading} error={data.query.error} retry={()=>void data.query.refetch()} onRefresh={()=>void data.query.refetch()}
 			count={data.query.data?.count} page={data.page} previous={!!data.query.data?.previous} next={!!data.query.data?.next} onPage={data.setPage}
 		/>
+
+		<ActionDialog open={termOpen} title="Generate invoices for term" description="Generates an invoice for every active fee assignment in the chosen term that doesn't already have one, across every class and level." confirmLabel="Generate invoices" busy={generateForTerm.isPending} onClose={()=>setTermOpen(false)} onSubmit={e=>{e.preventDefault();if(generateTerm)generateForTerm.mutate()}}>
+			<Stack gap="sm">
+				<Select label="Term" required placeholder="Select term" data={terms.data?.results.map(t=>({value:t.id,label:t.name}))??[]} value={generateTerm||null} onChange={value=>setGenerateTerm(value??"")}/>
+			</Stack>
+		</ActionDialog>
 
 		<ActionDialog open={open} title="Assign fee structure" description="Only approved structures are offered. Assigning the same student and structure again is safe -- it returns the existing assignment rather than creating a duplicate." confirmLabel="Assign fees" busy={create.isPending} onClose={()=>setOpen(false)} onSubmit={e=>{e.preventDefault();create.mutate()}}>
 			<Stack gap="sm">

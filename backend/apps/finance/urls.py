@@ -7,6 +7,7 @@ from .api import (
     FeeCategoryListCreateView,
     FeeItemListCreateView,
     FeeStructureApproveView,
+    FeeStructureBulkAssignView,
     FeeStructureLineCreateView,
     FeeStructureListCreateView,
     FinanceSetupView,
@@ -23,6 +24,7 @@ from .api import (
     PaymentReversalView,
     StudentFinanceView,
     StudentLedgerListView,
+    TermInvoiceGenerateView,
 )
 from .mpesa_api import (
     StkRequestListView, StkRequestDetailView, StkRequestQueryView, StkRequestIdentifyView,
@@ -54,8 +56,10 @@ urlpatterns = [
     path("fee-structures/", FeeStructureListCreateView.as_view(), name="fee-structure-list"),
     path("fee-structures/<uuid:structure_id>/lines/", FeeStructureLineCreateView.as_view(), name="fee-structure-line-create"),
     path("fee-structures/<uuid:structure_id>/approve/", FeeStructureApproveView.as_view(), name="fee-structure-approve"),
+    path("fee-structures/<uuid:structure_id>/bulk-assign/", FeeStructureBulkAssignView.as_view(), name="fee-structure-bulk-assign"),
     path("student-fee-assignments/", AssignmentListCreateView.as_view(), name="student-fee-assignment-list"),
     path("student-fee-assignments/<uuid:assignment_id>/generate-invoice/", InvoiceGenerateView.as_view(), name="invoice-generate"),
+    path("terms/<uuid:term_id>/generate-invoices/", TermInvoiceGenerateView.as_view(), name="term-invoice-generate"),
     path("invoices/", InvoiceListView.as_view(), name="invoice-list"),
     path("invoices/<uuid:invoice_id>/issue/", InvoiceIssueView.as_view(), name="invoice-issue"),
     path("credit-notes/", CreditNoteListCreateView.as_view(), name="credit-note-list"),

@@ -116,6 +116,35 @@ class TermListView(ListAPIView):
         return queryset.order_by("-academic_year__starts_on", "sequence")
 
 
+class ClassGroupCatalogueSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ClassGroup
+        fields = ["id", "name", "code", "stream", "academic_level"]
+        read_only_fields = fields
+
+
+class ClassGroupCatalogueListView(ListAPIView):
+    """Read-only reference catalogue -- same purpose as TermListView above
+    (populating a picker), for consumers like Finance's bulk fee-assignment
+    action that need every class group in a level, not the attendance-scoped
+    subset ClassGroupListView below restricts to the caller's own
+    TeacherAssignment rows. Unlike ClassGroupSerializer below, academic_level
+    is the raw id here (not a resolved name) since callers filter by it.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = ClassGroupCatalogueSerializer
+    pagination_class = AcademicsPagination
+
+    def get_queryset(self):
+        tenant = resolve_academics_tenant(self.request, "academics.setup.view")
+        queryset = ClassGroup.objects.for_tenant(tenant)
+        academic_level_id = self.request.query_params.get("academic_level")
+        if academic_level_id:
+            queryset = queryset.filter(academic_level_id=academic_level_id)
+        return queryset.order_by("name")
+
+
 class ClassGroupSerializer(serializers.ModelSerializer):
     academic_level = serializers.CharField(source="academic_level.name", read_only=True)
     campus = serializers.CharField(source="campus.name", read_only=True)

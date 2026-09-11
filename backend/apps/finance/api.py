@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.academics.models import AcademicLevel, AcademicYear, Term
+from apps.academics.models import AcademicLevel, AcademicYear, ClassGroup, Term
 from apps.activity.services import record_activity
 from apps.students.models import Student
 from apps.platform.services import require_module_enabled
@@ -47,6 +47,8 @@ from .services import (
     allocate_payment,
     approve_fee_structure,
     assign_fee_structure,
+    bulk_assign_fee_structure,
+    bulk_generate_invoices_for_term,
     create_fee_structure,
     generate_invoice,
     ignore_incoming_payment,
@@ -272,6 +274,23 @@ class FeeStructureApproveView(APIView):
         return Response(FeeStructureSerializer(structure).data)
 
 
+class FeeStructureBulkAssignView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, structure_id):
+        tenant = resolve_finance_tenant(request, "finance.invoice.create")
+        structure = get_object_or_404(FeeStructure.objects.for_tenant(tenant), pk=structure_id)
+        class_group = None
+        class_group_id = request.data.get("class_group")
+        if class_group_id:
+            class_group = resolve_tenant_object(ClassGroup.objects.for_tenant(tenant), class_group_id)
+        try:
+            result = bulk_assign_fee_structure(user=request.user, tenant=tenant, fee_structure=structure, class_group=class_group)
+        except ValidationError as error:
+            return api_validation_error(error)
+        return Response(result, status=status.HTTP_200_OK)
+
+
 class AssignmentSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source="student.full_name", read_only=True)
     fee_structure_name = serializers.CharField(source="fee_structure.name", read_only=True)
@@ -342,6 +361,19 @@ class InvoiceGenerateView(APIView):
         assignment = get_object_or_404(StudentFeeAssignment.objects.for_tenant(tenant), pk=assignment_id)
         invoice = generate_invoice(user=request.user, tenant=tenant, assignment=assignment)
         return Response(InvoiceSerializer(invoice).data, status=status.HTTP_201_CREATED)
+
+
+class TermInvoiceGenerateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, term_id):
+        tenant = resolve_finance_tenant(request, "finance.invoice.create")
+        term = resolve_tenant_object(Term.objects.for_tenant(tenant), term_id)
+        try:
+            result = bulk_generate_invoices_for_term(user=request.user, tenant=tenant, term=term)
+        except ValidationError as error:
+            return api_validation_error(error)
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class InvoiceIssueView(APIView):

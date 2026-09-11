@@ -5,6 +5,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Sum
 from django.utils import timezone
 
+from apps.academics.models import EnrollmentStatus, StudentEnrollment
 from apps.activity.services import record_activity
 from apps.notifications.services import publish_notification_event
 from apps.students.models import Student
@@ -181,6 +182,100 @@ def generate_invoice(*, user, tenant, assignment):
         if replay is None:
             raise ValidationError("Invoice generation conflicted with another request") from error
         return replay
+
+
+def bulk_assign_fee_structure(*, user, tenant, fee_structure, class_group=None):
+    """Assign fee_structure -- and generate the invoice -- for every actively
+    enrolled student in the structure's own academic year + level (or, if
+    class_group is given, just that one class within it). The individual
+    assign_fee_structure/generate_invoice calls above already require one
+    click each; this is the rollout action once a structure is approved.
+
+    One student's invoice failing (e.g. a structure line was later
+    deactivated) does not abort the rest of the batch -- each failure is
+    collected and returned rather than raised, since a partial success is
+    far more useful here than an all-or-nothing rollback for a run that may
+    touch hundreds of students.
+    """
+    require_permission(user=user, tenant=tenant, permission="finance.invoice.create")
+    validate_same_tenant(tenant=tenant, fee_structure=fee_structure)
+    if not fee_structure.is_approved:
+        raise ValidationError("Only approved fee structures can be assigned")
+    if class_group is not None:
+        validate_same_tenant(tenant=tenant, class_group=class_group)
+        if class_group.academic_level_id != fee_structure.academic_level_id:
+            raise ValidationError("Class must belong to the fee structure's academic level")
+    enrollments = StudentEnrollment.objects.filter(
+        tenant=tenant,
+        academic_year=fee_structure.academic_year,
+        academic_level=fee_structure.academic_level,
+        status=EnrollmentStatus.ACTIVE,
+    ).select_related("student")
+    if class_group is not None:
+        enrollments = enrollments.filter(class_group=class_group)
+    students_matched = 0
+    assignments_created = 0
+    invoices_created = 0
+    failures = []
+    for enrollment in enrollments:
+        students_matched += 1
+        assignment, created = StudentFeeAssignment.objects.get_or_create(
+            tenant=tenant,
+            student=enrollment.student,
+            fee_structure=fee_structure,
+            defaults={"status": FeeAssignmentStatus.ACTIVE},
+        )
+        if created:
+            assignments_created += 1
+        had_invoice = Invoice.objects.filter(tenant=tenant, assignment=assignment).exists()
+        try:
+            generate_invoice(user=user, tenant=tenant, assignment=assignment)
+        except ValidationError as error:
+            failures.append({"student": enrollment.student.full_name, "reason": "; ".join(error.messages)})
+            continue
+        if not had_invoice:
+            invoices_created += 1
+    return {
+        "students_matched": students_matched,
+        "assignments_created": assignments_created,
+        "invoices_created": invoices_created,
+        "failures": failures,
+    }
+
+
+def bulk_generate_invoices_for_term(*, user, tenant, term):
+    """Sweep every active fee assignment whose structure belongs to `term`
+    and generate the invoice if it doesn't already have one. Unlike
+    bulk_assign_fee_structure above, this is invoice-only and spans every
+    class/level in the term at once -- it catches up any assignment however
+    it was created (individually, or via bulk_assign_fee_structure for a
+    different class), so it's the "close out the term's billing" action.
+    """
+    require_permission(user=user, tenant=tenant, permission="finance.invoice.create")
+    validate_same_tenant(tenant=tenant, term=term)
+    assignments = StudentFeeAssignment.objects.filter(
+        tenant=tenant,
+        status=FeeAssignmentStatus.ACTIVE,
+        fee_structure__term=term,
+    ).select_related("student", "fee_structure")
+    assignments_matched = 0
+    invoices_created = 0
+    failures = []
+    for assignment in assignments:
+        assignments_matched += 1
+        had_invoice = Invoice.objects.filter(tenant=tenant, assignment=assignment).exists()
+        try:
+            generate_invoice(user=user, tenant=tenant, assignment=assignment)
+        except ValidationError as error:
+            failures.append({"student": assignment.student.full_name, "reason": "; ".join(error.messages)})
+            continue
+        if not had_invoice:
+            invoices_created += 1
+    return {
+        "assignments_matched": assignments_matched,
+        "invoices_created": invoices_created,
+        "failures": failures,
+    }
 
 
 @transaction.atomic
