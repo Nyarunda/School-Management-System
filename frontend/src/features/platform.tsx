@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Badge, Box, Button, Checkbox, Group, Modal, MultiSelect, Select, SimpleGrid, Stack, Table, Text, TextInput } from "@mantine/core";
+import { Badge, Box, Button, Checkbox, Group, Modal, MultiSelect, Select, SimpleGrid, Stack, Switch, Table, Text, TextInput } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import { api, Page } from "../api/client";
 import { ActionDialog } from "../components/ActionDialog";
@@ -16,6 +16,8 @@ type TenantRow={id:string;name:string;slug:string;is_active:boolean;created_at:s
 type TenantDetail={id:string;name:string;slug:string;is_active:boolean;created_at:string;plan:Plan|null;enabled_modules:string[]};
 type Override={module_code:string;is_enabled:boolean};
 type TenantAuditRow={id:number;actor:string|null;action:string;resource_type:string;resource_id:string;metadata:Record<string,unknown>;created_at:string};
+type TenantIntegrationChannel={channel:string;label:string;enabled:boolean;provider_configured:boolean;provider:string;sender_id:string;provider_active:boolean};
+type TenantIntegrations={notifications_enabled:boolean;channels:TenantIntegrationChannel[];mpesa:{configured:boolean;environment:string;shortcode:string;is_active:boolean}};
 const when=(v:string)=>new Intl.DateTimeFormat("en-KE",{dateStyle:"medium",timeStyle:"short"}).format(new Date(v));
 
 function usePaged<T>(key:string,path:string,params?:Record<string,string|number|undefined>){
@@ -44,6 +46,7 @@ export function TenantsPage(){
 		{key:"modules",header:"Modules",cell:r=>`${r.enabled_module_count} enabled`},
 		{key:"status",header:"Status",cell:r=><StatusBadge value={r.is_active?"Active":"Suspended"}/>},
 		{key:"created",header:"Provisioned",cell:r=>when(r.created_at)},
+		{key:"action",header:"",cell:r=><Button size="xs" variant="default" onClick={e=>{e.stopPropagation();setSelectedId(r.id)}}>Manage</Button>},
 	];
 
 	return <>
@@ -72,8 +75,30 @@ function TenantDetailModal({tenantId,onClose}:{tenantId:string;onClose:()=>void}
 	const modules=useQuery({queryKey:["platform-modules"],queryFn:()=>api<ModuleDef[]>("/platform/modules/",{tenant:false})});
 	const overrides=useQuery({queryKey:["platform-tenant-overrides",tenantId],queryFn:()=>api<Override[]>(`/platform/tenants/${tenantId}/overrides/`,{tenant:false})});
 	const audit=useQuery({queryKey:["platform-tenant-audit",tenantId],queryFn:()=>api<Page<TenantAuditRow>>(`/platform/tenants/${tenantId}/audit-events/`,{params:{page_size:10},tenant:false})});
+	const integrations=useQuery({queryKey:["platform-tenant-integrations",tenantId],queryFn:()=>api<TenantIntegrations>(`/platform/tenants/${tenantId}/integrations/`,{tenant:false})});
 
-	const invalidateAll=()=>{void qc.invalidateQueries({queryKey:["platform-tenant-detail",tenantId]});void qc.invalidateQueries({queryKey:["platform-tenants"]});void qc.invalidateQueries({queryKey:["platform-tenant-overrides",tenantId]});void qc.invalidateQueries({queryKey:["platform-tenant-audit",tenantId]})};
+	const invalidateAll=()=>{void qc.invalidateQueries({queryKey:["platform-tenant-detail",tenantId]});void qc.invalidateQueries({queryKey:["platform-tenants"]});void qc.invalidateQueries({queryKey:["platform-tenant-overrides",tenantId]});void qc.invalidateQueries({queryKey:["platform-tenant-audit",tenantId]});void qc.invalidateQueries({queryKey:["platform-tenant-integrations",tenantId]})};
+
+	const toggleNotifications=useMutation({
+		mutationFn:(enabled:boolean)=>api<TenantIntegrations>(`/platform/tenants/${tenantId}/integrations/`,{method:"PATCH",tenant:false,body:JSON.stringify({notifications_enabled:enabled})}),
+		onSuccess:()=>{invalidateAll();notify.success("Notifications setting updated")},
+		onError:error=>notify.error("Could not update notifications setting",error),
+	});
+	const toggleChannel=useMutation({
+		mutationFn:(args:{channel:string;enabled:boolean})=>api(`/platform/tenants/${tenantId}/integrations/channels/${args.channel}/`,{method:"PUT",tenant:false,body:JSON.stringify({enabled:args.enabled})}),
+		onSuccess:()=>{invalidateAll();notify.success("Channel updated")},
+		onError:error=>notify.error("Channel could not be updated",error),
+	});
+	const toggleProvider=useMutation({
+		mutationFn:(args:{channel:string;provider_active:boolean})=>api(`/platform/tenants/${tenantId}/integrations/channels/${args.channel}/`,{method:"PUT",tenant:false,body:JSON.stringify({provider_active:args.provider_active})}),
+		onSuccess:()=>{invalidateAll();notify.success("Provider updated")},
+		onError:error=>notify.error("Provider could not be updated",error),
+	});
+	const toggleMpesa=useMutation({
+		mutationFn:(is_active:boolean)=>api(`/platform/tenants/${tenantId}/integrations/mpesa/`,{method:"PUT",tenant:false,body:JSON.stringify({is_active})}),
+		onSuccess:()=>{invalidateAll();notify.success("M-Pesa setting updated")},
+		onError:error=>notify.error("M-Pesa setting could not be updated",error),
+	});
 
 	const toggleActive=useMutation({
 		mutationFn:()=>api<TenantDetail>(`/platform/tenants/${tenantId}/`,{method:"PATCH",tenant:false,body:JSON.stringify({is_active:!detail.data!.is_active})}),
@@ -152,6 +177,39 @@ function TenantDetailModal({tenantId,onClose}:{tenantId:string;onClose:()=>void}
 						<Select label="Force" data={[{value:"true",label:"Enabled"},{value:"false",label:"Disabled"}]} value={String(overrideEnabled)} onChange={value=>setOverrideEnabled(value==="true")} w={130}/>
 						<Button size="xs" variant="default" disabled={!overrideModule||setOverride.isPending} onClick={()=>setOverride.mutate()}>Set override</Button>
 					</Group>
+				</Box>
+
+				<Box>
+					<Text fz={12} fw={600} tt="uppercase" c="dimmed" mb={6}>Integrations</Text>
+					<Text size="xs" c="dimmed" mb={6}>Status and on/off switches only -- credentials (SMTP password, SMS/M-Pesa keys) stay self-service in the school's own settings.</Text>
+					{integrations.isLoading?<Loading/>:!integrations.data?<Text size="sm" c="dimmed">Unavailable.</Text>:
+						<Stack gap="xs">
+							<Group justify="space-between" wrap="nowrap">
+								<Text size="sm">Notifications (master switch)</Text>
+								<Switch checked={integrations.data.notifications_enabled} onChange={e=>toggleNotifications.mutate(e.currentTarget.checked)} disabled={toggleNotifications.isPending}/>
+							</Group>
+							{integrations.data.channels.map(ch=>
+								<Group key={ch.channel} justify="space-between" wrap="nowrap">
+									<Box>
+										<Text size="sm">{ch.label}</Text>
+										<Text size="xs" c="dimmed">{ch.provider_configured?`${ch.provider||"Provider"}${ch.sender_id?` · ${ch.sender_id}`:""}`:"No provider configured yet"}</Text>
+									</Box>
+									<Group gap="md">
+										{ch.provider_configured&&<Group gap={4}><Text size="xs" c="dimmed">Provider active</Text><Switch size="sm" checked={ch.provider_active} onChange={e=>toggleProvider.mutate({channel:ch.channel,provider_active:e.currentTarget.checked})} disabled={toggleProvider.isPending}/></Group>}
+										<Group gap={4}><Text size="xs" c="dimmed">Channel on</Text><Switch size="sm" checked={ch.enabled} onChange={e=>toggleChannel.mutate({channel:ch.channel,enabled:e.currentTarget.checked})} disabled={toggleChannel.isPending}/></Group>
+									</Group>
+								</Group>
+							)}
+							<Group justify="space-between" wrap="nowrap">
+								<Box>
+									<Text size="sm">M-Pesa</Text>
+									<Text size="xs" c="dimmed">{integrations.data.mpesa.configured?`${integrations.data.mpesa.environment} · ${integrations.data.mpesa.shortcode}`:"Not configured"}</Text>
+								</Box>
+								{integrations.data.mpesa.configured
+									?<Switch checked={integrations.data.mpesa.is_active} onChange={e=>toggleMpesa.mutate(e.currentTarget.checked)} disabled={toggleMpesa.isPending}/>
+									:<Text size="xs" c="dimmed">—</Text>}
+							</Group>
+						</Stack>}
 				</Box>
 
 				<Box>

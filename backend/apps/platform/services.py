@@ -220,6 +220,109 @@ def update_tenant(*, actor=None, tenant, name=None, is_active=None):
     return tenant
 
 
+def get_tenant_integrations(tenant):
+    """Status-only snapshot for the platform-admin Tenants panel: which
+    notification channels/providers and M-Pesa are configured and switched
+    on for this tenant. Deliberately never returns encrypted_api_key/
+    encrypted_api_secret/consumer_secret/passkey -- the platform admin gets
+    visibility and an enable/disable switch, not the tenant's credentials
+    (those stay self-service, same boundary already drawn for financial
+    data in the platform audit log).
+    """
+    from apps.finance.models import TenantMpesaConfiguration
+    from apps.notifications.models import CommunicationChannel, CommunicationSetup, NotificationChannel, NotificationProviderConfig
+
+    setup = CommunicationSetup.objects.filter(tenant=tenant).first()
+    channel_rows = {row.channel: row for row in CommunicationChannel.objects.filter(tenant=tenant)}
+    provider_rows = {row.channel: row for row in NotificationProviderConfig.objects.filter(tenant=tenant)}
+    channels = []
+    for channel, label in NotificationChannel.choices:
+        if channel == NotificationChannel.IN_APP:
+            continue
+        channel_row = channel_rows.get(channel)
+        provider_row = provider_rows.get(channel)
+        channels.append({
+            "channel": channel,
+            "label": label,
+            "enabled": channel_row.enabled if channel_row else False,
+            "provider_configured": provider_row is not None,
+            "provider": provider_row.provider if provider_row else "",
+            "sender_id": provider_row.sender_id if provider_row else "",
+            "provider_active": provider_row.is_active if provider_row else False,
+        })
+    mpesa = TenantMpesaConfiguration.objects.filter(tenant=tenant).first()
+    return {
+        "notifications_enabled": setup.notifications_enabled if setup else True,
+        "channels": channels,
+        "mpesa": {
+            "configured": mpesa is not None,
+            "environment": mpesa.environment if mpesa else "",
+            "shortcode": mpesa.shortcode if mpesa else "",
+            "is_active": mpesa.is_active if mpesa else False,
+        },
+    }
+
+
+def set_tenant_notifications_enabled(*, actor=None, tenant, enabled):
+    from apps.notifications.models import CommunicationSetup
+
+    setup, _ = CommunicationSetup.objects.get_or_create(tenant=tenant)
+    setup.notifications_enabled = enabled
+    setup.save(update_fields=["notifications_enabled"])
+    AuditEvent.objects.create(
+        tenant=tenant, actor=actor, action="platform.tenant.notifications_toggled",
+        resource_type="CommunicationSetup", resource_id=str(setup.pk), metadata={"enabled": enabled},
+    )
+    return setup
+
+
+def set_tenant_channel_enabled(*, actor=None, tenant, channel, enabled):
+    from apps.notifications.models import CommunicationChannel, NotificationChannel
+
+    valid_channels = {choice for choice, _ in NotificationChannel.choices} - {NotificationChannel.IN_APP}
+    if channel not in valid_channels:
+        raise ValidationError(f"Unknown or unsupported channel: {channel}")
+    row, _ = CommunicationChannel.objects.get_or_create(tenant=tenant, channel=channel)
+    row.enabled = enabled
+    row.save(update_fields=["enabled"])
+    AuditEvent.objects.create(
+        tenant=tenant, actor=actor, action="platform.tenant.channel_toggled",
+        resource_type="CommunicationChannel", resource_id=str(row.pk), metadata={"channel": channel, "enabled": enabled},
+    )
+    return row
+
+
+def set_tenant_provider_active(*, actor=None, tenant, channel, is_active):
+    from apps.notifications.models import NotificationProviderConfig
+
+    row = NotificationProviderConfig.objects.filter(tenant=tenant, channel=channel).first()
+    if row is None:
+        raise ValidationError("No provider is configured for this channel yet -- the tenant must set one up first")
+    row.is_active = is_active
+    row.save(update_fields=["is_active"])
+    AuditEvent.objects.create(
+        tenant=tenant, actor=actor, action="platform.tenant.provider_toggled",
+        resource_type="NotificationProviderConfig", resource_id=str(row.pk),
+        metadata={"channel": channel, "is_active": is_active},
+    )
+    return row
+
+
+def set_tenant_mpesa_active(*, actor=None, tenant, is_active):
+    from apps.finance.models import TenantMpesaConfiguration
+
+    row = TenantMpesaConfiguration.objects.filter(tenant=tenant).first()
+    if row is None:
+        raise ValidationError("M-Pesa is not configured for this tenant yet")
+    row.is_active = is_active
+    row.save(update_fields=["is_active"])
+    AuditEvent.objects.create(
+        tenant=tenant, actor=actor, action="platform.tenant.mpesa_toggled",
+        resource_type="TenantMpesaConfiguration", resource_id=str(row.pk), metadata={"is_active": is_active},
+    )
+    return row
+
+
 def provision_tenant(*, actor, name, slug, admin_email, admin_role_name="Administrator", admin_permissions=None):
     """The one Super Admin entry point for bringing a new tenant into
     existence with its first administrator -- everything else (schools

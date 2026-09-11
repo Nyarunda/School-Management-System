@@ -18,8 +18,13 @@ from .services import (
     create_plan,
     delete_plan,
     get_enabled_modules,
+    get_tenant_integrations,
     provision_tenant,
     set_module_override,
+    set_tenant_channel_enabled,
+    set_tenant_mpesa_active,
+    set_tenant_notifications_enabled,
+    set_tenant_provider_active,
     update_plan,
     update_tenant,
 )
@@ -318,6 +323,80 @@ class TenantModuleOverrideDetailView(APIView):
         tenant = get_object_or_404(Tenant, pk=tenant_id)
         clear_module_override(actor=request.user, tenant=tenant, module_code=module_code)
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class TenantIntegrationsPatchSerializer(serializers.Serializer):
+    notifications_enabled = serializers.BooleanField()
+
+
+class TenantIntegrationChannelToggleSerializer(serializers.Serializer):
+    enabled = serializers.BooleanField(required=False)
+    provider_active = serializers.BooleanField(required=False)
+
+    def validate(self, data):
+        if "enabled" not in data and "provider_active" not in data:
+            raise serializers.ValidationError("Provide 'enabled' and/or 'provider_active'")
+        return data
+
+
+class TenantIntegrationMpesaToggleSerializer(serializers.Serializer):
+    is_active = serializers.BooleanField()
+
+
+class TenantIntegrationsView(APIView):
+    """Status-only view of a tenant's notification/M-Pesa integrations for
+    the platform admin -- see services.get_tenant_integrations for why
+    credentials never appear here. PATCH only toggles the tenant-wide
+    notifications kill switch; per-channel/provider/mpesa toggles are
+    separate resources below.
+    """
+
+    permission_classes = [IsSuperUser]
+
+    def get(self, request, tenant_id):
+        tenant = get_object_or_404(Tenant, pk=tenant_id)
+        return Response(get_tenant_integrations(tenant))
+
+    def patch(self, request, tenant_id):
+        tenant = get_object_or_404(Tenant, pk=tenant_id)
+        serializer = TenantIntegrationsPatchSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        set_tenant_notifications_enabled(
+            actor=request.user, tenant=tenant, enabled=serializer.validated_data["notifications_enabled"],
+        )
+        return Response(get_tenant_integrations(tenant))
+
+
+class TenantIntegrationChannelView(APIView):
+    permission_classes = [IsSuperUser]
+
+    def put(self, request, tenant_id, channel):
+        tenant = get_object_or_404(Tenant, pk=tenant_id)
+        serializer = TenantIntegrationChannelToggleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        try:
+            if "enabled" in data:
+                set_tenant_channel_enabled(actor=request.user, tenant=tenant, channel=channel, enabled=data["enabled"])
+            if "provider_active" in data:
+                set_tenant_provider_active(actor=request.user, tenant=tenant, channel=channel, is_active=data["provider_active"])
+        except DjangoValidationError as error:
+            return api_validation_error(error)
+        return Response(get_tenant_integrations(tenant))
+
+
+class TenantIntegrationMpesaView(APIView):
+    permission_classes = [IsSuperUser]
+
+    def put(self, request, tenant_id):
+        tenant = get_object_or_404(Tenant, pk=tenant_id)
+        serializer = TenantIntegrationMpesaToggleSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        try:
+            set_tenant_mpesa_active(actor=request.user, tenant=tenant, is_active=serializer.validated_data["is_active"])
+        except DjangoValidationError as error:
+            return api_validation_error(error)
+        return Response(get_tenant_integrations(tenant))
 
 
 class PlatformAuditPagination(PageNumberPagination):
