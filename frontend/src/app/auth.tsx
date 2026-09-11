@@ -18,7 +18,17 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }
   async function refresh() { setLoading(true); setError(null); try { await loadSession(); } catch (caught) { authStore.setToken(null); setSession(null); setError(caught instanceof Error ? caught.message : "Could not load session"); } finally { setLoading(false); } }
   useEffect(() => { if (authStore.token()) void refresh(); }, []);
-  async function login(username:string,password:string) { const result=await api<{token:string}>("/auth/login/",{method:"POST",tenant:false,body:JSON.stringify({username,password})}); authStore.setToken(result.token); await loadSession(); }
+  async function login(username:string,password:string) {
+    const result=await api<{token:string}>("/auth/login/",{method:"POST",tenant:false,body:JSON.stringify({username,password})});
+    authStore.setToken(result.token);
+    // Clear any tenant remembered from a previous login on this browser --
+    // otherwise loadSession() sends a stale X-Tenant-Slug the newly
+    // authenticated user may have no membership in (403), even though the
+    // login itself just succeeded. A fresh login should resolve to this
+    // user's own first membership, same as the backend's own fallback.
+    authStore.setTenant(null);
+    await loadSession();
+  }
   async function logout() { try { await api("/auth/logout/",{method:"POST",tenant:false}); } finally { authStore.setToken(null);authStore.setTenant(null);setSession(null); } }
   async function selectTenant(slug:string) { authStore.setTenant(slug); await loadSession(slug); }
   const platformAccess = session?.user.is_platform_admin ?? false;
