@@ -267,7 +267,43 @@ No defect found; `apps/activity/durable_work.py` required no changes.
 All four checks PASS with no code changes required. `apps/activity/durable_work.py`'s claim/lease/reap design holds under three distinct real failure injections (Celery broker down, abrupt `SIGKILL` of a worker holding a claim, concurrent redelivery-style double-invocation, and a mid-transaction PostgreSQL connection kill), each proven against the live `docker compose` stack rather than reasoned from code alone.
 
 ## Area 6 — Performance & capacity
-*Not started.*
+*In progress.*
+
+**Baseline under test:** `bddebb9` (LoginPage error-signal fix, applied ahead of this area — unrelated frontend defect found live while Area 6 tooling ran). **Date started:** 2026-09-11.
+Scope: Milestone 5E's existing load-test tooling (`docs/architecture/load-testing.md`, `backend/loadtest/`) measures throughput/capacity against the real `docker compose` + `docker-compose.loadtest.yml` stack (gunicorn, explicit Celery concurrency, real PostgreSQL 17/Redis). Establish baselines first; only change code where measured evidence identifies an RC-level defect. Run at full documented ramp scale (100/500/1000/2500/5000 events/min, 300s/step).
+
+### Pre-check: two real defects found and fixed in the load-test tooling itself, before any capacity measurement (each its own commit, per RC process)
+
+| Finding | Classification | Resolution |
+|---|---|---|
+| `run_ramp`'s outer loop visited every tenant once per pass regardless of weight — `weight` only changed the sleep between sends, not how many times a tenant was actually hit, so noisy-neighbor runs silently produced ~1:1 tenant traffic instead of the intended 10:1 | **DEFECT, fixed** (`062475e`) | Each tenant now runs its own independent pacing loop for the full step, firing at its own weighted rate concurrently — mirrors the pattern already used by `run_operator_pool`/`run_stk_trickle`. Verified live at full ramp scale in 5E-1 below: measured ratio **9.17:1** (target 10:1) across 44,117 real events. |
+| Harness sent `httpx.BasicAuth` for every authenticated call (operator pool, STK trickle, 5e2 processing, backlog drain) — `config.settings.DEFAULT_AUTHENTICATION_CLASSES` is `[TokenAuthentication, SessionAuthentication]` (Milestone 22.4), no `BasicAuthentication`, so every such request 401'd. `drain_backlog`'s old "non-200 counts as zero" handling masked this as a clean "backlog drained" — `loadtest_reconcile` then correctly caught it as 28/28 `missing_payment` | **DEFECT, fixed** (`1d2e028`) | New `_tenant_headers()`: logs each bursar in once via the real login endpoint, caches the token. `drain_backlog` no longer treats a non-200/error as a confirmed zero. Verified live: re-ran the smoke phase — every request 200/201, `loadtest_reconcile` PASS (was 28/28 `missing_payment`). |
+
+### 5E-1 — Callback-ingestion capacity, as-configured ✅ MEASURED
+
+**Run:** `area6-5e1`, 20 tenants (1 noisy at 10x student count), full ramp `100,500,1000,2500,5000` events/min × 300s/step (~28 min incl. drain), server-side sampler at 5s intervals for the full window.
+
+**Noisy-neighbor weighting, proven at real scale (non-negotiable per scope)**: 44,117 total events. Noisy tenant (`loadtest-0`): **14,363** requests. Every one of the other 19 tenants: **exactly 1,566** each. Measured ratio **9.17:1** against a target of 10:1 (weights 10 vs 1 of 29 total) — the small gap from real async-scheduling jitter over a 28-minute run, not a repeat of the fixed bug. This is the harness's own weighted traffic, not simulated.
+
+**Headline finding — real 429 ceiling, not a deeper bottleneck**: 82.81% error rate overall, **100% of it `429 Too Many Requests`**, starting at the 500 events/min step:
+
+| Ramp step (events/min, combined) | 200 | 429 |
+|---|---|---|
+| 100 | 514 | 0 |
+| 500 | 961 | 1,421 |
+| 1000 | 1,706 | 3,044 |
+| 2500 | 1,962 | 9,311 |
+| 5000 | 2,286 | 19,372 (final partial step: 153 / 3,373) |
+
+Root cause, confirmed by direct code reading: `apps/finance/mpesa_api.py`'s three M-Pesa webhook views (`C2BConfirmationView`, `C2BValidationView`, STK callback) use stock DRF `ScopedRateThrottle` with `throttle_scope = "mpesa_callback"` (`THROTTLE_RATE_MPESA_CALLBACK`, default `120/min`) and **no custom `get_cache_key`** — meaning DRF's default anonymous-request keying applies: **by source IP, not by tenant/`callback_token`**. Server-side samples show PostgreSQL was essentially idle throughout (1 active connection the entire run, 0 deadlocks, 0 lock waits) — the throttle is the ceiling; nothing deeper was even reached.
+
+**Classification: RC capacity-planning finding requiring a go-live acceptance decision, not a code defect fixed this area.** The throttle is deliberately documented as "a protective ceiling against a flood/DoS, not ordinary traffic shaping" (`config/settings.py`) and is working exactly as configured. But because it's IP-keyed rather than tenant-keyed, and Safaricom's Daraja C2B confirmations for **every tenant on the platform** originate from Safaricom's own infrastructure, this could mean **~120/min combined across the whole platform**, not per-school, if Safaricom's callback source IPs are a small/shared set in production (not verified against the real Daraja sandbox here — this tool always runs against `loadtest/fake_daraja.py`, never the real internet, per the tool's own design). Business/architecture decision needed: should `mpesa_callback` be re-scoped to key by `callback_token` (tenant-aware) instead of source IP, or is `120/min` platform-wide an acceptable ceiling for the expected go-live scale? **Not fixed this area** — reclassifying DRF's throttle keying is a real code change candidate, not a load-test-environment tuning knob (unlike the login-throttle override below, which is purely a test-harness artifact).
+
+**Load-test-environment-only override, separate from the finding above**: also added `THROTTLE_RATE_LOGIN=1000/min` to `docker-compose.loadtest.yml` (not production) — ~20 tenants each logging in once from the harness's single client IP collided with the real 5/min-per-IP login throttle (RC Area 2), which is not the capacity dimension under test. This one *is* purely a test-tooling artifact: real users don't log in from one shared IP in bulk the way Safaricom's shared webhook source plausibly does.
+
+**Next**: re-run 5E-1 (and subsequent phases) with `THROTTLE_RATE_MPESA_CALLBACK` raised for the load-test environment only, clearly labeled as an exploratory/throttle-disabled run, to find the *next* bottleneck layer (DB/Celery/connection pool) beneath the throttle — reported separately from the as-configured number above, never conflated with it.
+
+Full per-phase/traffic-class latency table and per-5s server-side samples: `backend/loadtest/reports/area6-5e1.md` (generated, not reproduced in full here).
 
 ## Area 7 — Operational resilience
 *Not started.*
