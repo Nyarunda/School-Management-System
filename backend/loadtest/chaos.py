@@ -8,6 +8,7 @@ compose.
 """
 import argparse
 import json
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -22,9 +23,35 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 COMPOSE_FILES = ["-f", "docker-compose.yml", "-f", "docker-compose.loadtest.yml"]
 
+# `docker` isn't on PATH for every process that ends up running this module
+# -- e.g. harness.py launched as a plain native Windows `python -m
+# loadtest.harness` has no Docker Desktop dir on PATH even though an
+# interactive shell might. shutil.which() covers the common case (docker on
+# PATH); these are fallbacks for a default Docker Desktop install so a
+# missing-PATH environment doesn't silently kill the whole chaos plan on its
+# first scenario -- found live when 5E-3's chaos thread died with
+# `FileNotFoundError: [WinError 2]` before injecting anything.
+_DOCKER_FALLBACKS = [
+    Path.home() / "AppData/Local/Programs/DockerDesktop/resources/bin/docker.exe",
+    Path(r"C:\Program Files\Docker\Docker\resources\bin\docker.exe"),
+]
+
+
+def _docker_executable():
+    found = shutil.which("docker")
+    if found:
+        return found
+    for candidate in _DOCKER_FALLBACKS:
+        if candidate.is_file():
+            return str(candidate)
+    raise FileNotFoundError(
+        "docker executable not found on PATH or in known Docker Desktop install locations -- "
+        "chaos scenarios cannot run without it"
+    )
+
 
 def _compose(*args):
-    subprocess.run(["docker", "compose", *COMPOSE_FILES, *args], check=True, cwd=REPO_ROOT)
+    subprocess.run([_docker_executable(), "compose", *COMPOSE_FILES, *args], check=True, cwd=REPO_ROOT)
 
 
 def stop_redis():
@@ -65,7 +92,7 @@ def kill_postgres_connections():
     # from docker-compose.yml) give psql real credentials without hardcoding
     # them here.
     subprocess.run(
-        ["docker", "compose", *COMPOSE_FILES, "exec", "-T", "postgres", "sh", "-c",
+        [_docker_executable(), "compose", *COMPOSE_FILES, "exec", "-T", "postgres", "sh", "-c",
          'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c '
          '"SELECT pg_terminate_backend(pid) FROM pg_stat_activity '
          'WHERE state != \'idle\' AND pid != pg_backend_pid() AND datname = current_database();"'],
