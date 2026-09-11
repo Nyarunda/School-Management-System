@@ -360,7 +360,7 @@ class StudentAssessmentSummaryView(APIView):
             "window_days": self.SUMMARY_WINDOW_DAYS,
             "mark_status_counts": counts,
             "average_percentage": average_percentage,
-            "recent_results": AssessmentResultSerializer(recent, many=True).data,
+            "recent_results": StudentAssessmentResultListSerializer(recent, many=True).data,
         })
 
 

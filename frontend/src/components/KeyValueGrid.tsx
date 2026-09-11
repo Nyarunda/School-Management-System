@@ -19,7 +19,7 @@ export function KeyValueItem({ label, value }: { label: string; value: ReactNode
   return (
     <Box>
       <Text fz={12} c="dimmed">{label}</Text>
-      <Text fz={14} fw={500}>{value}</Text>
+      <Text component="div" fz={14} fw={500}>{value}</Text>
     </Box>
   );
 }

@@ -16,7 +16,10 @@ import { WorkspaceHeader } from "../components/WorkspaceHeader";
 
 type Row=Record<string,unknown>;
 const money=new Intl.NumberFormat("en-KE",{style:"currency",currency:"KES",maximumFractionDigits:0});
+const kes=new Intl.NumberFormat("en-KE",{style:"currency",currency:"KES",minimumFractionDigits:2});
 const pretty=(key:string)=>key.replace(/_/g," ").replace(/\b\w/g,(x:string)=>x.toUpperCase());
+const whenDateTime=(v:string|null)=>v?new Intl.DateTimeFormat("en-KE",{dateStyle:"medium",timeStyle:"short"}).format(new Date(v)):"—";
+const whenDate=(v:string|null)=>v?new Intl.DateTimeFormat("en-KE",{dateStyle:"medium"}).format(new Date(v)):"—";
 function display(value:unknown):React.ReactNode{if(value===null||value===undefined||value==="")return <span className="quiet">—</span>;if(typeof value==="boolean")return <StatusBadge value={value}/>;if(Array.isArray(value))return value.length?`${value.length} items`:<span className="quiet">None</span>;if(typeof value==="object"){const r=value as Row;return String(r.name??r.label??r.username??r.id??"Details")};const text=String(value);if(/^(active|inactive|draft|issued|paid|pending|approved|published|failed|rejected|open|submitted|processed|unmatched|matched)$/i.test(text))return <StatusBadge value={text}/>;return text}
 
 export function LoginPage() {
@@ -359,7 +362,115 @@ export function StudentsPage(){
  </>;
 }
 
-export function StudentPage({id}:{id:string}){const student=JSON.parse(sessionStorage.getItem(`student:${id}`)??"{}") as Row;const {can,moduleEnabled}=useAccess();const tabs=["Overview",...(moduleEnabled("finance")&&can("finance.student_account.view")?["Fees"]:[]),...(moduleEnabled("attendance")&&can("attendance.record.view")?["Attendance"]:[]),...(moduleEnabled("assessments")&&can("assessment.record.view")?["Assessments"]:[]),...(moduleEnabled("documents")&&can("students.document.view")?["Documents"]:[]),"Guardians","Activity"];const [tab,setTab]=useState("Overview");const finance=useQuery({queryKey:["student-finance",id],queryFn:()=>api<Row>(`/finance/students/${id}/finance/`),enabled:tab==="Fees"});const attendance=useQuery({queryKey:["student-attendance",id],queryFn:()=>api<Row>(`/attendance/students/${id}/summary/`),enabled:tab==="Attendance"});const assessments=useQuery({queryKey:["student-assessment",id],queryFn:()=>api<Row>(`/assessments/students/${id}/summary/`),enabled:tab==="Assessments"});return <>
+type StudentFinanceSummary={
+	summary:{outstanding_balance:string;total_invoiced:string;total_credited:string;total_paid:string;unapplied_cash:string};
+	recent_invoices:{id:string;invoice_number:string;status:string;total:string;issued_at:string|null;created_at:string}[];
+	recent_payments:{id:string;payment_method:string;amount:string;status:string;received_at:string;receipt:{receipt_number:string}|null;unallocated_amount:string}[];
+	recent_ledger_entries:{id:string;entry_type:string;amount:string;posted_at:string}[];
+};
+function StudentFinancePanel({query}:{query:{isLoading:boolean;isError:boolean;error:unknown;data?:StudentFinanceSummary}}){
+	const paymentMethods=useQuery({queryKey:["payment-methods-lookup"],queryFn:()=>api<Page<{id:string;name:string}>>("/finance/payment-methods/",{params:{page_size:100}}),enabled:!!query.data});
+	const methodName=(id:string)=>paymentMethods.data?.results.find(m=>m.id===id)?.name??id;
+	if(query.isLoading)return <Loading label="Loading finance summary"/>;
+	if(query.isError)return <ErrorState error={query.error}/>;
+	if(!query.data)return <Empty/>;
+	const data=query.data;
+	return <Stack gap="lg">
+		<KeyValueSection title="Balance">
+			<KeyValueGrid>
+				<KeyValueItem label="Outstanding balance" value={kes.format(Number(data.summary.outstanding_balance))}/>
+				<KeyValueItem label="Total invoiced" value={kes.format(Number(data.summary.total_invoiced))}/>
+				<KeyValueItem label="Total credited" value={kes.format(Number(data.summary.total_credited))}/>
+				<KeyValueItem label="Total paid" value={kes.format(Number(data.summary.total_paid))}/>
+				<KeyValueItem label="Unapplied cash" value={kes.format(Number(data.summary.unapplied_cash))}/>
+			</KeyValueGrid>
+		</KeyValueSection>
+		<Box>
+			<Text fz={11} fw={600} tt="uppercase" c="dimmed" mb={6}>Recent invoices</Text>
+			{!data.recent_invoices.length?<Text size="sm" c="dimmed">No invoices yet.</Text>:
+				<Table withTableBorder verticalSpacing="xs">
+					<Table.Thead><Table.Tr><Table.Th>Invoice</Table.Th><Table.Th>Status</Table.Th><Table.Th>Total</Table.Th><Table.Th>Issued</Table.Th></Table.Tr></Table.Thead>
+					<Table.Tbody>{data.recent_invoices.map(row=><Table.Tr key={row.id}><Table.Td ff="monospace">{row.invoice_number}</Table.Td><Table.Td><StatusBadge value={row.status}/></Table.Td><Table.Td>{kes.format(Number(row.total))}</Table.Td><Table.Td>{whenDateTime(row.issued_at)}</Table.Td></Table.Tr>)}</Table.Tbody>
+				</Table>}
+		</Box>
+		<Box>
+			<Text fz={11} fw={600} tt="uppercase" c="dimmed" mb={6}>Recent payments</Text>
+			{!data.recent_payments.length?<Text size="sm" c="dimmed">No payments yet.</Text>:
+				<Table withTableBorder verticalSpacing="xs">
+					<Table.Thead><Table.Tr><Table.Th>Method</Table.Th><Table.Th>Status</Table.Th><Table.Th>Amount</Table.Th><Table.Th>Unallocated</Table.Th><Table.Th>Received</Table.Th><Table.Th>Receipt</Table.Th></Table.Tr></Table.Thead>
+					<Table.Tbody>{data.recent_payments.map(row=><Table.Tr key={row.id}><Table.Td>{methodName(row.payment_method)}</Table.Td><Table.Td><StatusBadge value={row.status}/></Table.Td><Table.Td>{kes.format(Number(row.amount))}</Table.Td><Table.Td>{kes.format(Number(row.unallocated_amount))}</Table.Td><Table.Td>{whenDateTime(row.received_at)}</Table.Td><Table.Td ff="monospace">{row.receipt?.receipt_number??"—"}</Table.Td></Table.Tr>)}</Table.Tbody>
+				</Table>}
+		</Box>
+		<Box>
+			<Text fz={11} fw={600} tt="uppercase" c="dimmed" mb={6}>Recent ledger entries</Text>
+			{!data.recent_ledger_entries.length?<Text size="sm" c="dimmed">No ledger entries yet.</Text>:
+				<Table withTableBorder verticalSpacing="xs">
+					<Table.Thead><Table.Tr><Table.Th>Type</Table.Th><Table.Th>Amount</Table.Th><Table.Th>Posted</Table.Th></Table.Tr></Table.Thead>
+					<Table.Tbody>{data.recent_ledger_entries.map(row=><Table.Tr key={row.id}><Table.Td><StatusBadge value={row.entry_type}/></Table.Td><Table.Td>{kes.format(Number(row.amount))}</Table.Td><Table.Td>{whenDateTime(row.posted_at)}</Table.Td></Table.Tr>)}</Table.Tbody>
+				</Table>}
+		</Box>
+	</Stack>;
+}
+
+type StudentAttendanceSummary={
+	window_days:number;
+	status_counts:Record<string,number>;
+	marked_sessions:number;
+	recent_records:{id:string;session_date:string;status:string;remarks:string}[];
+};
+function StudentAttendancePanel({query}:{query:{isLoading:boolean;isError:boolean;error:unknown;data?:StudentAttendanceSummary}}){
+	if(query.isLoading)return <Loading label="Loading attendance summary"/>;
+	if(query.isError)return <ErrorState error={query.error}/>;
+	if(!query.data)return <Empty/>;
+	const data=query.data;
+	return <Stack gap="lg">
+		<KeyValueSection title={`Last ${data.window_days} days`}>
+			<KeyValueGrid>
+				{Object.entries(data.status_counts).map(([status,count])=><KeyValueItem key={status} label={pretty(status.toLowerCase())} value={count}/>)}
+				<KeyValueItem label="Marked sessions" value={data.marked_sessions}/>
+			</KeyValueGrid>
+		</KeyValueSection>
+		<Box>
+			<Text fz={11} fw={600} tt="uppercase" c="dimmed" mb={6}>Recent records</Text>
+			{!data.recent_records.length?<Text size="sm" c="dimmed">No attendance recorded yet.</Text>:
+				<Table withTableBorder verticalSpacing="xs">
+					<Table.Thead><Table.Tr><Table.Th>Date</Table.Th><Table.Th>Status</Table.Th><Table.Th>Remarks</Table.Th></Table.Tr></Table.Thead>
+					<Table.Tbody>{data.recent_records.map(row=><Table.Tr key={row.id}><Table.Td>{whenDate(row.session_date)}</Table.Td><Table.Td><StatusBadge value={row.status}/></Table.Td><Table.Td>{row.remarks||"—"}</Table.Td></Table.Tr>)}</Table.Tbody>
+				</Table>}
+		</Box>
+	</Stack>;
+}
+
+type StudentAssessmentSummary={
+	window_days:number;
+	mark_status_counts:Record<string,number>;
+	average_percentage:string|null;
+	recent_results:{id:string;scheduled_date:string;assessment_name:string;mark_status:string;score:string|null;grade:string;remarks:string}[];
+};
+function StudentAssessmentsPanel({query}:{query:{isLoading:boolean;isError:boolean;error:unknown;data?:StudentAssessmentSummary}}){
+	if(query.isLoading)return <Loading label="Loading assessment summary"/>;
+	if(query.isError)return <ErrorState error={query.error}/>;
+	if(!query.data)return <Empty/>;
+	const data=query.data;
+	return <Stack gap="lg">
+		<KeyValueSection title={`Last ${data.window_days} days`}>
+			<KeyValueGrid>
+				{Object.entries(data.mark_status_counts).map(([status,count])=><KeyValueItem key={status} label={pretty(status.toLowerCase())} value={count}/>)}
+				<KeyValueItem label="Average score" value={data.average_percentage?`${Number(data.average_percentage).toFixed(1)}%`:"—"}/>
+			</KeyValueGrid>
+		</KeyValueSection>
+		<Box>
+			<Text fz={11} fw={600} tt="uppercase" c="dimmed" mb={6}>Recent results</Text>
+			{!data.recent_results.length?<Text size="sm" c="dimmed">No scored assessments yet.</Text>:
+				<Table withTableBorder verticalSpacing="xs">
+					<Table.Thead><Table.Tr><Table.Th>Date</Table.Th><Table.Th>Assessment</Table.Th><Table.Th>Score</Table.Th><Table.Th>Grade</Table.Th><Table.Th>Remarks</Table.Th></Table.Tr></Table.Thead>
+					<Table.Tbody>{data.recent_results.map(row=><Table.Tr key={row.id}><Table.Td>{whenDate(row.scheduled_date)}</Table.Td><Table.Td>{row.assessment_name}</Table.Td><Table.Td>{row.score??"—"}</Table.Td><Table.Td>{row.grade||"—"}</Table.Td><Table.Td>{row.remarks||"—"}</Table.Td></Table.Tr>)}</Table.Tbody>
+				</Table>}
+		</Box>
+	</Stack>;
+}
+
+export function StudentPage({id}:{id:string}){const student=JSON.parse(sessionStorage.getItem(`student:${id}`)??"{}") as Row;const {can,moduleEnabled}=useAccess();const tabs=["Overview",...(moduleEnabled("finance")&&can("finance.student_account.view")?["Fees"]:[]),...(moduleEnabled("attendance")&&can("attendance.record.view")?["Attendance"]:[]),...(moduleEnabled("assessments")&&can("assessment.record.view")?["Assessments"]:[]),...(moduleEnabled("documents")&&can("students.document.view")?["Documents"]:[]),"Guardians","Activity"];const [tab,setTab]=useState("Overview");const finance=useQuery({queryKey:["student-finance",id],queryFn:()=>api<StudentFinanceSummary>(`/finance/students/${id}/finance/`),enabled:tab==="Fees"});const attendance=useQuery({queryKey:["student-attendance",id],queryFn:()=>api<StudentAttendanceSummary>(`/attendance/students/${id}/summary/`),enabled:tab==="Attendance"});const assessments=useQuery({queryKey:["student-assessment",id],queryFn:()=>api<StudentAssessmentSummary>(`/assessments/students/${id}/summary/`),enabled:tab==="Assessments"});return <>
  <RecordHeader backLabel="Student directory" onBack={()=>go("/students")}
   initials={String(student.full_name??"ST").split(" ").map(x=>x[0]).join("").slice(0,2).toUpperCase()}
   eyebrow={String(student.admission_number??"Student record")} title={String(student.full_name??"Student")}
@@ -367,10 +478,10 @@ export function StudentPage({id}:{id:string}){const student=JSON.parse(sessionSt
  <RecordTabs tabs={tabs} value={tab} onChange={setTab}/>
  <Paper p="lg">
   {tab==="Overview"&&<KeyValueSection title="Overview"><KeyValueGrid><KeyValueItem label="Admission number" value={display(student.admission_number)}/><KeyValueItem label="Campus" value={display(student.campus)}/><KeyValueItem label="Current status" value={display(student.status)}/></KeyValueGrid></KeyValueSection>}
-  {tab==="Fees"&&<JsonPanel query={finance}/>}
+  {tab==="Fees"&&<StudentFinancePanel query={finance}/>}
   {tab==="Documents"&&<DocumentsPanel basePath="/students" ownerId={id} viewPermission="students.document.view" managePermission="students.document.manage" can={can}/>}
-  {tab==="Attendance"&&<JsonPanel query={attendance}/>}
-  {tab==="Assessments"&&<JsonPanel query={assessments}/>}
+  {tab==="Attendance"&&<StudentAttendancePanel query={attendance}/>}
+  {tab==="Assessments"&&<StudentAssessmentsPanel query={assessments}/>}
   {(tab==="Guardians"||tab==="Activity")&&<Empty title={`${tab} is not available yet`} message={`The backend does not currently expose a ${tab.toLowerCase()} endpoint.`}/>}
  </Paper>
 </>}

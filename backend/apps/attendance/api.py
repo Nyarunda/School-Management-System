@@ -220,7 +220,7 @@ class StudentAttendanceSummaryView(APIView):
             "window_days": self.SUMMARY_WINDOW_DAYS,
             "status_counts": counts,
             "marked_sessions": marked_sessions,
-            "recent_records": AttendanceRecordSerializer(recent_marked[: self.RECENT_LIMIT], many=True).data,
+            "recent_records": StudentAttendanceRecordListSerializer(recent_marked[: self.RECENT_LIMIT], many=True).data,
         })
 
 
