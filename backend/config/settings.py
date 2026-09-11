@@ -287,9 +287,6 @@ if PRODUCTION:
         raise ImproperlyConfigured("Production requires explicit POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD, and POSTGRES_HOST")
     if os.getenv("POSTGRES_PASSWORD") == "school_management_dev":
         raise ImproperlyConfigured("Production cannot use the development database password")
-    parsed_cache_url = urlparse(os.getenv("DJANGO_CACHE_URL", ""))
-    if parsed_cache_url.scheme not in ("redis", "rediss") or not parsed_cache_url.hostname:
-        raise ImproperlyConfigured("Production DJANGO_CACHE_URL must be a redis:// or rediss:// URL with a host")
     from cryptography.fernet import Fernet
     try:
         Fernet(FIELD_ENCRYPTION_KEY)
@@ -318,18 +315,36 @@ if PRODUCTION:
     # stays a one-line env override, not a hardcoded assumption.
     if os.getenv("BEHIND_REVERSE_PROXY", "true").lower() == "true":
         SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
-    # DRF throttle counters live in the cache -- Django's default per-process
-    # LocMemCache would let each Gunicorn worker independently allow the full
-    # configured rate. DJANGO_CACHE_URL is explicit (checked in `required`
-    # above), not derived from CELERY_BROKER_URL -- coupling Django's cache
-    # config to Celery's URL shape would make a config mistake here silently
-    # weaken a security control. config.cache.FailOpenRedisCache (not
-    # Django's built-in RedisCache directly -- it has no IGNORE_EXCEPTIONS
-    # equivalent) makes the cache, and therefore throttling, fail *open* on
-    # a Redis outage: a request that can't reach the cache is allowed
-    # through rather than raising a 500 for every authenticated request or,
-    # worse, dropping a legitimate M-Pesa callback. Redis HA/monitoring
-    # itself is a later hardening pass.
+
+# DRF throttle counters live in the cache -- Django's default per-process
+# LocMemCache would let each Gunicorn worker independently allow the full
+# configured rate. This used to be gated behind `if PRODUCTION`, which was
+# itself an RC Area 6 defect found live: a multi-worker gunicorn capacity
+# run (docker-compose.loadtest.yml deliberately swaps in gunicorn --workers 4
+# for a meaningful capacity number, same reasoning as this comment already
+# warns about) showed *zero* throttling at any scope, at any measured rate,
+# because non-production environments got Django's default per-process
+# cache -- every ceiling was silently multiplied by however many worker
+# processes happened to receive traffic, undermining the very throttle
+# proofs RC Area 2/6 depend on. Keyed on DJANGO_CACHE_URL being set, not on
+# PRODUCTION, so any environment that provides Redis (production, or an
+# RC/load-test stack opting in via its own compose override) gets correctly
+# shared throttle state; falls back to Django's own default (per-process)
+# cache only when no DJANGO_CACHE_URL is configured at all -- plain local
+# dev without Redis running. DJANGO_CACHE_URL is explicit (checked in
+# `required` above for production), not derived from CELERY_BROKER_URL --
+# coupling Django's cache config to Celery's URL shape would make a config
+# mistake here silently weaken a security control. config.cache.FailOpenRedisCache
+# (not Django's built-in RedisCache directly -- it has no IGNORE_EXCEPTIONS
+# equivalent) makes the cache, and therefore throttling, fail *open* on a
+# Redis outage: a request that can't reach the cache is allowed through
+# rather than raising a 500 for every authenticated request or, worse,
+# dropping a legitimate M-Pesa callback. Redis HA/monitoring itself is a
+# later hardening pass.
+if os.getenv("DJANGO_CACHE_URL", "").strip():
+    parsed_cache_url = urlparse(os.getenv("DJANGO_CACHE_URL"))
+    if parsed_cache_url.scheme not in ("redis", "rediss") or not parsed_cache_url.hostname:
+        raise ImproperlyConfigured("DJANGO_CACHE_URL must be a redis:// or rediss:// URL with a host")
     CACHES = {
         "default": {
             "BACKEND": "config.cache.FailOpenRedisCache",

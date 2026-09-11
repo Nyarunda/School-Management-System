@@ -119,6 +119,29 @@ class ProductionSettingsTests(SimpleTestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.strip(), "False")
 
+    def test_non_production_with_cache_url_still_gets_the_shared_redis_cache(self):
+        """RC Area 6 defect found live: this used to be gated behind
+        `if PRODUCTION`, so a non-production environment that still runs
+        multiple worker processes (RC/load-test's gunicorn --workers 4,
+        docker-compose.loadtest.yml) silently fell back to Django's default
+        per-process cache -- multiplying every DRF throttle ceiling by
+        however many workers happened to receive a given request, instead of
+        sharing counters. A 5E-2 run measured this directly: 0% errors at
+        any ramp step despite far exceeding the per-user throttle."""
+        result = self.load_settings(
+            {"DJANGO_CACHE_URL": "redis://localhost:6379/3"},
+            expr="(s.CACHES['default']['BACKEND'], s.CACHES['default']['LOCATION'])",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            result.stdout.strip(), "('config.cache.FailOpenRedisCache', 'redis://localhost:6379/3')",
+        )
+
+    def test_non_production_refuses_invalid_cache_urls_too(self):
+        for cache_url in ("garbage://whatever", "redis:///2", "not-a-url"):
+            with self.subTest(cache_url=cache_url):
+                self.assertNotEqual(self.load_settings({"DJANGO_CACHE_URL": cache_url}).returncode, 0)
+
     def test_postgres_backend_reuses_connections_with_health_checks(self):
         result = self.load_settings(
             {"DB_ENGINE": "postgres"},

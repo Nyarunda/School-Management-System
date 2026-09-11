@@ -12,6 +12,12 @@ services:
     command: sh -c "pip install -r requirements/loadtest.txt && gunicorn config.wsgi:application --workers 4 --threads 2 --bind 0.0.0.0:8000"
     environment:
       MPESA_SANDBOX_BASE_URL: "http://fake-daraja:9999"
+      # RC Area 6 defect fix: without this, DRF throttle counters use
+      # Django's default per-process cache, and gunicorn's 4 worker
+      # processes above each get an independent counter -- silently
+      # multiplying every throttle ceiling by however many workers happen
+      # to receive traffic. DB 1, distinct from Celery's broker on DB 0.
+      DJANGO_CACHE_URL: "redis://redis:6379/1"
       # The real 5/min-per-IP default (RC Area 2) is a deliberate brute-force
       # control -- correct for production, but every one of the harness's
       # ~20 tenants logs in once from the same client IP (the harness
