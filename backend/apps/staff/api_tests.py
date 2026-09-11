@@ -85,6 +85,40 @@ class StaffApiTests(TemporaryDocumentStorageMixin, TestCase):
         response = self.create_employee(campus=str(self.campus.id))
         self.assertEqual(response.status_code, 201)
 
+    def test_campus_scoped_actor_does_not_see_another_campus_employee_in_the_list(self):
+        self.create_employee(campus=str(self.other_campus.id))
+        self.client.force_authenticate(self.scoped_admin)
+        response = self.client.get("/api/v1/staff/employees/", **self.headers())
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data["count"], 0)
+
+    def test_campus_scoped_actor_gets_404_for_employee_detail_outside_own_campus(self):
+        create_response = self.create_employee(campus=str(self.other_campus.id))
+        employee_id = create_response.data["id"]
+        self.client.force_authenticate(self.scoped_admin)
+        response = self.client.get(f"/api/v1/staff/employees/{employee_id}/", **self.headers())
+        self.assertEqual(response.status_code, 404)
+
+    def test_campus_scoped_actor_gets_404_for_documents_and_qualifications_outside_own_campus(self):
+        create_response = self.create_employee(campus=str(self.other_campus.id))
+        employee_id = create_response.data["id"]
+        document_response = self.client.post(
+            f"/api/v1/staff/employees/{employee_id}/documents/",
+            {"document_type": "ID_COPY", "file": make_upload(name="id.pdf")},
+            format="multipart", **self.headers(),
+        )
+        document_id = document_response.data["id"]
+
+        self.client.force_authenticate(self.scoped_admin)
+        list_response = self.client.get(f"/api/v1/staff/employees/{employee_id}/documents/", **self.headers())
+        self.assertEqual(list_response.status_code, 404)
+        download_response = self.client.get(
+            f"/api/v1/staff/employees/{employee_id}/documents/{document_id}/download/", **self.headers(),
+        )
+        self.assertEqual(download_response.status_code, 404)
+        qualifications_response = self.client.get(f"/api/v1/staff/employees/{employee_id}/qualifications/", **self.headers())
+        self.assertEqual(qualifications_response.status_code, 404)
+
     def test_employee_list_is_paginated_and_filterable(self):
         self.create_employee()
         response = self.client.get(f"/api/v1/staff/employees/?campus={self.campus.id}", **self.headers())

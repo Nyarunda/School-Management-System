@@ -46,6 +46,36 @@ def resolve_staff_tenant(request, permission):
         raise PermissionDenied(error.messages) from error
 
 
+def resolve_staff_membership(request, permission):
+    """Same as resolve_staff_tenant but also returns the membership, for
+    read paths that need campus_scoped() -- every write path already
+    enforces campus scope via apps.staff.services._require_campus_scope,
+    but until this fix the read paths (Employee list/detail, employee
+    document list/download) didn't, letting a campus-scoped staff viewer
+    read data for employees outside their own campus even though writing
+    to the same employee was correctly denied.
+    """
+    slug = request.headers.get("X-Tenant-Slug")
+    if not slug:
+        raise NotFound("Tenant context is required")
+    try:
+        membership = require_permission(user=request.user, tenant_slug=slug, permission=permission)
+        require_module_enabled(tenant=membership.tenant, module_code="staff_hr")
+        return membership
+    except DjangoValidationError as error:
+        raise PermissionDenied(error.messages) from error
+
+
+def campus_scoped(queryset, membership):
+    """Mirrors apps.students.api.campus_scoped: a cross-campus employee
+    404s as "doesn't exist" rather than being resolved and then rejected,
+    same anti-enumeration shape as resolve_tenant_object's get_object_or_404.
+    """
+    if membership.campus_id is not None:
+        return queryset.filter(campus_id=membership.campus_id)
+    return queryset
+
+
 def resolve_tenant_object(queryset, pk):
     try:
         return get_object_or_404(queryset, pk=pk)
@@ -109,8 +139,8 @@ class EmployeeListCreateView(ListCreateAPIView):
     pagination_class = StaffPagination
 
     def get_queryset(self):
-        tenant = resolve_staff_tenant(self.request, "staff.view")
-        queryset = Employee.objects.filter(tenant=tenant).order_by("employee_number")
+        membership = resolve_staff_membership(self.request, "staff.view")
+        queryset = campus_scoped(Employee.objects.filter(tenant=membership.tenant), membership).order_by("employee_number")
         status_param = self.request.query_params.get("status")
         if status_param:
             queryset = queryset.filter(status=status_param)
@@ -140,8 +170,9 @@ class EmployeeDetailView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, employee_id):
-        tenant = resolve_staff_tenant(request, "staff.view")
-        employee = resolve_tenant_object(Employee.objects.filter(tenant=tenant), employee_id)
+        membership = resolve_staff_membership(request, "staff.view")
+        employees = campus_scoped(Employee.objects.filter(tenant=membership.tenant), membership)
+        employee = resolve_tenant_object(employees, employee_id)
         return Response(EmployeeSerializer(employee).data)
 
     def patch(self, request, employee_id):
@@ -207,8 +238,9 @@ class EmployeeDocumentListCreateView(ListCreateAPIView):
     parser_classes = [MultiPartParser]
 
     def get_employee(self):
-        tenant = resolve_staff_tenant(self.request, "staff.view")
-        return tenant, resolve_tenant_object(Employee.objects.filter(tenant=tenant), self.kwargs["employee_id"])
+        membership = resolve_staff_membership(self.request, "staff.view")
+        employees = campus_scoped(Employee.objects.filter(tenant=membership.tenant), membership)
+        return membership.tenant, resolve_tenant_object(employees, self.kwargs["employee_id"])
 
     def get_queryset(self):
         _, employee = self.get_employee()
@@ -235,8 +267,9 @@ class EmployeeDocumentDownloadView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, employee_id, document_id):
-        tenant = resolve_staff_tenant(request, "staff.view")
-        employee = resolve_tenant_object(Employee.objects.filter(tenant=tenant), employee_id)
+        membership = resolve_staff_membership(request, "staff.view")
+        employees = campus_scoped(Employee.objects.filter(tenant=membership.tenant), membership)
+        employee = resolve_tenant_object(employees, employee_id)
         employee_document = resolve_tenant_object(EmployeeDocument.objects.filter(employee=employee), document_id)
         if employee_document.document is None:
             raise NotFound("This document's file is no longer available")
@@ -274,8 +307,9 @@ class EmployeeQualificationListCreateView(ListCreateAPIView):
     pagination_class = StaffPagination
 
     def get_queryset(self):
-        tenant = resolve_staff_tenant(self.request, "staff.view")
-        employee = resolve_tenant_object(Employee.objects.filter(tenant=tenant), self.kwargs["employee_id"])
+        membership = resolve_staff_membership(self.request, "staff.view")
+        employees = campus_scoped(Employee.objects.filter(tenant=membership.tenant), membership)
+        employee = resolve_tenant_object(employees, self.kwargs["employee_id"])
         return EmployeeQualification.objects.filter(employee=employee).order_by("-year_obtained")
 
     def create(self, request, *args, **kwargs):
