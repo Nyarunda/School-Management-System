@@ -1,8 +1,8 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Alert, Badge, Box, Button, Card, Divider, Grid, Group, NumberInput, Paper, PasswordInput, Select, SimpleGrid, Stack, Table, Text, ThemeIcon, TextInput, Title, UnstyledButton } from "@mantine/core";
-import { IconArrowRight, IconBell, IconCalendar, IconCheck, IconFileText, IconInbox, IconLock, IconRefresh, IconSparkles, IconUser, IconUsers, IconWallet } from "@tabler/icons-react";
-import { api, Page } from "../api/client";
+import { Alert, Badge, Box, Button, Card, Divider, Grid, Group, Modal, NumberInput, Paper, PasswordInput, Select, SimpleGrid, Stack, Table, Text, ThemeIcon, TextInput, Title, UnstyledButton } from "@mantine/core";
+import { IconArrowRight, IconBell, IconCalendar, IconCheck, IconFileText, IconInbox, IconLock, IconMail, IconRefresh, IconSparkles, IconUser, IconUsers, IconWallet } from "@tabler/icons-react";
+import { api, apiDownload, Page, saveBlob } from "../api/client";
 import { useAccess, useAuth } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
 import { DocumentsPanel } from "../features/documents";
@@ -363,40 +363,83 @@ export function StudentsPage(){
 }
 
 type StudentFinanceSummary={
+	student:{id:string;admission_number:string;name:string};
 	summary:{outstanding_balance:string;total_invoiced:string;total_credited:string;total_paid:string;unapplied_cash:string};
 	recent_invoices:{id:string;invoice_number:string;status:string;total:string;issued_at:string|null;created_at:string}[];
 	recent_payments:{id:string;payment_method:string;amount:string;status:string;received_at:string;receipt:{receipt_number:string}|null;unallocated_amount:string}[];
 	recent_ledger_entries:{id:string;entry_type:string;amount:string;posted_at:string}[];
 };
 type FeeStatementRow={entry_date:string;description:string;debit:string;credit:string;running_balance:string};
-function FeeStatementDialog({studentId,open,onClose}:{studentId:string;open:boolean;onClose:()=>void}){
+function FeeStatementDialog({studentId,studentName,admissionNumber,open,onClose}:{studentId:string;studentName:string;admissionNumber:string;open:boolean;onClose:()=>void}){
+	const {session}=useAuth();
+	const {can}=useAccess();
+	// Downloading or emailing a portable file takes data out of the interactive
+	// UI -- gated on the export capability, distinct from the view permission
+	// that opens this dialog at all (mirrors reports.finance.view/.export in
+	// the generic reports catalogue).
+	const canExport=can("reports.finance.export");
+	const schoolName=session?.active_tenant?.name??"School";
 	const [asOf,setAsOf]=useState(()=>new Date().toISOString().slice(0,10));
 	const [page,setPage]=useState(1);
 	const statement=useQuery({
 		queryKey:["fee-statement",studentId,asOf,page],
-		queryFn:()=>api<{columns:[string,string][];rows:FeeStatementRow[];has_more:boolean}>("/reports/finance.fee_statement/preview/",{params:{student_id:studentId,as_of:asOf,page,page_size:25}}),
+		queryFn:()=>api<{columns:[string,string][];rows:FeeStatementRow[];has_more:boolean}>("/reports/finance.fee_statement/preview/",{params:{student_id:studentId,as_of:asOf,page,page_size:50}}),
 		enabled:open,
 	});
-	return <ActionDialog open={open} title="Fee statement" description="A running balance of every invoice, credit note, payment allocation and reversal posted for this student, as of the chosen date." confirmLabel="Close" onClose={onClose} onSubmit={e=>{e.preventDefault();onClose()}}>
-		<Stack gap="sm">
-			<TextInput type="date" label="As of" value={asOf} onChange={e=>{setAsOf(e.currentTarget.value);setPage(1)}}/>
-			{statement.isLoading?<Loading label="Loading statement"/>:statement.isError?<ErrorState error={statement.error} retry={()=>void statement.refetch()}/>:
-				!statement.data?.rows.length?<Empty title="No activity" message="No ledger activity has posted for this student as of this date."/>:
-				<Stack gap="xs">
-					<Table.ScrollContainer minWidth={480}>
-						<Table withTableBorder verticalSpacing="xs">
-							<Table.Thead><Table.Tr><Table.Th>Date</Table.Th><Table.Th>Description</Table.Th><Table.Th>Debit</Table.Th><Table.Th>Credit</Table.Th><Table.Th>Balance</Table.Th></Table.Tr></Table.Thead>
-							<Table.Tbody>{statement.data.rows.map((row,index)=><Table.Tr key={index}><Table.Td>{whenDate(row.entry_date)}</Table.Td><Table.Td>{row.description||"—"}</Table.Td><Table.Td>{Number(row.debit)?kes.format(Number(row.debit)):"—"}</Table.Td><Table.Td>{Number(row.credit)?kes.format(Number(row.credit)):"—"}</Table.Td><Table.Td fw={600}>{kes.format(Number(row.running_balance))}</Table.Td></Table.Tr>)}</Table.Tbody>
-						</Table>
-					</Table.ScrollContainer>
-					<Group justify="flex-end">
-						<Button size="xs" variant="default" disabled={page<=1} onClick={()=>setPage(p=>p-1)}>Previous</Button>
-						<Text size="xs" c="dimmed">Page {page}</Text>
-						<Button size="xs" variant="default" disabled={!statement.data.has_more} onClick={()=>setPage(p=>p+1)}>Next</Button>
-					</Group>
-				</Stack>}
+	const exportPdf=useMutation({
+		mutationFn:()=>apiDownload(`/finance/students/${studentId}/fee-statement/pdf/`,{params:{as_of:asOf}}),
+		onSuccess:({blob,filename})=>saveBlob(blob,filename),
+		onError:error=>notify.error("Fee statement could not be exported",error),
+	});
+	const emailStatement=useMutation({
+		mutationFn:()=>api<{sent_to:string}>(`/finance/students/${studentId}/fee-statement/email/`,{method:"POST",body:JSON.stringify({as_of:asOf})}),
+		onSuccess:({sent_to})=>notify.success(`Fee statement emailed to ${sent_to}`),
+		onError:error=>notify.error("Fee statement could not be emailed",error),
+	});
+	const closingBalance=statement.data?.rows.length?statement.data.rows[statement.data.rows.length-1].running_balance:null;
+	return <Modal opened={open} onClose={onClose} title="Fee statement" size="xl">
+		<Stack gap="md">
+			<Group justify="space-between" align="end" wrap="wrap">
+				<TextInput type="date" label="As of" value={asOf} onChange={e=>{setAsOf(e.currentTarget.value);setPage(1)}} w={180}/>
+				{canExport&&<Group gap="xs">
+					<Button size="xs" variant="default" leftSection={<IconMail size={14}/>} loading={emailStatement.isPending} onClick={()=>emailStatement.mutate()}>Email to guardian</Button>
+					<Button size="xs" leftSection={<IconFileText size={14}/>} loading={exportPdf.isPending} onClick={()=>exportPdf.mutate()}>Export PDF</Button>
+				</Group>}
+			</Group>
+			<Box p="lg" style={{border:"1px solid var(--mantine-color-gray-3)",borderRadius:8}}>
+				<Group justify="space-between" align="flex-start" mb="md" wrap="wrap">
+					<Box>
+						<Text fw={700} size="lg" c="indigo">{schoolName}</Text>
+						<Text size="sm" c="dimmed">Fee Statement</Text>
+					</Box>
+					<Box ta="right">
+						<Text size="sm" fw={600}>{studentName}</Text>
+						<Text size="xs" c="dimmed">{admissionNumber}</Text>
+						<Text size="xs" c="dimmed">As of {whenDate(asOf)}</Text>
+					</Box>
+				</Group>
+				<Divider mb="sm"/>
+				{statement.isLoading?<Loading label="Loading statement"/>:statement.isError?<ErrorState error={statement.error} retry={()=>void statement.refetch()}/>:
+					!statement.data?.rows.length?<Empty title="No activity" message="No ledger activity has posted for this student as of this date."/>:
+					<Stack gap="xs">
+						<Table.ScrollContainer minWidth={480}>
+							<Table verticalSpacing="xs" striped>
+								<Table.Thead><Table.Tr><Table.Th>Date</Table.Th><Table.Th>Description</Table.Th><Table.Th ta="right">Debit</Table.Th><Table.Th ta="right">Credit</Table.Th><Table.Th ta="right">Balance</Table.Th></Table.Tr></Table.Thead>
+								<Table.Tbody>{statement.data.rows.map((row,index)=><Table.Tr key={index}><Table.Td>{whenDate(row.entry_date)}</Table.Td><Table.Td>{row.description||"—"}</Table.Td><Table.Td ta="right">{Number(row.debit)?kes.format(Number(row.debit)):"—"}</Table.Td><Table.Td ta="right">{Number(row.credit)?kes.format(Number(row.credit)):"—"}</Table.Td><Table.Td ta="right" fw={600}>{kes.format(Number(row.running_balance))}</Table.Td></Table.Tr>)}</Table.Tbody>
+							</Table>
+						</Table.ScrollContainer>
+						<Group justify="space-between" mt="xs" wrap="wrap">
+							<Group gap="xs">
+								<Button size="xs" variant="default" disabled={page<=1} onClick={()=>setPage(p=>p-1)}>Previous</Button>
+								<Text size="xs" c="dimmed">Page {page}</Text>
+								<Button size="xs" variant="default" disabled={!statement.data.has_more} onClick={()=>setPage(p=>p+1)}>Next</Button>
+							</Group>
+							{closingBalance!==null&&<Text size="md" fw={700} c="indigo">Closing balance: {kes.format(Number(closingBalance))}</Text>}
+						</Group>
+					</Stack>}
+			</Box>
 		</Stack>
-	</ActionDialog>;
+	</Modal>;
 }
 function StudentFinancePanel({studentId,query}:{studentId:string;query:{isLoading:boolean;isError:boolean;error:unknown;data?:StudentFinanceSummary}}){
 	const {can}=useAccess();
@@ -417,7 +460,7 @@ function StudentFinancePanel({studentId,query}:{studentId:string;query:{isLoadin
 				<KeyValueItem label="Unapplied cash" value={kes.format(Number(data.summary.unapplied_cash))}/>
 			</KeyValueGrid>
 		</KeyValueSection>
-		<FeeStatementDialog studentId={studentId} open={statementOpen} onClose={()=>setStatementOpen(false)}/>
+		<FeeStatementDialog studentId={studentId} studentName={data.student.name} admissionNumber={data.student.admission_number} open={statementOpen} onClose={()=>setStatementOpen(false)}/>
 		<Box>
 			<Text fz={11} fw={600} tt="uppercase" c="dimmed" mb={6}>Recent invoices</Text>
 			{!data.recent_invoices.length?<Text size="sm" c="dimmed">No invoices yet.</Text>:

@@ -189,6 +189,23 @@ FIELD_ENCRYPTION_KEY = os.getenv("FIELD_ENCRYPTION_KEY", "tcgm_bXMcNCa925qDWCcoG
 # (e.g. M-Pesa's CallBackURL) registered with third-party providers.
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
 
+# Real SMTP send (e.g. emailing a fee statement PDF to a guardian). Falls
+# back to Django's console backend -- prints the message instead of sending
+# -- whenever EMAIL_HOST isn't configured, so a dev/test environment never
+# accidentally tries a real network send.
+EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend" if os.getenv("EMAIL_HOST") else "django.core.mail.backends.console.EmailBackend"
+EMAIL_HOST = os.getenv("EMAIL_HOST", "")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "true").lower() == "true"
+EMAIL_USE_SSL = os.getenv("EMAIL_USE_SSL", "false").lower() == "true"
+# `or`-chained, not `os.getenv(..., default)` -- docker-compose.yml's
+# `${DEFAULT_FROM_EMAIL:-}` interpolation exports a real (present but empty)
+# env var when unset in .env, so os.getenv's own default parameter never
+# triggers; only an explicit falsy-check catches that case.
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL") or EMAIL_HOST_USER or "no-reply@example.com"
+
 # Redis/Celery are transport for async operational work only -- PostgreSQL
 # owns durable state. Nothing in the web request path calls .delay(); every
 # consumer polls PostgreSQL for due work on a Beat schedule, so a Redis

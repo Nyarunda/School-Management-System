@@ -3,7 +3,10 @@ from decimal import Decimal, InvalidOperation
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.db.models import Sum
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import serializers, status
 from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.generics import ListAPIView, ListCreateAPIView, RetrieveAPIView, RetrieveUpdateAPIView
@@ -42,6 +45,7 @@ from .models import (
     StudentLedgerEntry,
 )
 from .selectors import student_balance
+from .statement_pdf import render_fee_statement_pdf, send_fee_statement_email
 from .services import (
     add_fee_structure_line,
     allocate_payment,
@@ -670,6 +674,65 @@ class StudentFinanceView(APIView):
             "recent_payments": PaymentSerializer(recent_payments, many=True).data,
             "recent_ledger_entries": LedgerEntrySerializer(recent_ledger_entries, many=True).data,
         })
+
+
+def _resolve_statement_as_of(request):
+    as_of_raw = request.query_params.get("as_of") or request.data.get("as_of")
+    as_of = parse_date(as_of_raw) if as_of_raw else timezone.now().date()
+    if as_of is None:
+        raise ValidationError("as_of must be a valid date")
+    return as_of
+
+
+class StudentFeeStatementPdfView(APIView):
+    """Same underlying data as the generic finance.fee_statement report --
+    this is a formatted-document rendering of it for a parent/guardian, not
+    a second data source. Gated on the export capability (not just view):
+    downloading a portable file is the same "takes data out of the
+    interactive UI" action the reports app itself distinguishes with
+    reports.finance.export vs .view.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, student_id):
+        tenant = resolve_finance_tenant(request, "reports.finance.export")
+        student = get_object_or_404(Student.objects.for_tenant(tenant), pk=student_id)
+        try:
+            as_of = _resolve_statement_as_of(request)
+            pdf_bytes = render_fee_statement_pdf(tenant=tenant, student=student, as_of=as_of)
+        except ValidationError as error:
+            return api_validation_error(error)
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="fee-statement-{student.admission_number}-{as_of.isoformat()}.pdf"'
+        return response
+
+
+class StudentFeeStatementEmailView(APIView):
+    """Emails the same PDF to the student's guardian on file. Same
+    export-level gate as the PDF download above -- this releases the same
+    data outside the system, just by a different channel.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, student_id):
+        tenant = resolve_finance_tenant(request, "reports.finance.export")
+        student = get_object_or_404(Student.objects.for_tenant(tenant), pk=student_id)
+        try:
+            as_of = _resolve_statement_as_of(request)
+            sent_to = send_fee_statement_email(tenant=tenant, student=student, as_of=as_of)
+        except ValidationError as error:
+            return api_validation_error(error)
+        record_activity(
+            tenant=tenant,
+            actor=request.user,
+            action="fee_statement.emailed",
+            resource_type="student",
+            resource_id=str(student.id),
+            metadata={"as_of": as_of.isoformat()},
+        )
+        return Response({"sent_to": sent_to})
 
 
 class IncomingPaymentSerializer(serializers.ModelSerializer):
