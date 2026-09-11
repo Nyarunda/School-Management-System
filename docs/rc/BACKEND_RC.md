@@ -175,10 +175,9 @@ Formal credit-note/invoice void/reversal workflow — an unimplemented capabilit
 ### Full test suite (SQLite + PostgreSQL 17)
 SQLite: 830 tests, OK (45 skipped — Postgres-only cases, including the one new `FeeAssignmentConcurrencyTests` test). PostgreSQL 17 (`postgres:17`, disposable container `school-rc-area4-pg`): 830 tests, OK (0 skipped), including a full re-run of every existing Finance/M-Pesa concurrency and recovery suite as this area's evidence. No schema changes — `makemigrations --check --dry-run` clean.
 
-## Area 5 — Concurrency & failure recovery
-*In progress.*
+## Area 5 — Concurrency & failure recovery ✅ CLOSED
 
-**Baseline under test:** `80503dd` (Staff campus-scope defect fix, applied ahead of this area — see Findings below). **Date started:** 2026-09-11.
+**Baseline under test:** `80503dd` (Staff campus-scope defect fix, applied ahead of this area — see Findings below). **Date:** 2026-09-11.
 Scope: proving failure-recovery behavior that was previously established by design/code-reading but never verified under an actual induced failure, through the real `docker compose` stack (not simulated in Python). Four checks, run one at a time with recorded evidence.
 
 ### Findings (pre-Area-5, applied before this area's own checks)
@@ -249,8 +248,23 @@ No defect found; `apps/activity/durable_work.py` required no changes.
 
 **Result**: PASS. Two genuinely concurrent real invocations of the actual task function produced exactly one delivery, zero duplicates, zero errors — not just "the code looks idempotent" but a real concurrent race decided correctly at the PostgreSQL row-lock level. No defect found; no code changes required.
 
-### Check 4 — Mid-transaction DB-connection-drop recovery
-*Not started.*
+### Check 4 — Mid-transaction DB-connection-drop recovery ✅ DONE
+
+**Claim under test**: if a task's database connection is lost while a claiming transaction is open (between the `SELECT ... FOR UPDATE` and the following `UPDATE`, the two statements `claim_due()` wraps in one `transaction.atomic()`), the row must not end up in a stuck or partially-applied state — PostgreSQL's own atomicity should roll the whole thing back cleanly, leaving the row exactly as if the claim never happened.
+
+**Method**: a real, externally-triggered connection kill via PostgreSQL's own `pg_terminate_backend()` — not a Python exception, not a manual row edit — against the live `docker compose` stack.
+1. `docker compose stop celery-worker` (same race-avoidance as Checks 2-3). Created one fresh, genuine `NotificationOutbox` row via a real invite. Confirmed `PENDING`, `attempts=0`.
+2. Ran a driver process reproducing `claim_due()`'s exact real ORM operations (same `select_for_update()`, same `transaction.atomic()` wrapper, same model) via `manage.py shell`, with a 30s `time.sleep()` inserted between the `SELECT FOR UPDATE` and the `UPDATE` — the only place a manual pause was added, and only in this disposable driver script, never in `apps/activity/durable_work.py` itself. Captured its real PostgreSQL backend PID (`SELECT pg_backend_pid()`): `733`.
+3. From a **separate** connection, ran `SELECT pg_terminate_backend(733)` — a real administrative kill of that exact backend process while its transaction was genuinely open and uncommitted. Result: `True`.
+4. The driver's subsequent `UPDATE` attempt (after its sleep elapsed) failed exactly as expected: `django.db.utils.OperationalError: terminating connection due to administrator command` (via `psycopg.errors.AdminShutdown`). The `"UPDATE REACHED"` line was never printed — the write never happened.
+5. Re-queried the row: **`PENDING`, `attempts=0`, no lease — byte-for-byte identical to its pre-transaction state.** PostgreSQL's rollback discarded the entire open transaction, including the `SELECT FOR UPDATE`'s row lock; no reap_stale action was even needed, because the row was never marked `PROCESSING` in the first place.
+6. Restarted `celery-worker` and let the real, unmodified `dispatch_pending_notifications` schedule pick the row up on its own: processed to `PROCESSED` on the very next 30s cycle, with no manual intervention.
+
+**Result**: PASS. A connection dropped mid-transaction produces zero partial state — not a stuck lease, not a phantom claim, nothing for `reap_stale` to even need to clean up — and the row recovers to normal processing automatically on the next real dispatch cycle. No defect found; `apps/activity/durable_work.py` required no changes.
+
+### Area 5 summary
+
+All four checks PASS with no code changes required. `apps/activity/durable_work.py`'s claim/lease/reap design holds under three distinct real failure injections (Celery broker down, abrupt `SIGKILL` of a worker holding a claim, concurrent redelivery-style double-invocation, and a mid-transaction PostgreSQL connection kill), each proven against the live `docker compose` stack rather than reasoned from code alone.
 
 ## Area 6 — Performance & capacity
 *Not started.*
