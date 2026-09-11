@@ -33,10 +33,17 @@ PERMISSION_CATALOGUE = {
     "assessment.record.view": "View assessment records and results",
     "assessment.setup.view": "View grading schemes",
     "assessment.setup.manage": "Manage grading schemes",
+    "assessment.marks.manage": "Record marks for an assessment still in draft",
+    "assessment.result.amend": "Amend marks after an assessment has been published",
+    "assessment.approve": "Approve, reject, or reopen a submitted assessment",
+    "assessment.publish": "Publish an approved assessment's results",
+    "assessment.any_class": "Act on assessments for any class, bypassing the subject/class teacher assignment check",
 
     # Attendance
     "attendance.session.manage": "Open, mark, and submit attendance sessions",
     "attendance.record.view": "View attendance records and summaries",
+    "attendance.session.override_calendar": "Open an attendance session outside the academic calendar",
+    "attendance.any_class": "Act on attendance for any class, bypassing the subject/class teacher assignment check",
 
     # Timetable
     "timetable.manage": "Create and edit timetable entries",

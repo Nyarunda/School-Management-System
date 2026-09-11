@@ -16,14 +16,6 @@ from apps.students.models import Student
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 from apps.tenancy.permissions_catalogue import PERMISSION_CATALOGUE
 
-# Two real, checked permission strings that predate the role-editor catalogue
-# and were never backfilled into it (apps/attendance/services.py:46,83) --
-# granting them directly here (bypassing validate_permission_codes, exactly
-# like loadtest_provision already does for its own role) is what lets the
-# demo admin exercise the "any class" override and the non-instructional-day
-# override checkbox in the Attendance Open Register dialog.
-EXTRA_PERMISSIONS = ["attendance.any_class", "attendance.session.override_calendar"]
-
 ADMIN_USERNAME = "demo-admin"
 TEACHER_USERNAME = "demo-teacher"
 DEMO_PASSWORD = "demo-pass-12345"
@@ -87,7 +79,7 @@ class Command(BaseCommand):
         return campus
 
     def _provision_admin_role(self, tenant):
-        permissions = sorted(set(PERMISSION_CATALOGUE) | set(EXTRA_PERMISSIONS))
+        permissions = sorted(PERMISSION_CATALOGUE)
         role, _ = Role.objects.get_or_create(tenant=tenant, name="Demo Administrator", defaults={"permissions": permissions})
         if role.permissions != permissions:
             role.permissions = permissions
