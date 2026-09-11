@@ -55,5 +55,47 @@ class WeightedRampTests(unittest.TestCase):
         self.assertTrue(6 <= ratio_2 <= 15, f"noisy:normal-2 ratio was {ratio_2}, expected ~10 ({counts})")
 
 
+class TenantHeadersTests(unittest.TestCase):
+    """Regression check for the auth fix: the harness used to send
+    httpx.BasicAuth, which config.settings' DEFAULT_AUTHENTICATION_CLASSES
+    (TokenAuthentication + SessionAuthentication, no BasicAuthentication)
+    has never accepted -- every authenticated harness request was silently
+    401ing. _tenant_headers replaces that with a real login-then-Token flow.
+    """
+
+    def test_logs_in_once_and_reuses_the_cached_token(self):
+        harness._token_cache.clear()
+        login_calls = []
+
+        class FakeResponse:
+            def __init__(self, token):
+                self._token = token
+
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {"token": self._token}
+
+        class FakeClient:
+            async def post(self, url, *, json, timeout):
+                login_calls.append((url, json["username"], json["password"]))
+                return FakeResponse("tok-for-" + json["username"])
+
+        tenant_entry = {"slug": "loadtest-0", "bursar_username": "loadtest-bursar-0", "bursar_password": "secret"}
+
+        async def run():
+            headers_1 = await harness._tenant_headers(FakeClient(), "http://base", tenant_entry)
+            headers_2 = await harness._tenant_headers(FakeClient(), "http://base", tenant_entry)
+            return headers_1, headers_2
+
+        headers_1, headers_2 = asyncio.run(run())
+
+        self.assertEqual(len(login_calls), 1, "should log in once and cache the token, not once per call")
+        self.assertEqual(login_calls[0], ("http://base/api/v1/auth/login/", "loadtest-bursar-0", "secret"))
+        self.assertEqual(headers_1, {"Authorization": "Token tok-for-loadtest-bursar-0", "X-Tenant-Slug": "loadtest-0"})
+        self.assertEqual(headers_1, headers_2)
+
+
 if __name__ == "__main__":
     unittest.main()

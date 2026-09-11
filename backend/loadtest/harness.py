@@ -164,15 +164,42 @@ async def run_ramp(client, base_url, manifest, *, run_id, ramp, step_duration, a
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+_token_cache = {}
+
+
+async def _tenant_headers(client, base_url, tenant_entry):
+    """Real Token auth via the actual login endpoint, matching
+    config.settings' DEFAULT_AUTHENTICATION_CLASSES (TokenAuthentication +
+    SessionAuthentication -- no BasicAuthentication). This harness used to
+    send httpx.BasicAuth, which the backend has never accepted -- a real
+    defect surfaced by RC Area 6's smoke-test grounding: every
+    authenticated request was silently 401ing, and drain_backlog's old
+    non-200-counts-as-zero handling made that look like a fully-drained,
+    successful run instead of a total auth failure. Cached per tenant slug
+    for the life of the process -- a DRF auth token doesn't expire on its
+    own (Milestone 22.4), and get_or_create on the server side makes a
+    duplicate concurrent login harmless if two callers race on a cold cache.
+    """
+    slug = tenant_entry["slug"]
+    if slug not in _token_cache:
+        response = await client.post(
+            f"{base_url}/api/v1/auth/login/",
+            json={"username": tenant_entry["bursar_username"], "password": tenant_entry["bursar_password"]},
+            timeout=15,
+        )
+        response.raise_for_status()
+        _token_cache[slug] = response.json()["token"]
+    return {"Authorization": f"Token {_token_cache[slug]}", "X-Tenant-Slug": slug}
+
+
 async def run_operator_pool(client, base_url, tenant_entry, *, operators, phase, recorder, stop_event):
-    auth = httpx.BasicAuth(tenant_entry["bursar_username"], tenant_entry["bursar_password"])
-    headers = {"X-Tenant-Slug": tenant_entry["slug"]}
+    headers = await _tenant_headers(client, base_url, tenant_entry)
 
     async def worker():
         while not stop_event.is_set():
             status_code, latency_ms = await _timed_request(
                 client, "GET", f"{base_url}/api/v1/finance/mpesa/callbacks/?status=RECEIVED&page_size=20",
-                auth=auth, headers=headers, timeout=15,
+                headers=headers, timeout=15,
             )
             recorder.record_metric(traffic_class="callback_list", tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
             if status_code != 200:
@@ -182,19 +209,19 @@ async def run_operator_pool(client, base_url, tenant_entry, *, operators, phase,
             # returns status/latency, so re-fetch here deliberately (keeps
             # the hot polling loop's shape simple, at the cost of one call).
             response = await client.get(
-                f"{base_url}/api/v1/finance/mpesa/callbacks/?status=RECEIVED&page_size=20", auth=auth, headers=headers, timeout=15,
+                f"{base_url}/api/v1/finance/mpesa/callbacks/?status=RECEIVED&page_size=20", headers=headers, timeout=15,
             )
             results = response.json().get("results", []) if response.status_code == 200 else []
             for item in results:
                 callback_id = item["id"]
                 status_code, latency_ms = await _timed_request(
                     client, "POST", f"{base_url}/api/v1/finance/mpesa/callbacks/{callback_id}/verify/",
-                    auth=auth, headers=headers, json={"evidence": "loadtest-operator-verification"}, timeout=15,
+                    headers=headers, json={"evidence": "loadtest-operator-verification"}, timeout=15,
                 )
                 recorder.record_metric(traffic_class="callback_verify", tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
                 status_code, latency_ms = await _timed_request(
                     client, "POST", f"{base_url}/api/v1/finance/mpesa/callbacks/{callback_id}/process/",
-                    auth=auth, headers=headers, timeout=15,
+                    headers=headers, timeout=15,
                 )
                 recorder.record_metric(traffic_class="callback_process", tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
             if not results:
@@ -204,8 +231,7 @@ async def run_operator_pool(client, base_url, tenant_entry, *, operators, phase,
 
 
 async def run_stk_trickle(client, base_url, tenant_entry, *, rate_per_minute, phase, recorder, stop_event):
-    auth = httpx.BasicAuth(tenant_entry["bursar_username"], tenant_entry["bursar_password"])
-    headers = {"X-Tenant-Slug": tenant_entry["slug"]}
+    headers = await _tenant_headers(client, base_url, tenant_entry)
     interval = 60.0 / rate_per_minute
     counter = itertools.count()
     while not stop_event.is_set():
@@ -216,7 +242,7 @@ async def run_stk_trickle(client, base_url, tenant_entry, *, rate_per_minute, ph
             "idempotency_key": f"loadtest-stk-{tenant_entry['slug']}-{uuid.uuid4()}",
         }
         status_code, latency_ms = await _timed_request(
-            client, "POST", f"{base_url}/api/v1/finance/mpesa/stk-push/", auth=auth, headers=headers, json=payload, timeout=15,
+            client, "POST", f"{base_url}/api/v1/finance/mpesa/stk-push/", headers=headers, json=payload, timeout=15,
         )
         recorder.record_metric(traffic_class="stk_push", tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
         await asyncio.sleep(interval)
@@ -236,13 +262,12 @@ async def run_5e2(client, base_url, seeded_path, *, ramp, step_duration, recorde
 
     async def process_one(tenant_slug):
         tenant_entry = manifest_by_slug[tenant_slug]
-        auth = httpx.BasicAuth(tenant_entry["bursar_username"], tenant_entry["bursar_password"])
-        headers = {"X-Tenant-Slug": tenant_slug}
+        headers = await _tenant_headers(client, base_url, tenant_entry)
         item = next(cursors[tenant_slug])
         async with semaphore:
             status_code, latency_ms = await _timed_request(
                 client, "POST", f"{base_url}/api/v1/finance/mpesa/callbacks/{item['callback_id']}/process/",
-                auth=auth, headers=headers, timeout=15,
+                headers=headers, timeout=15,
             )
         recorder.record_metric(traffic_class="callback_process", tenant=tenant_slug, latency_ms=latency_ms, status_code=status_code, phase="5e2")
         # The ramp cycles through the seeded batch, possibly re-processing
@@ -273,25 +298,37 @@ async def drain_backlog(client, base_url, manifest, *, max_wait_seconds, poll_in
     """Polls each tenant's RECEIVED-callback count until it hits zero or
     `max_wait_seconds` elapses, so the operator pool gets a genuine chance
     to catch up on the tail of the ramp before the run is considered over.
+
+    A non-200/error response is NOT counted as zero -- treating "couldn't
+    check" as "confirmed empty" is exactly what let a total auth failure
+    (see _tenant_headers) print "backlog drained" on a run where nothing
+    had actually been processed at all. Only a confirmed count of zero
+    across every tenant counts as drained.
     """
     deadline = time.monotonic() + max_wait_seconds
     while time.monotonic() < deadline:
         totals = []
+        check_failed = False
         for tenant_entry in manifest["tenants"]:
-            auth = httpx.BasicAuth(tenant_entry["bursar_username"], tenant_entry["bursar_password"])
-            headers = {"X-Tenant-Slug": tenant_entry["slug"]}
+            headers = await _tenant_headers(client, base_url, tenant_entry)
             try:
                 response = await client.get(
                     f"{base_url}/api/v1/finance/mpesa/callbacks/?status=RECEIVED&page_size=1",
-                    auth=auth, headers=headers, timeout=15,
+                    headers=headers, timeout=15,
                 )
-                totals.append(response.json().get("count", 0) if response.status_code == 200 else 0)
+                if response.status_code == 200:
+                    totals.append(response.json().get("count", 0))
+                else:
+                    check_failed = True
             except httpx.HTTPError:
-                totals.append(0)
-        if sum(totals) == 0:
+                check_failed = True
+        if not check_failed and sum(totals) == 0:
             print("[harness] backlog drained")
             return
-        print(f"[harness] draining backlog: {sum(totals)} callbacks still RECEIVED")
+        if check_failed:
+            print("[harness] draining backlog: could not confirm drain for at least one tenant (non-200/error) -- not reporting drained")
+        else:
+            print(f"[harness] draining backlog: {sum(totals)} callbacks still RECEIVED")
         await asyncio.sleep(poll_interval)
     print("[harness] drain timeout reached -- some callbacks may still be RECEIVED (a real capacity finding, not a bug in the check)")
 
