@@ -177,11 +177,6 @@ export function AssignmentsPage(){
 	const terms=useQuery({queryKey:["academic-terms"],queryFn:()=>api<Page<AcademicTerm>>("/academics/terms/",{params:{page_size:100}}),enabled:canAssign});
 	const termName=(id:string)=>terms.data?.results.find(t=>t.id===id)?.name??id;
 	const [open,setOpen]=useState(false);
-	// Student: a raw exact-id field, not the old page_size:100 dropdown --
-	// students are an unbounded, realistically >100 population per tenant
-	// (STUDENT-GAP-02), unlike fee structures above. Flagged and dropped
-	// rather than carried forward, matching the same call made for Incoming
-	// Payments' Match dialog.
 	const [studentId,setStudentId]=useState("");
 	const [structure,setStructure]=useState("");
 	const create=useMutation({mutationFn:()=>api("/finance/student-fee-assignments/",{method:"POST",body:JSON.stringify({student:studentId,fee_structure:structure})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});setOpen(false);notify.success("Fee structure assigned to student")},onError:error=>notify.error("Fee assignment could not be created",error)});
@@ -230,7 +225,7 @@ export function AssignmentsPage(){
 
 		<ActionDialog open={open} title="Assign fee structure" description="Only approved structures are offered. Assigning the same student and structure again is safe -- it returns the existing assignment rather than creating a duplicate." confirmLabel="Assign fees" busy={create.isPending} onClose={()=>setOpen(false)} onSubmit={e=>{e.preventDefault();create.mutate()}}>
 			<Stack gap="sm">
-				<TextInput label="Student id" required placeholder="Exact student id" value={studentId} onChange={e=>setStudentId(e.currentTarget.value)}/>
+				<StudentSearchSelect value={studentId} onChange={setStudentId} required/>
 				<Select label="Approved fee structure" required placeholder="Select structure" data={structures.data?.results.filter(s=>s.is_approved).map(s=>({value:s.id,label:`${s.name} · ${termName(s.term)}`}))??[]} value={structure||null} onChange={value=>setStructure(value??"")}/>
 			</Stack>
 		</ActionDialog>
@@ -319,9 +314,6 @@ export function InvoicesPage(){
 	const {can}=useAccess();
 	const qc=useQueryClient();
 	const [page,setPage]=useState(1);
-	// Exact match only -- the backend has no search/name-resolution endpoint
-	// (STUDENT-GAP-02), so this stays a raw id field rather than a picker that
-	// would silently imply a complete, searchable student catalogue.
 	const [studentId,setStudentId]=useState("");
 	const invoices=useQuery({queryKey:["invoices",page,studentId],queryFn:()=>api<Page<Invoice>>("/finance/invoices/",{params:{page,student:studentId||undefined}})});
 	const issue=useMutation({mutationFn:(id:string)=>api(`/finance/invoices/${id}/issue/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["invoices"]});notify.success("Invoice issued")},onError:error=>notify.error("Invoice could not be issued",error)});
@@ -356,7 +348,7 @@ export function InvoicesPage(){
 		<DataTable title="Invoices" columns={columns} rows={invoices.data?.results??[]} rowKey={r=>r.id} loading={invoices.isLoading} error={invoices.error} retry={()=>void invoices.refetch()} onRefresh={()=>void invoices.refetch()}
 			count={invoices.data?.count} page={page} previous={!!invoices.data?.previous} next={!!invoices.data?.next} onPage={setPage}
 			toolbar={<FilterBar>
-				<TextInput label="Student" placeholder="Exact student id" size="xs" w={300} value={studentId} onChange={e=>{setStudentId(e.currentTarget.value);setPage(1)}}/>
+				<Box w={300}><StudentSearchSelect value={studentId} onChange={id=>{setStudentId(id);setPage(1)}} size="xs"/></Box>
 			</FilterBar>}
 		/>
 		<ActionDialog open={!!creditTarget} title="Create credit note" description={creditTarget?`Issues a credit note against invoice ${creditTarget.invoice_number}. This cannot be undone.`:undefined} confirmLabel="Create credit note" busy={createCredit.isPending} onClose={()=>setCreditTarget(null)} onSubmit={e=>{e.preventDefault();createCredit.mutate()}}>
@@ -372,8 +364,6 @@ export function PaymentsPage(){
 	const {can}=useAccess();
 	const qc=useQueryClient();
 	const [page,setPage]=useState(1);
-	// Exact match only -- same reasoning as InvoicesPage: no search/name-resolution
-	// endpoint exists (STUDENT-GAP-02), so this stays a raw id field.
 	const [studentId,setStudentId]=useState("");
 	const payments=useQuery({queryKey:["payments",page,studentId],queryFn:()=>api<Page<Payment>>("/finance/payments/",{params:{page,student:studentId||undefined}})});
 
@@ -419,12 +409,10 @@ export function PaymentsPage(){
 	// replay, not a second charge -- only a fresh "+ Record payment" click
 	// starts a new attempt and gets a new key.
 	const [idempotencyKey,setIdempotencyKey]=useState("");
-	// Picker for the record-payment dialog only -- STUDENT-GAP-02 means there's
-	// no bounded way to resolve an arbitrary student id to a name, so the table's
-	// "Student" column below shows the raw id rather than guessing from this
-	// (necessarily incomplete) page of students. Pre-existing limitation,
-	// not solved by this migration -- carried forward, not silently hidden.
-	const students=useQuery({queryKey:["payment-students-lookup"],queryFn:()=>api<Page<Student>>("/students/",{params:{page_size:100}}),enabled:canRecord});
+	// The table's "Student" column below still shows the raw id rather than a
+	// resolved name -- StudentSearchSelect only resolves the one student
+	// being picked in the dialog, not every id a page of payments happens to
+	// reference.
 	const paymentMethods=useQuery({queryKey:["payment-methods"],queryFn:()=>api<Page<PaymentMethod>>("/finance/payment-methods/",{params:{page_size:100}}),enabled:canRecord});
 	const openRecord=()=>{setIdempotencyKey(crypto.randomUUID());setPayStudent("");setPayMethod("");setPayAmount("");setPayReference("");setRecordOpen(true)};
 	const record=useMutation({
@@ -447,13 +435,13 @@ export function PaymentsPage(){
 		<DataTable title="Payments" columns={columns} rows={payments.data?.results??[]} rowKey={r=>r.id} loading={payments.isLoading} error={payments.error} retry={()=>void payments.refetch()} onRefresh={()=>void payments.refetch()}
 			count={payments.data?.count} page={page} previous={!!payments.data?.previous} next={!!payments.data?.next} onPage={setPage} onRow={setSelected}
 			toolbar={<FilterBar>
-				<TextInput label="Student" placeholder="Exact student id" size="xs" w={300} value={studentId} onChange={e=>{setStudentId(e.currentTarget.value);setPage(1)}}/>
+				<Box w={300}><StudentSearchSelect value={studentId} onChange={id=>{setStudentId(id);setPage(1)}} size="xs"/></Box>
 			</FilterBar>}
 		/>
 
 		<ActionDialog open={recordOpen} title="Record payment" description="Creates a received payment for a student, ready to allocate against an invoice." confirmLabel="Record payment" busy={record.isPending} onClose={()=>setRecordOpen(false)} onSubmit={e=>{e.preventDefault();record.mutate()}}>
 			<Stack gap="sm">
-				<Select label="Student" required searchable data={students.data?.results.map(s=>({value:s.id,label:`${s.full_name} · ${s.admission_number}`}))??[]} value={payStudent||null} onChange={value=>setPayStudent(value??"")}/>
+				<StudentSearchSelect value={payStudent} onChange={setPayStudent} required/>
 				<Select label="Payment method" required data={paymentMethods.data?.results.map(m=>({value:m.id,label:m.name}))??[]} value={payMethod||null} onChange={value=>setPayMethod(value??"")}/>
 				<NumberInput label="Amount (KES)" required min={0.01} decimalScale={2} value={payAmount} onChange={value=>setPayAmount(value===""||value===undefined?"":Number(value))}/>
 				<TextInput label="External reference (optional)" value={payReference} onChange={e=>setPayReference(e.currentTarget.value)}/>
@@ -509,7 +497,7 @@ export function PaymentsPage(){
 // live server-side search by admission number or name, resolved to the real
 // id under the hood, instead of either a raw id field or a page_size:100
 // dropdown that silently implies a complete roster.
-function StudentSearchSelect({value,onChange,label="Student",required}:{value:string;onChange:(id:string)=>void;label?:string;required?:boolean}){
+function StudentSearchSelect({value,onChange,label="Student",required,size}:{value:string;onChange:(id:string)=>void;label?:string;required?:boolean;size?:string}){
 	const [query,setQuery]=useState("");
 	const [debounced]=useDebouncedValue(query,250);
 	// The option that produced the current `value`, kept independent of the
@@ -525,7 +513,7 @@ function StudentSearchSelect({value,onChange,label="Student",required}:{value:st
 	});
 	const options=(search.data?.results??[]).map(s=>({value:s.id,label:`${s.full_name} · ${s.admission_number}`}));
 	const data=selectedOption&&!options.some(o=>o.value===selectedOption.value)?[selectedOption,...options]:options;
-	return <Select label={label} required={required} searchable clearable
+	return <Select label={label} required={required} size={size} searchable clearable
 		placeholder="Search admission no. or name"
 		searchValue={query} onSearchChange={setQuery}
 		data={data} filter={({options})=>options}
