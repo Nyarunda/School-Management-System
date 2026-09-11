@@ -442,7 +442,6 @@ function SetupCard({name,endpoint,managePermission}:{name:string;endpoint:string
 	const save=useMutation({
 		mutationFn:()=>api<Row>(endpoint,{method:"PATCH",body:JSON.stringify({default_retention_days:retentionDays===""?null:retentionDays})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:[endpoint]});setEditOpen(false);notify.success(`${name} setup updated`)},
-		onError:error=>notify.error(`${name} setup could not be updated`,error),
 	});
 	return <section className="card setup-card">
 		<div className="card-heading"><div><h2>{name}</h2><p>Current configuration</p></div>{canManage&&<button className="button secondary" onClick={()=>{setRetentionDays((q.data?.default_retention_days as number|null)??"");setEditOpen(true)}}>Edit</button>}</div>

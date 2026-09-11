@@ -74,7 +74,6 @@ export function RolesPage(){
 	const save=useMutation({
 		mutationFn:()=>api<Role>(`/tenancy/roles/${selectedId}/`,{method:"PATCH",body:JSON.stringify({name,permissions:[...preserved,...editableSelected]})}),
 		onSuccess:updated=>{void qc.invalidateQueries({queryKey:["tenancy-roles"]});selectRole(updated);notify.success("Role updated")},
-		onError:error=>notify.error("Role could not be updated",error),
 	});
 
 	const [createOpen,setCreateOpen]=useState(false);
@@ -82,14 +81,12 @@ export function RolesPage(){
 	const create=useMutation({
 		mutationFn:()=>api<Role>("/tenancy/roles/",{method:"POST",body:JSON.stringify({name:createName,permissions:[]})}),
 		onSuccess:created=>{void qc.invalidateQueries({queryKey:["tenancy-roles"]});setCreateOpen(false);selectRole(created)},
-		onError:error=>notify.error("Role could not be created",error),
 	});
 
 	const [deleteTarget,setDeleteTarget]=useState<Role|null>(null);
 	const remove=useMutation({
 		mutationFn:()=>api(`/tenancy/roles/${deleteTarget!.id}/`,{method:"DELETE"}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["tenancy-roles"]});setDeleteTarget(null);if(selectedId===deleteTarget?.id)setSelectedId(null);notify.success("Role deleted")},
-		onError:error=>notify.error("Role could not be deleted",error),
 	});
 
 	const grouped=Object.entries(
@@ -238,7 +235,6 @@ export function UsersPage(){
 	const invite=useMutation({
 		mutationFn:()=>api<UserMembership>("/tenancy/users/invite/",{method:"POST",body:JSON.stringify({email:inviteForm.email,role:Number(inviteForm.role),campus:inviteForm.campus?Number(inviteForm.campus):null})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["tenancy-memberships"]});setInviteOpen(false);notify.success("Invitation sent")},
-		onError:error=>notify.error("Invitation could not be sent",error),
 	});
 
 	const [reassignTarget,setReassignTarget]=useState<UserMembership|null>(null);
@@ -249,7 +245,6 @@ export function UsersPage(){
 			campus:reassignForm.campus?Number(reassignForm.campus):null,
 		})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["tenancy-memberships"]});setReassignTarget(null);notify.success("Member updated")},
-		onError:error=>notify.error("Member could not be updated",error),
 	});
 
 	// Activation is only ever offered for a membership that already accepted
@@ -262,7 +257,6 @@ export function UsersPage(){
 	const setStatus=useMutation({
 		mutationFn:()=>api<UserMembership>(`/tenancy/memberships/${statusTarget!.membership.id}/${statusTarget!.action}/`,{method:"POST"}),
 		onSuccess:()=>{const action=statusTarget?.action;void qc.invalidateQueries({queryKey:["tenancy-memberships"]});setStatusTarget(null);notify.success(action==="activate"?"Member activated":"Member deactivated")},
-		onError:error=>notify.error(statusTarget?.action==="activate"?"Member could not be activated":"Member could not be deactivated",error),
 	});
 
 	const columns:Column<UserMembership>[]=[

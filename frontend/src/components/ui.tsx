@@ -46,7 +46,12 @@ export function Loading({ label }: { label?: string }) {
 }
 
 export function Empty({title="No records found",message="Records will appear here when they are available."}:{title?:string;message?:string}){return <Stack className="state" align="center" gap={4}><IconInbox size={28}/><Title order={3} size="sm">{title}</Title><Text size="sm" c="dimmed">{message}</Text></Stack>}
-export function ErrorState({error,retry}:{error:unknown;retry?:()=>void}){const message=error instanceof ApiError?error.message:error instanceof Error?error.message:"The request could not be completed.";return <Alert className="state-error" color="red" icon={<IconAlertCircle size={18}/>} title="Unable to load this workspace">{message}{retry&&<Button display="block" mt="sm" variant="light" color="red" onClick={retry}>Try again</Button>}</Alert>}
+export function ErrorState({error,retry}:{error:unknown;retry?:()=>void}){
+	const isForbidden=error instanceof ApiError&&error.status===403;
+	const message=error instanceof ApiError?error.message:error instanceof Error?error.message:"The request could not be completed.";
+	const title=isForbidden?"You don't have access to this":"Unable to load this workspace";
+	return <Alert className="state-error" color="red" icon={<IconAlertCircle size={18}/>} title={title}>{message}{!isForbidden&&retry&&<Button display="block" mt="sm" variant="light" color="red" onClick={retry}>Try again</Button>}</Alert>;
+}
 export function Modal({open,title,children,onClose}:{open:boolean;title:string;children:React.ReactNode;onClose():void}){return <MantineModal opened={open} onClose={onClose} title={title} centered>{children}</MantineModal>}
 export function usePath(){return useLocation().pathname}
 export function go(path:string){history.pushState({},"",path);window.dispatchEvent(new PopStateEvent("popstate"));window.scrollTo({top:0})}

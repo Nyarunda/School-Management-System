@@ -43,22 +43,18 @@ export function LeaveWorkflowPage(){
 	const createWorkflow=useMutation({
 		mutationFn:()=>api<Workflow>("/leave/workflows/",{method:"POST",body:JSON.stringify({name:workflowName})}),
 		onSuccess:w=>{void qc.invalidateQueries({queryKey:["leave-workflows"]});setSelected(w);setWorkflowDialog(false);notify.success("Leave workflow created")},
-		onError:error=>notify.error("Leave workflow could not be created",error),
 	});
 	const createStage=useMutation({
 		mutationFn:()=>api<Stage>(`/leave/workflows/${selected!.id}/stages/`,{method:"POST",body:JSON.stringify({name:stageName,sequence:stageSequence,approver_role:Number(stageRole)})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["leave-workflow-stages",selected?.id]});setStageDialog(null);notify.success("Approval stage added")},
-		onError:error=>notify.error("Approval stage could not be added",error),
 	});
 	const updateStage=useMutation({
 		mutationFn:(stage:Stage)=>api<Stage>(`/leave/workflows/${selected!.id}/stages/${stage.id}/`,{method:"PATCH",body:JSON.stringify({name:stageName,approver_role:Number(stageRole)})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["leave-workflow-stages",selected?.id]});setStageDialog(null);notify.success("Approval stage updated")},
-		onError:error=>notify.error("Approval stage could not be updated",error),
 	});
 	const deleteStage=useMutation({
 		mutationFn:(id:string)=>api(`/leave/workflows/${selected!.id}/stages/${id}/`,{method:"DELETE"}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["leave-workflow-stages",selected?.id]});setDeleteTarget(null);notify.success("Approval stage removed")},
-		onError:error=>notify.error("Approval stage could not be removed",error),
 	});
 
 	const stageRows=stages.data?.results??[];

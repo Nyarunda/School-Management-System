@@ -40,7 +40,6 @@ export function AttendancePage(){
 	const openSession=useMutation({
 		mutationFn:()=>api<SessionDetail>("/attendance/sessions/open/",{method:"POST",body:JSON.stringify({class_group:classGroupId,session_date:sessionDate,force})}),
 		onSuccess:detail=>{qc.setQueryData(["attendance-session",detail.session.id],detail);void qc.invalidateQueries({queryKey:["attendance-sessions"]});setOpenDialog(false);setSelected(detail.session.id);notify.success("Attendance register opened")},
-		onError:error=>notify.error("Attendance register could not be opened",error),
 	});
 	const columns:Column<Session>[]=[
 		{key:"date",header:"Date",cell:r=><Text size="sm" fw={600}>{r.session_date}</Text>},

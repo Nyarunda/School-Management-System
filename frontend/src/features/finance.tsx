@@ -36,7 +36,7 @@ export function FeeStructuresPage(){
 	const qc=useQueryClient();
 	const data=usePaged<Structure>("fee-structures","/finance/fee-structures/");
 	const [selected,setSelected]=useState<Structure|null>(null);
-	const approve=useMutation({mutationFn:(id:string)=>api(`/finance/fee-structures/${id}/approve/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setSelected(null);notify.success("Fee structure approved")},onError:error=>notify.error("Fee structure could not be approved",error)});
+	const approve=useMutation({mutationFn:(id:string)=>api(`/finance/fee-structures/${id}/approve/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setSelected(null);notify.success("Fee structure approved")}});
 
 	const canView=can("finance.fee_structure.view");
 	const canCreate=can("finance.fee_structure.create");
@@ -57,7 +57,7 @@ export function FeeStructuresPage(){
 	const levels=useQuery({queryKey:["academic-levels"],queryFn:()=>api<Page<AcademicLevel>>("/academics/academic-levels/",{params:{page_size:100}}),enabled:canView});
 	const yearName=(id:string)=>years.data?.results.find(y=>y.id===id)?.name??id;
 	const levelName=(id:string)=>levels.data?.results.find(l=>l.id===id)?.name??id;
-	const create=useMutation({mutationFn:()=>api<Structure>("/finance/fee-structures/",{method:"POST",body:JSON.stringify({name,academic_year:year,academic_level:level})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setCreateOpen(false);setName("");setYear("");setLevel("");notify.success("Fee structure created")},onError:error=>notify.error("Fee structure could not be created",error)});
+	const create=useMutation({mutationFn:()=>api<Structure>("/finance/fee-structures/",{method:"POST",body:JSON.stringify({name,academic_year:year,academic_level:level})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-structures"]});setCreateOpen(false);setName("");setYear("");setLevel("");notify.success("Fee structure created")}});
 
 	// add_fee_structure_line raises "Approved fee structures cannot be edited"
 	// once is_approved is true (services.py:63-64) -- this gate reflects that
@@ -70,7 +70,6 @@ export function FeeStructuresPage(){
 	const addLine=useMutation({
 		mutationFn:()=>api<Line>(`/finance/fee-structures/${selected!.id}/lines/`,{method:"POST",body:JSON.stringify({fee_item:lineItem,amount:lineAmount})}),
 		onSuccess:newLine=>{setSelected(prev=>prev?{...prev,lines:[...prev.lines,newLine]}:prev);setLineItem("");setLineAmount("");void qc.invalidateQueries({queryKey:["fee-structures"]});notify.success("Fee line added")},
-		onError:error=>notify.error("Fee line could not be added",error),
 	});
 
 	const columns:Column<Structure>[]=[
@@ -146,7 +145,7 @@ export function AssignmentsPage(){
 	// Payments' Match dialog.
 	const [studentId,setStudentId]=useState("");
 	const [structure,setStructure]=useState("");
-	const create=useMutation({mutationFn:()=>api("/finance/student-fee-assignments/",{method:"POST",body:JSON.stringify({student:studentId,fee_structure:structure})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});setOpen(false);notify.success("Fee structure assigned to student")},onError:error=>notify.error("Fee assignment could not be created",error)});
+	const create=useMutation({mutationFn:()=>api("/finance/student-fee-assignments/",{method:"POST",body:JSON.stringify({student:studentId,fee_structure:structure})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});setOpen(false);notify.success("Fee structure assigned to student")}});
 	const generate=useMutation({mutationFn:(id:string)=>api(`/finance/student-fee-assignments/${id}/generate-invoice/`,{method:"POST"}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["assignments"]});void qc.invalidateQueries({queryKey:["invoices"]});notify.success("Invoice generated")},onError:error=>notify.error("Invoice could not be generated",error)});
 
 	const columns:Column<Assignment>[]=[
@@ -190,7 +189,6 @@ export function InvoicesPage(){
 	const createCredit=useMutation({
 		mutationFn:()=>api("/finance/credit-notes/",{method:"POST",body:JSON.stringify({student:creditTarget!.student,invoice:creditTarget!.id,amount:creditAmount,reason:creditReason})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["invoices"]});setCreditTarget(null);notify.success("Credit note issued")},
-		onError:error=>notify.error("Credit note could not be issued",error),
 	});
 
 	const columns:Column<Invoice>[]=[
@@ -247,7 +245,7 @@ export function PaymentsPage(){
 	// just the Allocate dropdown.
 	const invoices=useQuery({queryKey:["payment-invoices",selected?.student],queryFn:()=>api<Page<Invoice>>("/finance/invoices/",{params:{student:selected!.student,page_size:100}}),enabled:!!selected});
 	const invoiceNumber=(id:string)=>invoices.data?.results.find(i=>i.id===id)?.invoice_number??id;
-	const mutate=useMutation({mutationFn:()=>api(mode==="allocate"?`/finance/payments/${selected!.id}/allocate/`:`/finance/payments/${selected!.id}/reverse/`,{method:"POST",body:JSON.stringify(mode==="allocate"?{invoice,amount}:{reason})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["payments"]});const done=mode;setMode(null);setSelected(null);notify.success(done==="allocate"?"Payment allocated":"Payment reversed")},onError:error=>notify.error(mode==="allocate"?"Payment could not be allocated":"Payment could not be reversed",error)});
+	const mutate=useMutation({mutationFn:()=>api(mode==="allocate"?`/finance/payments/${selected!.id}/allocate/`:`/finance/payments/${selected!.id}/reverse/`,{method:"POST",body:JSON.stringify(mode==="allocate"?{invoice,amount}:{reason})}),onSuccess:()=>{void qc.invalidateQueries({queryKey:["payments"]});const done=mode;setMode(null);setSelected(null);notify.success(done==="allocate"?"Payment allocated":"Payment reversed")}});
 
 	// Allocation Reversal (finance.allocation.reverse) is deliberately kept
 	// separate from whole-Payment Reversal above: it corrects one misapplied
@@ -264,7 +262,6 @@ export function PaymentsPage(){
 	const reverseAllocation=useMutation({
 		mutationFn:()=>api(`/finance/payment-allocations/${reversingAllocation!.id}/reverse/`,{method:"POST",body:JSON.stringify({amount:allocationReversalAmount,reason:allocationReversalReason})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["payments"]});setReversingAllocation(null);notify.success("Allocation reversed")},
-		onError:error=>notify.error("Allocation could not be reversed",error),
 	});
 
 	const canRecord=can("finance.payment.record");
@@ -289,7 +286,6 @@ export function PaymentsPage(){
 	const record=useMutation({
 		mutationFn:()=>api("/finance/payments/",{method:"POST",body:JSON.stringify({student:payStudent,payment_method:payMethod,amount:payAmount,idempotency_key:idempotencyKey,external_reference:payReference})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["payments"]});setRecordOpen(false);notify.success("Payment recorded successfully")},
-		onError:error=>notify.error("Payment could not be recorded",error),
 	});
 
 	const columns:Column<Payment>[]=[
@@ -411,7 +407,6 @@ export function IncomingPage(){
 	const match=useMutation({
 		mutationFn:()=>api(`/finance/incoming-payments/${matchTarget!.id}/match/`,{method:"POST",body:JSON.stringify({student:matchStudentId})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["incoming"]});setMatchTarget(null);notify.success("Incoming payment matched")},
-		onError:error=>notify.error("Incoming payment could not be matched",error),
 	});
 
 	const [ignoreTarget,setIgnoreTarget]=useState<Incoming|null>(null);
@@ -419,7 +414,6 @@ export function IncomingPage(){
 	const ignore=useMutation({
 		mutationFn:()=>api(`/finance/incoming-payments/${ignoreTarget!.id}/ignore/`,{method:"POST",body:JSON.stringify({reason:ignoreReason})}),
 		onSuccess:()=>{void qc.invalidateQueries({queryKey:["incoming"]});setIgnoreTarget(null);notify.success("Incoming payment ignored")},
-		onError:error=>notify.error("Incoming payment could not be ignored",error),
 	});
 
 	const paymentMethods=useQuery({queryKey:["incoming-payment-methods-lookup"],queryFn:()=>api<Page<PaymentMethod>>("/finance/payment-methods/",{params:{page_size:100}}),enabled:can("finance.reconciliation.view")});
