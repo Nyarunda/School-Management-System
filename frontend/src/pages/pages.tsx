@@ -1,7 +1,7 @@
 import { FormEvent, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Badge, Box, Button, Card, Divider, Grid, Group, NumberInput, Paper, PasswordInput, Select, SimpleGrid, Stack, Table, Text, ThemeIcon, TextInput, Title, UnstyledButton } from "@mantine/core";
-import { IconAlertCircle, IconArrowRight, IconBell, IconCalendar, IconCheck, IconFileText, IconInbox, IconLock, IconRefresh, IconSparkles, IconUser, IconUsers, IconWallet } from "@tabler/icons-react";
+import { IconArrowRight, IconBell, IconCalendar, IconCheck, IconFileText, IconInbox, IconLock, IconRefresh, IconSparkles, IconUser, IconUsers, IconWallet } from "@tabler/icons-react";
 import { api, Page } from "../api/client";
 import { useAccess, useAuth } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
@@ -23,19 +23,16 @@ export function LoginPage() {
   const { login } = useAuth();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
 
   async function submit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
-    setError("");
     try {
       await login(username, password);
       go("/");
     } catch (caught) {
       const msg = caught instanceof Error ? caught.message : "Sign in failed";
-      setError(msg);
       notify.error(msg, caught);
     } finally {
       setBusy(false);
@@ -45,7 +42,6 @@ export function LoginPage() {
   function handleDemoFill(user: string, pass: string) {
     setUsername(user);
     setPassword(pass);
-    setError("");
   }
 
   return (
@@ -133,12 +129,6 @@ export function LoginPage() {
                   Enter your credentials provided by your school administrator.
                 </Text>
               </Box>
-
-              {error && (
-                <Alert color="red" variant="light" title="Authentication Error" icon={<IconAlertCircle size={16} />}>
-                  {error}
-                </Alert>
-              )}
 
               <TextInput
                 label="Username or Email"
