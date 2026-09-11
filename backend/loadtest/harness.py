@@ -248,6 +248,51 @@ async def run_stk_trickle(client, base_url, tenant_entry, *, rate_per_minute, ph
         await asyncio.sleep(interval)
 
 
+def _tenant_weights(tenants):
+    weights = [10 if t["is_noisy"] else 1 for t in tenants]
+    return weights, sum(weights)
+
+
+async def run_interactive_reads(client, base_url, tenant_entry, *, rate_per_minute, phase, recorder, stop_event):
+    """RC Area 6 / 5E-3: the read side of a mixed workload -- student lists,
+    attendance registers/sessions, assessment lists/results -- alongside
+    the finance traffic the other 5e-phases already cover. Cycles through
+    a fixed set of real endpoints per tenant so the traffic mix looks like
+    genuine interactive use, not one endpoint hammered in a loop. Closes
+    the mixed-workload fixture gap: loadtest_provision now seeds one real
+    attendance session and one real assessment per tenant specifically so
+    these reads return real data, not empty lists.
+    """
+    if rate_per_minute <= 0:
+        return
+    headers = await _tenant_headers(client, base_url, tenant_entry)
+    interval = 60.0 / rate_per_minute
+    counter = itertools.count()
+    session_id = tenant_entry.get("attendance_session_id")
+    assessment_id = tenant_entry.get("assessment_id")
+    endpoints = [
+        ("student_list", f"{base_url}/api/v1/students/?page_size=25"),
+        ("attendance_session_list", f"{base_url}/api/v1/attendance/sessions/"),
+        ("assessment_list", f"{base_url}/api/v1/assessments/assessments/"),
+    ]
+    if session_id:
+        endpoints.append(("attendance_session_detail", f"{base_url}/api/v1/attendance/sessions/{session_id}/"))
+    if assessment_id:
+        endpoints.append(("assessment_detail", f"{base_url}/api/v1/assessments/assessments/{assessment_id}/"))
+
+    while not stop_event.is_set():
+        n = next(counter)
+        student = tenant_entry["students"][n % len(tenant_entry["students"])]
+        per_student_endpoints = [
+            ("attendance_student_summary", f"{base_url}/api/v1/attendance/students/{student['student_id']}/summary/"),
+            ("assessment_student_summary", f"{base_url}/api/v1/assessments/students/{student['student_id']}/summary/"),
+        ]
+        traffic_class, url = (endpoints + per_student_endpoints)[n % (len(endpoints) + len(per_student_endpoints))]
+        status_code, latency_ms = await _timed_request(client, "GET", url, headers=headers, timeout=15)
+        recorder.record_metric(traffic_class=traffic_class, tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
+        await asyncio.sleep(interval)
+
+
 async def run_5e2(client, base_url, seeded_path, *, ramp, step_duration, recorder, concurrency_limit):
     seeded = json.loads(Path(seeded_path).read_text())
     by_tenant = {}
@@ -339,7 +384,11 @@ async def main_async(args):
     recorder = Recorder()
 
     stop_event = asyncio.Event()
-    if args.chaos:
+    if args.chaos_plan:
+        threading.Thread(
+            target=chaos.run_plan, args=(json.loads(Path(args.chaos_plan).read_text()),), daemon=True,
+        ).start()
+    elif args.chaos:
         threading.Thread(
             target=chaos.run_scenario, args=(args.chaos,),
             kwargs={"at_seconds": args.chaos_at, "duration_seconds": args.chaos_duration}, daemon=True,
@@ -361,13 +410,23 @@ async def main_async(args):
             ramp = [50] if args.phase == "smoke" else parse_ramp(args.ramp)
             step_duration = 30 if args.phase == "smoke" else args.step_duration
             operators = 2 if args.phase == "smoke" else args.operators
+            interactive_rate_total = 50 if args.phase == "smoke" else args.interactive_rate
+            weights, total_weight = _tenant_weights(manifest["tenants"])
             background = []
-            for tenant_entry in manifest["tenants"]:
+            for tenant_entry, weight in zip(manifest["tenants"], weights):
                 background.append(asyncio.create_task(run_operator_pool(
                     client, args.base_url, tenant_entry, operators=operators, phase=args.phase, recorder=recorder, stop_event=stop_event,
                 )))
                 background.append(asyncio.create_task(run_stk_trickle(
                     client, args.base_url, tenant_entry, rate_per_minute=args.stk_rate, phase=args.phase, recorder=recorder, stop_event=stop_event,
+                )))
+                # RC Area 6 / 5E-3: same noisy-tenant weighting as the C2B
+                # ramp below, applied to interactive read traffic too, so
+                # the mixed workload's tenant distribution is genuinely
+                # weighted end-to-end, not just on the finance side.
+                background.append(asyncio.create_task(run_interactive_reads(
+                    client, args.base_url, tenant_entry, rate_per_minute=interactive_rate_total * weight / total_weight,
+                    phase=args.phase, recorder=recorder, stop_event=stop_event,
                 )))
             await run_ramp(
                 client, args.base_url, manifest, run_id=run_id, ramp=ramp, step_duration=step_duration,
@@ -405,6 +464,9 @@ def parse_args():
     parser.add_argument("--amount", default="500")
     parser.add_argument("--operators", type=int, default=10, help="Per-tenant verify/process pool size, phase 5e3 only.")
     parser.add_argument("--stk-rate", type=float, default=5, help="STK pushes/minute per tenant, phase 5e3 only.")
+    parser.add_argument("--interactive-rate", type=float, default=200,
+                        help="Combined student/attendance/assessment reads/minute across all tenants, "
+                             "weighted like the C2B ramp (noisy tenant gets 10x). Phase 5e3 only.")
     parser.add_argument("--drain-timeout", type=float, default=60,
                         help="Max seconds to wait for the operator pool to clear the RECEIVED backlog after the ramp ends, phase 5e3/smoke only.")
     parser.add_argument("--concurrency", type=int, default=200, help="Max in-flight ramp requests at once.")
@@ -414,6 +476,9 @@ def parse_args():
     parser.add_argument("--chaos", choices=sorted(chaos.SCENARIOS), default=None)
     parser.add_argument("--chaos-at", type=float, default=60)
     parser.add_argument("--chaos-duration", type=float, default=60)
+    parser.add_argument("--chaos-plan", default=None,
+                         help="Path to a JSON file of {scenario, at_seconds, duration_seconds} objects, run "
+                              "sequentially by chaos.run_plan. Overrides --chaos/--chaos-at/--chaos-duration.")
     parser.add_argument("--run-id", default=None)
     return parser.parse_args()
 
