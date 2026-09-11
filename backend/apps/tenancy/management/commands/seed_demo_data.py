@@ -16,10 +16,12 @@ from apps.students.models import Student
 from apps.tenancy.models import Campus, Membership, Role, Tenant, User
 from apps.tenancy.permissions_catalogue import PERMISSION_CATALOGUE
 
+# One shared, cross-tenant account -- not scoped per school, since a real
+# Super Admin is inherently cross-tenant (apps.platform's IsSuperUser).
+# Re-running this command for additional schools just adds another
+# membership to the same account, so one login can provision/browse all
+# of them.
 SUPERADMIN_USERNAME = "demo-superadmin"
-ADMIN_USERNAME = "demo-admin"
-TEACHER_USERNAME = "demo-teacher"
-BURSAR_USERNAME = "demo-bursar"
 DEMO_PASSWORD = "demo-pass-12345"
 
 # Every finance.* permission this app defines, plus the minimal read-access
@@ -53,27 +55,32 @@ STUDENT_NAMES = [
 
 
 class Command(BaseCommand):
-    help = "Idempotently seeds one demo tenant with enough real data (students, class groups, a leave workflow) to log in and exercise the migrated frontend pages locally. Dev/test tooling only -- not for a real deployment."
+    help = "Idempotently seeds one demo tenant with enough real data (students, class groups, a leave workflow) to log in and exercise the migrated frontend pages locally. Run multiple times with different --slug/--name to get several independent demo schools -- each gets its own admin/bursar/teacher accounts, scoped by slug, so schools don't share logins or see each other's data. Dev/test tooling only -- not for a real deployment."
 
     def add_arguments(self, parser):
         parser.add_argument("--slug", default="demo-academy")
         parser.add_argument("--name", default="Demo Academy")
 
     def handle(self, *args, **options):
-        tenant = self._provision_tenant(slug=options["slug"], name=options["name"])
+        slug = options["slug"]
+        tenant = self._provision_tenant(slug=slug, name=options["name"])
         campus = self._provision_campus(tenant)
         admin_role = self._provision_admin_role(tenant)
-        admin_user = self._provision_user(tenant=tenant, role=admin_role, campus=None, username=ADMIN_USERNAME)
+        admin_user = self._provision_user(tenant=tenant, role=admin_role, campus=None, username=f"{slug}-admin", first_name="Admin")
         # Superuser bypasses every permission-string check (require_permission
         # etc.) regardless of which role its membership carries -- reusing
         # admin_role here is just so the account also has something sensible
-        # to browse inside the demo tenant; apps.platform's IsSuperUser (the
+        # to browse inside this school; apps.platform's IsSuperUser (the
         # Super Admin tenant-provisioning API) needs no membership at all.
-        superadmin_user = self._provision_user(tenant=tenant, role=admin_role, campus=None, username=SUPERADMIN_USERNAME, is_superuser=True)
+        # Unlike the other three accounts, this one is NOT slug-scoped -- see
+        # SUPERADMIN_USERNAME above.
+        superadmin_user = self._provision_user(
+            tenant=tenant, role=admin_role, campus=None, username=SUPERADMIN_USERNAME, first_name="Super Admin", is_superuser=True,
+        )
         teacher_role = self._provision_teacher_role(tenant)
-        teacher_user = self._provision_user(tenant=tenant, role=teacher_role, campus=campus, username=TEACHER_USERNAME)
+        teacher_user = self._provision_user(tenant=tenant, role=teacher_role, campus=campus, username=f"{slug}-teacher", first_name="Teacher")
         bursar_role = self._provision_bursar_role(tenant)
-        bursar_user = self._provision_user(tenant=tenant, role=bursar_role, campus=None, username=BURSAR_USERNAME)
+        bursar_user = self._provision_user(tenant=tenant, role=bursar_role, campus=None, username=f"{slug}-bursar", first_name="Bursar")
 
         year = self._provision_academic_year(tenant)
         levels = self._provision_levels(tenant)
@@ -88,10 +95,10 @@ class Command(BaseCommand):
 
         self.stdout.write(self.style.SUCCESS(f"\nDemo tenant ready: {tenant.name} ({tenant.slug})"))
         self.stdout.write("Log in with any account (tenant is selected automatically after login):")
-        self.stdout.write(f"  Super Admin (cross-tenant, provisions schools) -- username: {superadmin_user.username}  password: {DEMO_PASSWORD}")
-        self.stdout.write(f"  School Administrator (full access, this tenant) -- username: {admin_user.username}  password: {DEMO_PASSWORD}")
-        self.stdout.write(f"  Bursar (finance-scoped) -- username: {bursar_user.username}  password: {DEMO_PASSWORD}")
-        self.stdout.write(f"  Teacher (class-scoped) -- username: {teacher_user.username}  password: {DEMO_PASSWORD}")
+        self.stdout.write(f"  Super Admin (cross-tenant, shared across every demo school) -- username: {superadmin_user.username}  password: {DEMO_PASSWORD}")
+        self.stdout.write(f"  School Administrator (full access, this school only) -- username: {admin_user.username}  password: {DEMO_PASSWORD}")
+        self.stdout.write(f"  Bursar (finance-scoped, this school only) -- username: {bursar_user.username}  password: {DEMO_PASSWORD}")
+        self.stdout.write(f"  Teacher (class-scoped, this school only) -- username: {teacher_user.username}  password: {DEMO_PASSWORD}")
 
     @transaction.atomic
     def _provision_tenant(self, *, slug, name):
@@ -135,10 +142,10 @@ class Command(BaseCommand):
             role.save(update_fields=["permissions"])
         return role
 
-    def _provision_user(self, *, tenant, role, campus, username, is_superuser=False):
+    def _provision_user(self, *, tenant, role, campus, username, first_name, is_superuser=False):
         user, created = User.objects.get_or_create(
             username=username,
-            defaults={"first_name": username.split("-")[1].title(), "is_superuser": is_superuser, "is_staff": is_superuser},
+            defaults={"first_name": first_name, "is_superuser": is_superuser, "is_staff": is_superuser},
         )
         if created:
             user.set_password(DEMO_PASSWORD)
