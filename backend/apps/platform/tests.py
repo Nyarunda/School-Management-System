@@ -1,7 +1,8 @@
 from django.core.exceptions import ValidationError
 from django.test import TestCase
 
-from apps.tenancy.models import AuditEvent, Membership, Tenant, User
+from apps.tenancy.models import AuditEvent, Membership, Role, Tenant, User
+from apps.tenancy.services import create_role
 
 from .catalogue import MODULE_CATALOGUE
 from .models import PlatformAuditEvent, SubscriptionPlan, TenantModuleOverride, TenantSubscription
@@ -11,6 +12,7 @@ from .services import (
     create_plan,
     delete_plan,
     get_enabled_modules,
+    permissions_for_modules,
     provision_tenant,
     require_module_enabled,
     set_module_override,
@@ -251,6 +253,45 @@ class ProvisionTenantServiceTests(TestCase):
         event = PlatformAuditEvent.objects.get(action="platform.tenant.provisioned", resource_id=str(tenant.id))
         self.assertEqual(event.metadata["slug"], "new-school-4")
         self.assertEqual(event.actor, self.actor)
+
+    def test_provision_tenant_default_admin_permissions_cover_every_subscribed_module(self):
+        """Regression test for a real onboarding blocker found by a live
+        end-to-end bootstrap run: a fixed, narrow default (just tenancy.*
+        plus academics.setup.view) left a freshly provisioned school's
+        administrator unable to grant any finance/staff/attendance
+        permission to anyone, because _require_grantable_permissions
+        blocks granting what you don't hold yourself.
+        """
+        tenant = provision_tenant(actor=self.actor, name="New School", slug="new-school-5", admin_email="admin@new-school-5.example")
+        role = Role.objects.get(tenant=tenant, name="Administrator")
+        expected = {"tenancy.membership.view", "tenancy.membership.manage", "tenancy.role.view", "tenancy.role.manage"}
+        expected |= permissions_for_modules(get_enabled_modules(tenant))
+        self.assertEqual(set(role.permissions), expected)
+        self.assertIn("finance.payment.record", role.permissions)
+
+    def test_provision_tenant_default_admin_can_immediately_create_a_domain_role(self):
+        """The concrete symptom of the bug above: without this fix, this
+        raised "Cannot grant permission(s) you do not hold yourself".
+        """
+        tenant = provision_tenant(actor=self.actor, name="New School", slug="new-school-6", admin_email="admin@new-school-6.example")
+        membership = Membership.objects.get(tenant=tenant)
+        membership.is_active = True
+        membership.save(update_fields=["is_active"])
+        bursar = create_role(
+            actor=membership.user, tenant=tenant, name="Bursar",
+            permissions=["finance.invoice.view", "finance.invoice.create", "finance.payment.view", "finance.payment.record"],
+        )
+        self.assertEqual(bursar.name, "Bursar")
+
+    def test_provision_tenant_default_admin_permissions_are_empty_for_a_tenant_with_no_modules(self):
+        """Confirms the default derives from the tenant's actual
+        subscription rather than silently falling back to something
+        broader when get_enabled_modules is empty.
+        """
+        empty_plan = create_plan(name="No Modules", module_codes=[])
+        tenant = provision_tenant(actor=self.actor, name="New School", slug="new-school-7", admin_email="admin@new-school-7.example")
+        assign_plan(actor=self.actor, tenant=tenant, plan=empty_plan)
+        self.assertEqual(permissions_for_modules(get_enabled_modules(tenant)), set())
 
 
 class ModelValidationTests(TestCase):

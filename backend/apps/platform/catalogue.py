@@ -29,3 +29,24 @@ MODULE_CATALOGUE = {
     "documents": ModuleDefinition(label="Documents", apps=("documents",)),
     "communications": ModuleDefinition(label="Communications & Notifications", apps=("notifications",)),
 }
+
+
+# Maps each module to the apps.tenancy.permissions_catalogue.PERMISSION_CATALOGUE
+# prefixes it covers -- kept separate from ModuleDefinition.apps because
+# Django app names and permission-code prefixes don't always match
+# (the "assessments" app's permissions are all prefixed "assessment.",
+# singular) and because reporting permissions ("reports.<domain>.*") cross-cut
+# several modules rather than belonging to a Django app of their own.
+# Used by services.permissions_for_modules to compute what a tenant's first
+# administrator can delegate -- see provision_tenant.
+MODULE_PERMISSION_PREFIXES = {
+    "admissions": ("admissions.",),
+    "student_records": ("students.", "reports.students."),
+    "academics": ("academics.", "timetable."),
+    "assessments": ("assessment.", "reports.assessments."),
+    "attendance": ("attendance.", "reports.attendance."),
+    "staff_hr": ("staff.", "leave.", "reports.staff."),
+    "finance": ("finance.", "reports.finance."),
+    "documents": ("documents.",),
+    "communications": ("notifications.",),
+}

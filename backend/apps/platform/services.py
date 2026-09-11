@@ -5,13 +5,8 @@ from apps.tenancy.models import AuditEvent, Role, Tenant
 from apps.tenancy.permissions_catalogue import validate_permission_codes
 from apps.tenancy.services import ADMIN_GUARD_PERMISSION, invite_user
 
-from .catalogue import MODULE_CATALOGUE
+from .catalogue import MODULE_CATALOGUE, MODULE_PERMISSION_PREFIXES
 from .models import PlatformAuditEvent, SubscriptionPlan, TenantModuleOverride, TenantSubscription
-
-DEFAULT_TENANT_ADMIN_PERMISSIONS = [
-    "tenancy.membership.manage", "tenancy.membership.view", "tenancy.role.manage", "tenancy.role.view",
-    "academics.setup.view",
-]
 
 
 def get_enabled_modules(tenant):
@@ -32,6 +27,21 @@ def get_enabled_modules(tenant):
         else:
             enabled.discard(override.module_code)
     return enabled
+
+
+def permissions_for_modules(module_codes):
+    """Every apps.tenancy.permissions_catalogue.PERMISSION_CATALOGUE code
+    whose prefix belongs to one of the given modules -- see
+    MODULE_PERMISSION_PREFIXES. Used to compute what a tenant's first
+    administrator can delegate (provision_tenant), not to enforce
+    module-gating itself (require_module_enabled already does that).
+    """
+    from apps.tenancy.permissions_catalogue import PERMISSION_CATALOGUE
+
+    prefixes = tuple(
+        prefix for module_code in module_codes for prefix in MODULE_PERMISSION_PREFIXES.get(module_code, ())
+    )
+    return {code for code in PERMISSION_CATALOGUE if code.startswith(prefixes)}
 
 
 def require_module_enabled(*, tenant, module_code):
@@ -197,19 +207,36 @@ def provision_tenant(*, actor, name, slug, admin_email, admin_role_name="Adminis
     initial admin goes through the exact same consent-gated invite/accept
     flow as anyone else invited later (their membership starts inactive
     until they accept).
-    """
-    canonical = validate_permission_codes(admin_permissions or DEFAULT_TENANT_ADMIN_PERMISSIONS)
-    if ADMIN_GUARD_PERMISSION not in canonical:
-        raise ValidationError(f"The initial admin role must include {ADMIN_GUARD_PERMISSION}")
 
+    When admin_permissions isn't given, the default is every permission
+    belonging to a module the tenant is actually subscribed to (plus the
+    always-ungated tenancy.* administration permissions) -- not a fixed
+    handful. A School Administrator who can only manage tenancy/academics
+    setup can't grant finance/staff/attendance permissions to anyone
+    (_require_grantable_permissions blocks granting what you don't hold
+    yourself), so a narrower fixed default would leave a freshly
+    provisioned school unable to create its own Bursar/Teacher/HR roles.
+    """
     with transaction.atomic():
         try:
             # Tenant.objects.create's post_save signal
             # (apps.platform.signals.provision_default_subscription)
-            # assigns the default TenantSubscription -- not duplicated here.
+            # assigns the default TenantSubscription -- not duplicated here,
+            # and read below (get_enabled_modules) to size the default
+            # admin permission set to what this tenant actually subscribes to.
             tenant = Tenant.objects.create(name=name, slug=slug)
         except IntegrityError as error:
             raise ValidationError("A tenant with this slug already exists") from error
+
+        if admin_permissions is None:
+            from apps.tenancy.permissions_catalogue import PERMISSION_CATALOGUE
+
+            tenancy_permissions = {code for code in PERMISSION_CATALOGUE if code.startswith("tenancy.")}
+            admin_permissions = sorted(tenancy_permissions | permissions_for_modules(get_enabled_modules(tenant)))
+        canonical = validate_permission_codes(admin_permissions)
+        if ADMIN_GUARD_PERMISSION not in canonical:
+            raise ValidationError(f"The initial admin role must include {ADMIN_GUARD_PERMISSION}")
+
         role = Role.objects.create(tenant=tenant, name=admin_role_name, permissions=canonical)
         membership = invite_user(actor=actor, tenant=tenant, email=admin_email, role=role)
         PlatformAuditEvent.objects.create(
