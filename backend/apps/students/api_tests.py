@@ -79,6 +79,20 @@ class StudentApiTests(TestCase):
 
         self.assertEqual(response.status_code, 200)
 
+    def test_search_matches_admission_number_or_name_within_the_tenant(self):
+        Student.objects.create(
+            tenant=self.school_a, admission_number="ADM-002", first_name="Brian", last_name="Kiptoo", campus=self.campus_a,
+        )
+        response = self.client.get("/api/v1/students/", {"search": "adm-001"}, HTTP_X_TENANT_SLUG="school-a")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([row["admission_number"] for row in response.data["results"]], ["ADM-001"])
+
+        response = self.client.get("/api/v1/students/", {"search": "kiptoo"}, HTTP_X_TENANT_SLUG="school-a")
+        self.assertEqual([row["admission_number"] for row in response.data["results"]], ["ADM-002"])
+
+        response = self.client.get("/api/v1/students/", {"search": "no-such-student"}, HTTP_X_TENANT_SLUG="school-a")
+        self.assertEqual(response.data["results"], [])
+
     def test_campus_scoped_user_only_sees_their_own_campus(self):
         annex_campus = Campus.objects.create(tenant=self.school_a, name="Annex", code="ANNEX")
         other_campus_student = Student.objects.create(

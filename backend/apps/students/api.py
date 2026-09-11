@@ -82,7 +82,10 @@ class StudentListView(ListAPIView):
 
     def get_queryset(self):
         membership = resolve_request_membership(self.request)
-        return list_students(tenant=membership.tenant, campus_id=membership.campus_id)
+        return list_students(
+            tenant=membership.tenant, campus_id=membership.campus_id,
+            search=self.request.query_params.get("search"),
+        )
 
 
 # --- Documents ---------------------------------------------------------

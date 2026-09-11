@@ -1,7 +1,9 @@
+from django.db.models import Q
+
 from .models import Student
 
 
-def list_students(*, tenant, campus_id=None):
+def list_students(*, tenant, campus_id=None, search=None):
     queryset = (
         Student.objects.for_tenant(tenant)
         .select_related("campus")
@@ -10,6 +12,10 @@ def list_students(*, tenant, campus_id=None):
     )
     if campus_id is not None:
         queryset = queryset.filter(campus_id=campus_id)
+    if search:
+        queryset = queryset.filter(
+            Q(admission_number__icontains=search) | Q(first_name__icontains=search) | Q(last_name__icontains=search)
+        )
     return queryset
 
 

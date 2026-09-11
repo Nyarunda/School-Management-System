@@ -1,6 +1,7 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Alert, Box, Button, Group, NumberInput, Select, Stack, Tabs, Text, Textarea, TextInput } from "@mantine/core";
+import { useDebouncedValue } from "@mantine/hooks";
 import { api, ApiError, Page } from "../api/client";
 import { useAccess } from "../app/auth";
 import { ActionDialog } from "../components/ActionDialog";
@@ -365,6 +366,28 @@ export function PaymentsPage(){
 	</>;
 }
 
+// Closes STUDENT-GAP-02 for the one flow it's most dangerous on (matching an
+// incoming payment posts a real, unreversable-from-here student payment): a
+// live server-side search by admission number or name, resolved to the real
+// id under the hood, instead of either a raw id field or a page_size:100
+// dropdown that silently implies a complete roster.
+function StudentSearchSelect({value,onChange,label="Student",required}:{value:string;onChange:(id:string)=>void;label?:string;required?:boolean}){
+	const [query,setQuery]=useState("");
+	const [debounced]=useDebouncedValue(query,250);
+	const search=useQuery({
+		queryKey:["student-search",debounced],
+		queryFn:()=>api<Page<Student>>("/students/",{params:{search:debounced,page_size:10}}),
+		enabled:debounced.trim().length>=2,
+	});
+	const options=(search.data?.results??[]).map(s=>({value:s.id,label:`${s.full_name} · ${s.admission_number}`}));
+	return <Select label={label} required={required} searchable clearable
+		placeholder="Search by admission number or name"
+		searchValue={query} onSearchChange={setQuery}
+		data={options} filter={({options})=>options}
+		nothingFoundMessage={debounced.trim().length<2?"Type at least 2 characters":search.isFetching?"Searching…":"No matching student"}
+		value={value||null} onChange={v=>onChange(v??"")}/>;
+}
+
 const INCOMING_TABS=[{value:"UNMATCHED",label:"Unmatched"},{value:"MATCHED",label:"Matched"},{value:"IGNORED",label:"Ignored"}];
 
 export function IncomingPage(){
@@ -380,10 +403,10 @@ export function IncomingPage(){
 	const incoming=useQuery({queryKey:["incoming",status,page,receivedAfter],queryFn:()=>api<Page<Incoming>>("/finance/incoming-payments/",{params:{status,page,received_after:receivedAfter?`${receivedAfter}T00:00:00Z`:undefined}})});
 
 	const [matchTarget,setMatchTarget]=useState<Incoming|null>(null);
-	// The match serializer takes only a student id -- no bounded/searchable
-	// student catalogue exists (STUDENT-GAP-02), so unlike the old dropdown
-	// (a page_size:100 fetch presented as if it were the complete roster),
-	// this stays a raw exact-id field. Flagged rather than carried forward.
+	// STUDENT-GAP-02 (no search/name-resolution endpoint existed) is closed
+	// for this flow: StudentSearchSelect resolves a live server-side search
+	// to the real id, so callers no longer need to know or paste a UUID to
+	// match a payment.
 	const [matchStudentId,setMatchStudentId]=useState("");
 	const match=useMutation({
 		mutationFn:()=>api(`/finance/incoming-payments/${matchTarget!.id}/match/`,{method:"POST",body:JSON.stringify({student:matchStudentId})}),
@@ -432,7 +455,7 @@ export function IncomingPage(){
 		<ActionDialog open={!!matchTarget} title="Match incoming payment" description={matchTarget?`Creates a real student payment for ${cash(matchTarget.amount)}. Check the student id carefully -- this cannot be undone from here.`:undefined} confirmLabel="Confirm match" busy={match.isPending} onClose={()=>setMatchTarget(null)} onSubmit={e=>{e.preventDefault();match.mutate()}}>
 			<Stack gap="sm">
 				{match.error&&<Alert color="red" variant="light">{errorText(match.error)}</Alert>}
-				<TextInput label="Student id" required placeholder="Exact student id" value={matchStudentId} onChange={e=>setMatchStudentId(e.currentTarget.value)}/>
+				<StudentSearchSelect required value={matchStudentId} onChange={setMatchStudentId}/>
 			</Stack>
 		</ActionDialog>
 
