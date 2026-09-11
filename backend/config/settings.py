@@ -90,14 +90,25 @@ LOGGING = {
     },
 }
 
-if os.getenv("DB_ENGINE", "sqlite").lower() == "postgres":
+# Postgres is the default everywhere -- SQLite silently no-ops
+# select_for_update()/real transaction isolation, so it's opt-in only
+# (DB_ENGINE=sqlite), never the silent fallback when nothing is configured.
+if os.getenv("DB_ENGINE", "postgres").lower() == "sqlite":
+    DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
+else:
     DATABASES = {
         "default": {
             "ENGINE": "django.db.backends.postgresql",
             "NAME": os.getenv("POSTGRES_DB", "school_management"),
             "USER": os.getenv("POSTGRES_USER", "school_management"),
             "PASSWORD": os.getenv("POSTGRES_PASSWORD", "school_management_dev"),
-            "HOST": os.getenv("POSTGRES_HOST", "postgres"),
+            # "postgres" (the docker-compose service hostname) only resolves
+            # inside that network -- docker-compose.yml already overrides
+            # this explicitly for every service that needs it. "localhost"
+            # is the correct default for a bare `manage.py` invocation on
+            # the host itself (e.g. against the disposable Postgres 17 test
+            # container, or a host-mapped compose port).
+            "HOST": os.getenv("POSTGRES_HOST", "localhost"),
             "PORT": os.getenv("POSTGRES_PORT", "5432"),
             # Reuses a connection across requests instead of opening/closing
             # one per request. This trades per-request overhead for a
@@ -111,8 +122,6 @@ if os.getenv("DB_ENGINE", "sqlite").lower() == "postgres":
             "CONN_HEALTH_CHECKS": True,
         }
     }
-else:
-    DATABASES = {"default": {"ENGINE": "django.db.backends.sqlite3", "NAME": BASE_DIR / "db.sqlite3"}}
 
 # apps.tenancy.services.accept_invite (Milestone 22.4) is the first real
 # caller of validate_password() -- this setting alone still doesn't
