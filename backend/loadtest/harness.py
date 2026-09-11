@@ -119,6 +119,17 @@ async def send_c2b_confirmation(client, base_url, tenant_entry, *, run_id, count
 
 async def run_ramp(client, base_url, manifest, *, run_id, ramp, step_duration, amount, recorder, phase,
                    hot_invoice_fraction, duplicate_storm, storm_size, concurrency_limit):
+    """Each tenant gets its own independent pacing loop, firing at its own
+    weighted rate for the full step, rather than one shared loop that
+    visited every tenant once per pass (a real bug found during RC Area 6
+    grounding: that shape made `weight` only change how long the loop slept
+    between tenants, not how many times a given tenant was actually hit --
+    every tenant ended up with essentially the same request count
+    regardless of weight, silently defeating the noisy-neighbor test this
+    harness exists to run). See test_harness.py for a fast, HTTP-free
+    regression check that measured per-tenant counts are actually
+    proportional to weight, not just that this function runs without error.
+    """
     semaphore = asyncio.Semaphore(concurrency_limit)
     tenants = manifest["tenants"]
     weights = [10 if t["is_noisy"] else 1 for t in tenants]
@@ -139,14 +150,17 @@ async def run_ramp(client, base_url, manifest, *, run_id, ramp, step_duration, a
         print(f"[harness] {phase}: ramping to {step_rate} events/min for {step_duration}s")
         end_time = time.monotonic() + step_duration
         tasks = []
-        while time.monotonic() < end_time:
-            for tenant_entry, weight in zip(tenants, weights):
-                tenant_rate_per_minute = step_rate * weight / total_weight
-                if tenant_rate_per_minute <= 0:
-                    continue
-                interval = 60.0 / tenant_rate_per_minute
+
+        async def tenant_loop(tenant_entry, weight):
+            tenant_rate_per_minute = step_rate * weight / total_weight
+            if tenant_rate_per_minute <= 0:
+                return
+            interval = 60.0 / tenant_rate_per_minute
+            while time.monotonic() < end_time:
                 tasks.append(asyncio.create_task(bounded_send(tenant_entry)))
-                await asyncio.sleep(interval / len(tenants))
+                await asyncio.sleep(interval)
+
+        await asyncio.gather(*(tenant_loop(tenant_entry, weight) for tenant_entry, weight in zip(tenants, weights)))
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
