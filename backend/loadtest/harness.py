@@ -167,7 +167,7 @@ async def run_ramp(client, base_url, manifest, *, run_id, ramp, step_duration, a
 _token_cache = {}
 
 
-async def _tenant_headers(client, base_url, tenant_entry):
+async def _login_headers(client, base_url, *, username, password, slug):
     """Real Token auth via the actual login endpoint, matching
     config.settings' DEFAULT_AUTHENTICATION_CLASSES (TokenAuthentication +
     SessionAuthentication -- no BasicAuthentication). This harness used to
@@ -175,27 +175,50 @@ async def _tenant_headers(client, base_url, tenant_entry):
     defect surfaced by RC Area 6's smoke-test grounding: every
     authenticated request was silently 401ing, and drain_backlog's old
     non-200-counts-as-zero handling made that look like a fully-drained,
-    successful run instead of a total auth failure. Cached per tenant slug
-    for the life of the process -- a DRF auth token doesn't expire on its
-    own (Milestone 22.4), and get_or_create on the server side makes a
-    duplicate concurrent login harmless if two callers race on a cold cache.
+    successful run instead of a total auth failure. Cached per (slug,
+    username) for the life of the process -- a DRF auth token doesn't
+    expire on its own (Milestone 22.4), and get_or_create on the server
+    side makes a duplicate concurrent login harmless if two callers race on
+    a cold cache.
     """
-    slug = tenant_entry["slug"]
-    if slug not in _token_cache:
+    cache_key = (slug, username)
+    if cache_key not in _token_cache:
         response = await client.post(
-            f"{base_url}/api/v1/auth/login/",
-            json={"username": tenant_entry["bursar_username"], "password": tenant_entry["bursar_password"]},
-            timeout=15,
+            f"{base_url}/api/v1/auth/login/", json={"username": username, "password": password}, timeout=15,
         )
         response.raise_for_status()
-        _token_cache[slug] = response.json()["token"]
-    return {"Authorization": f"Token {_token_cache[slug]}", "X-Tenant-Slug": slug}
+        _token_cache[cache_key] = response.json()["token"]
+    return {"Authorization": f"Token {_token_cache[cache_key]}", "X-Tenant-Slug": slug}
+
+
+async def _tenant_headers(client, base_url, tenant_entry):
+    """The single-shared-bursar-account path -- fine for phases/checks that
+    don't need independent per-caller throttle budgets (5e1/5e2's ramps,
+    drain_backlog's polling). 5e3's concurrent traffic generators use
+    _login_headers directly with their own dedicated accounts instead; see
+    run_operator_pool/run_stk_trickle/run_interactive_reads.
+    """
+    return await _login_headers(
+        client, base_url, username=tenant_entry["bursar_username"], password=tenant_entry["bursar_password"],
+        slug=tenant_entry["slug"],
+    )
 
 
 async def run_operator_pool(client, base_url, tenant_entry, *, operators, phase, recorder, stop_event):
-    headers = await _tenant_headers(client, base_url, tenant_entry)
+    # RC Area 6 / 5E-3: each operator gets its own login (loadtest_provision
+    # --operator-accounts), not one shared account -- UserRateThrottle is
+    # per authenticated user, so 5 operators sharing one account were really
+    # competing for one account's budget, throttling it into the ground at
+    # realistic concurrency and measuring that artifact instead of real
+    # backend capacity. Falls back to the shared bursar login if an older
+    # manifest lacks operator_accounts (index i% keeps it correct even if
+    # `operators` > len(logins), e.g. a mismatched --operator-accounts).
+    logins = tenant_entry.get("operator_accounts") or [
+        {"username": tenant_entry["bursar_username"], "password": tenant_entry["bursar_password"]},
+    ]
 
-    async def worker():
+    async def worker(login):
+        headers = await _login_headers(client, base_url, username=login["username"], password=login["password"], slug=tenant_entry["slug"])
         while not stop_event.is_set():
             # One call, not two: a prior version called _timed_request (for
             # status/latency) and then re-fetched via client.get() (to read
@@ -214,17 +237,16 @@ async def run_operator_pool(client, base_url, tenant_entry, *, operators, phase,
             latency_ms = (time.monotonic() - start) * 1000
             recorder.record_metric(traffic_class="callback_list", tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
             if status_code == 429:
-                # Every operator in this pool shares one per-tenant account
-                # (_tenant_headers caches by slug), so a 429 here isn't a
-                # one-off blip against an otherwise-healthy budget -- it means
-                # that shared account's throttle window is already exhausted.
-                # Retrying on the same short backoff as a generic error (1s)
-                # re-consumes whatever budget regenerates almost as fast as it
-                # appears, which keeps the whole tenant locked out for the
-                # rest of the run instead of ever recovering. Found live: a
-                # 5E-3 run with this backoff measured ~99% errors on this
-                # endpoint, which was the throttle self-sustaining, not a
-                # real backend capacity ceiling.
+                # This operator's own account is throttled (each operator has
+                # its own login now, so this isn't shared with the other
+                # operators) -- retrying on the same short backoff as a
+                # generic error (1s) re-consumes whatever budget regenerates
+                # almost as fast as it appears, which keeps this operator
+                # locked out for the rest of the run instead of ever
+                # recovering. Found live: a 5E-3 run with this backoff
+                # measured ~99% errors on this endpoint, which was the
+                # throttle self-sustaining, not a real backend capacity
+                # ceiling.
                 await asyncio.sleep(20)
                 continue
             if status_code != 200:
@@ -244,24 +266,30 @@ async def run_operator_pool(client, base_url, tenant_entry, *, operators, phase,
                 )
                 recorder.record_metric(traffic_class="callback_process", tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
             # A pacing floor even on a successful, non-empty poll: without
-            # one, operators loop back to the next poll as fast as the
+            # one, this operator loops back to the next poll as fast as the
             # network allows whenever a backlog exists, which reproduces the
-            # same throttle-storm the moment the window recovers. 4s (not 1s):
-            # this account's throttle budget (1000/hour = 16.7/min) is shared
-            # with verify+process calls for whatever the poll finds *and*
-            # with c2b/interactive-read/stk traffic on the same tenant -- at
-            # 1s, `operators` workers alone could claim up to operators*60
-            # list-polls/min, which is many times that whole shared budget by
-            # itself before a single verify/process call is even counted.
+            # same throttle-storm the moment the window recovers. 4s (not
+            # 1s): this account's throttle budget (1000/hour = 16.7/min) is
+            # shared between this list-poll and the verify+process calls for
+            # whatever it finds -- at 1s, the list-polls alone could claim
+            # 60/min, already close to the whole per-account budget before a
+            # single verify/process call is counted.
             await asyncio.sleep(4 if results else 1)
 
-    await asyncio.gather(*(worker() for _ in range(operators)))
+    await asyncio.gather(*(worker(logins[i % len(logins)]) for i in range(operators)))
 
 
 async def run_stk_trickle(client, base_url, tenant_entry, *, rate_per_minute, phase, recorder, stop_event):
     if rate_per_minute <= 0:
         return
-    headers = await _tenant_headers(client, base_url, tenant_entry)
+    # RC Area 6 / 5E-3: its own account (loadtest_provision's frontoffice
+    # login), not shared with the operator pool or interactive reads -- see
+    # run_operator_pool's comment on why one shared account throttled itself
+    # into the ground at realistic combined load.
+    headers = await _login_headers(
+        client, base_url, username=tenant_entry.get("frontoffice_username", tenant_entry["bursar_username"]),
+        password=tenant_entry.get("frontoffice_password", tenant_entry["bursar_password"]), slug=tenant_entry["slug"],
+    )
     interval = 60.0 / rate_per_minute
     counter = itertools.count()
     while not stop_event.is_set():
@@ -275,10 +303,9 @@ async def run_stk_trickle(client, base_url, tenant_entry, *, rate_per_minute, ph
             client, "POST", f"{base_url}/api/v1/finance/mpesa/stk-push/", headers=headers, json=payload, timeout=15,
         )
         recorder.record_metric(traffic_class="stk_push", tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
-        # Same shared-per-tenant-account reasoning as run_operator_pool: on a
-        # 429, wait long enough for the window to actually recover instead of
-        # retrying at the configured rate and re-consuming whatever budget
-        # regenerates.
+        # Same reasoning as run_operator_pool: on a 429, wait long enough for
+        # the window to actually recover instead of retrying at the
+        # configured rate and re-consuming whatever budget regenerates.
         await asyncio.sleep(20 if status_code == 429 else interval)
 
 
@@ -299,7 +326,14 @@ async def run_interactive_reads(client, base_url, tenant_entry, *, rate_per_minu
     """
     if rate_per_minute <= 0:
         return
-    headers = await _tenant_headers(client, base_url, tenant_entry)
+    # RC Area 6 / 5E-3: its own account (loadtest_provision's registrar
+    # login), not shared with the operator pool or STK trickle -- see
+    # run_operator_pool's comment on why one shared account throttled itself
+    # into the ground at realistic combined load.
+    headers = await _login_headers(
+        client, base_url, username=tenant_entry.get("registrar_username", tenant_entry["bursar_username"]),
+        password=tenant_entry.get("registrar_password", tenant_entry["bursar_password"]), slug=tenant_entry["slug"],
+    )
     interval = 60.0 / rate_per_minute
     counter = itertools.count()
     session_id = tenant_entry.get("attendance_session_id")
@@ -324,10 +358,9 @@ async def run_interactive_reads(client, base_url, tenant_entry, *, rate_per_minu
         traffic_class, url = (endpoints + per_student_endpoints)[n % (len(endpoints) + len(per_student_endpoints))]
         status_code, latency_ms = await _timed_request(client, "GET", url, headers=headers, timeout=15)
         recorder.record_metric(traffic_class=traffic_class, tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
-        # Same shared-per-tenant-account reasoning as run_operator_pool: on a
-        # 429, wait long enough for the window to actually recover instead of
-        # retrying at the configured rate and re-consuming whatever budget
-        # regenerates.
+        # Same reasoning as run_operator_pool: on a 429, wait long enough for
+        # the window to actually recover instead of retrying at the
+        # configured rate and re-consuming whatever budget regenerates.
         await asyncio.sleep(20 if status_code == 429 else interval)
 
 

@@ -70,6 +70,10 @@ class Command(BaseCommand):
         parser.add_argument("--students-per-tenant", type=int, default=50)
         parser.add_argument("--noisy-multiplier", type=int, default=10,
                             help="Tenant 0 gets this many times the usual student pool, as the noisy neighbor.")
+        parser.add_argument("--operator-accounts", type=int, default=5,
+                            help="RC Area 6 / 5E-3: distinct login accounts provisioned for the operator pool, "
+                                 "so each concurrent operator throttles independently instead of sharing one "
+                                 "account's per-user budget. Should match the harness's --operators.")
         parser.add_argument("--output", default=str(DEFAULT_MANIFEST_PATH))
 
     def handle(self, *args, **options):
@@ -77,7 +81,9 @@ class Command(BaseCommand):
         for index in range(options["tenants"]):
             is_noisy = index == 0
             student_count = options["students_per_tenant"] * (options["noisy_multiplier"] if is_noisy else 1)
-            manifest["tenants"].append(self._provision_tenant(index=index, student_count=student_count, is_noisy=is_noisy))
+            manifest["tenants"].append(self._provision_tenant(
+                index=index, student_count=student_count, is_noisy=is_noisy, operator_accounts=options["operator_accounts"],
+            ))
             self.stdout.write(f"Provisioned {manifest['tenants'][-1]['slug']} ({student_count} students, noisy={is_noisy})")
 
         output_path = Path(options["output"])
@@ -86,7 +92,7 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(f"Wrote manifest for {len(manifest['tenants'])} tenants to {output_path}"))
 
     @transaction.atomic
-    def _provision_tenant(self, *, index, student_count, is_noisy):
+    def _provision_tenant(self, *, index, student_count, is_noisy, operator_accounts):
         slug = f"loadtest-{index}"
         tenant, _ = Tenant.objects.get_or_create(slug=slug, defaults={"name": f"Load Test School {index}"})
 
@@ -100,6 +106,24 @@ class Command(BaseCommand):
             role.permissions = all_permissions
             role.save(update_fields=["permissions"])
         Membership.objects.get_or_create(tenant=tenant, user=bursar, role=role)
+
+        # RC Area 6 / 5E-3: DRF's UserRateThrottle is per authenticated user
+        # (config/settings.py), not per tenant -- a real school spreads its
+        # traffic across many staff logins, each with its own budget. The
+        # harness used to cache one shared token per tenant for *all*
+        # simulated traffic, which throttled a single account into the
+        # ground at realistic load and measured that artifact instead of
+        # real backend capacity. These extra accounts (same role/permissions
+        # as bursar, distinct identity) let the harness give each concurrent
+        # operator, the interactive-read traffic, and STK-push traffic their
+        # own budget, matching how multiple real staff members would work.
+        operator_logins = [{"username": bursar.username, "password": DEFAULT_PASSWORD}]
+        for op in range(1, operator_accounts):
+            operator_logins.append(self._provision_extra_account(
+                tenant=tenant, role=role, username=f"loadtest-operator-{index}-{op}",
+            ))
+        registrar_login = self._provision_extra_account(tenant=tenant, role=role, username=f"loadtest-registrar-{index}")
+        frontoffice_login = self._provision_extra_account(tenant=tenant, role=role, username=f"loadtest-frontoffice-{index}")
 
         NumberSeries.objects.get_or_create(tenant=tenant, document_type="RECEIPT", defaults={"prefix": f"LT{index}-RCT-", "padding": 6})
         NumberSeries.objects.get_or_create(tenant=tenant, document_type="INVOICE", defaults={"prefix": f"LT{index}-INV-", "padding": 6})
@@ -140,9 +164,21 @@ class Command(BaseCommand):
         return {
             "slug": slug, "is_noisy": is_noisy, "callback_token": config.callback_token,
             "bursar_username": bursar.username, "bursar_password": DEFAULT_PASSWORD,
+            "operator_accounts": operator_logins,
+            "registrar_username": registrar_login["username"], "registrar_password": registrar_login["password"],
+            "frontoffice_username": frontoffice_login["username"], "frontoffice_password": frontoffice_login["password"],
             "students": students,
             "attendance_session_id": attendance_session_id, "assessment_id": assessment_id,
         }
+
+    @staticmethod
+    def _provision_extra_account(*, tenant, role, username):
+        user, created = User.objects.get_or_create(username=username)
+        if created:
+            user.set_password(DEFAULT_PASSWORD)
+            user.save(update_fields=["password"])
+        Membership.objects.get_or_create(tenant=tenant, user=user, role=role)
+        return {"username": username, "password": DEFAULT_PASSWORD}
 
     def _provision_academic_fixtures(self, *, bursar, tenant, year, level, students):
         """RC Area 6 / 5E-3: real Student/Attendance/Assessment read-path
