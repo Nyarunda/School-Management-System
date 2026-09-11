@@ -1,6 +1,6 @@
 import { FormEvent, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Box, Button, Group, NumberInput, Select, Stack, Tabs, Text, Textarea, TextInput } from "@mantine/core";
+import { Box, Button, Checkbox, Group, NumberInput, Select, Stack, Tabs, Text, Textarea, TextInput } from "@mantine/core";
 import { useDebouncedValue } from "@mantine/hooks";
 import { api, Page } from "../api/client";
 import { useAccess } from "../app/auth";
@@ -14,6 +14,7 @@ import { Empty, ErrorState, PageHeader, StatusBadge } from "../components/ui";
 type Student={id:string;full_name:string;admission_number:string};
 type Line={id:string;fee_item:string;fee_item_name:string;amount:string;is_required:boolean};
 type FeeItemOption={id:string;category:string;name:string;code:string;is_optional:boolean;is_active:boolean};
+type FeeCategoryRow={id:string;name:string;code:string;is_active:boolean};
 type AcademicYear={id:string;name:string;starts_on:string;ends_on:string;is_current:boolean};
 type AcademicLevel={id:string;name:string;code:string;sequence:number};
 type AcademicTerm={id:string;academic_year:string;name:string;starts_on:string;ends_on:string;sequence:number};
@@ -175,6 +176,84 @@ export function AssignmentsPage(){
 			<Stack gap="sm">
 				<TextInput label="Student id" required placeholder="Exact student id" value={studentId} onChange={e=>setStudentId(e.currentTarget.value)}/>
 				<Select label="Approved fee structure" required placeholder="Select structure" data={structures.data?.results.filter(s=>s.is_approved).map(s=>({value:s.id,label:`${s.name} · ${termName(s.term)}`}))??[]} value={structure||null} onChange={value=>setStructure(value??"")}/>
+			</Stack>
+		</ActionDialog>
+	</>;
+}
+
+// The "Add line" dialog on FeeStructuresPage (above) can only ever offer fee
+// items a tenant already has -- FeeItemListCreateView/FeeCategoryListCreateView
+// have always existed on the backend, but nothing in the frontend could create
+// a category or item, so a real (non-seeded) tenant hit an empty, permanently
+// unselectable dropdown and could never add a fee line. This page is that
+// missing catalogue setup screen.
+export function FeeItemsPage(){
+	const {can}=useAccess();
+	const qc=useQueryClient();
+	const canManage=can("finance.setup.manage");
+	const categoriesData=usePaged<FeeCategoryRow>("fee-categories","/finance/fee-categories/");
+	const itemsData=usePaged<FeeItemOption>("fee-items","/finance/fee-items/");
+	// Unpaginated lookup for the item dialog's category picker -- categories are
+	// an administratively-created, small catalogue, same reasoning as the
+	// academic-year/level pickers on FeeStructuresPage above.
+	const allCategories=useQuery({queryKey:["fee-categories-lookup"],queryFn:()=>api<Page<FeeCategoryRow>>("/finance/fee-categories/",{params:{page_size:100}}),enabled:canManage});
+	const categoryName=(id:string)=>allCategories.data?.results.find(c=>c.id===id)?.name??id;
+
+	const [categoryOpen,setCategoryOpen]=useState(false);
+	const [newCategoryName,setNewCategoryName]=useState("");
+	const [newCategoryCode,setNewCategoryCode]=useState("");
+	const createCategory=useMutation({
+		mutationFn:()=>api<FeeCategoryRow>("/finance/fee-categories/",{method:"POST",body:JSON.stringify({name:newCategoryName,code:newCategoryCode})}),
+		onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-categories"]});void qc.invalidateQueries({queryKey:["fee-categories-lookup"]});setCategoryOpen(false);setNewCategoryName("");setNewCategoryCode("");notify.success("Fee category created")},
+		onError:error=>notify.error("Fee category could not be created",error),
+	});
+
+	const [itemOpen,setItemOpen]=useState(false);
+	const [itemCategory,setItemCategory]=useState("");
+	const [itemName,setItemName]=useState("");
+	const [itemCode,setItemCode]=useState("");
+	const [itemOptional,setItemOptional]=useState(false);
+	const createItem=useMutation({
+		mutationFn:()=>api<FeeItemOption>("/finance/fee-items/",{method:"POST",body:JSON.stringify({category:itemCategory,name:itemName,code:itemCode,is_optional:itemOptional})}),
+		onSuccess:()=>{void qc.invalidateQueries({queryKey:["fee-items"]});setItemOpen(false);setItemCategory("");setItemName("");setItemCode("");setItemOptional(false);notify.success("Fee item created")},
+		onError:error=>notify.error("Fee item could not be created",error),
+	});
+
+	const categoryColumns:Column<FeeCategoryRow>[]=[
+		{key:"name",header:"Category",cell:r=><Text size="sm" fw={600}>{r.name}</Text>},
+		{key:"code",header:"Code",cell:r=>r.code},
+		{key:"status",header:"Status",cell:r=><StatusBadge value={r.is_active?"Active":"Inactive"}/>},
+	];
+	const itemColumns:Column<FeeItemOption>[]=[
+		{key:"name",header:"Fee item",cell:r=><Text size="sm" fw={600}>{r.name}</Text>},
+		{key:"category",header:"Category",cell:r=>categoryName(r.category)},
+		{key:"code",header:"Code",cell:r=>r.code},
+		{key:"optional",header:"Requirement",cell:r=>r.is_optional?"Optional":"Required"},
+		{key:"status",header:"Status",cell:r=><StatusBadge value={r.is_active?"Active":"Inactive"}/>},
+	];
+
+	return <>
+		<WorkspaceHeader title="Fee items" description="Define the fee categories and billable items used to build fee structure lines." action={canManage?<Group gap="sm"><Button variant="default" onClick={()=>{setNewCategoryName("");setNewCategoryCode("");setCategoryOpen(true)}}>+ New category</Button><Button onClick={()=>{setItemCategory("");setItemName("");setItemCode("");setItemOptional(false);setItemOpen(true)}}>+ New item</Button></Group>:undefined}/>
+		<DataTable title="Fee categories" columns={categoryColumns} rows={categoriesData.query.data?.results??[]} rowKey={r=>r.id} loading={categoriesData.query.isLoading} error={categoriesData.query.error} retry={()=>void categoriesData.query.refetch()} onRefresh={()=>void categoriesData.query.refetch()}
+			count={categoriesData.query.data?.count} page={categoriesData.page} previous={!!categoriesData.query.data?.previous} next={!!categoriesData.query.data?.next} onPage={categoriesData.setPage}
+		/>
+		<DataTable title="Fee items" columns={itemColumns} rows={itemsData.query.data?.results??[]} rowKey={r=>r.id} loading={itemsData.query.isLoading} error={itemsData.query.error} retry={()=>void itemsData.query.refetch()} onRefresh={()=>void itemsData.query.refetch()}
+			count={itemsData.query.data?.count} page={itemsData.page} previous={!!itemsData.query.data?.previous} next={!!itemsData.query.data?.next} onPage={itemsData.setPage}
+		/>
+
+		<ActionDialog open={categoryOpen} title="New fee category" description="Categories group related fee items, e.g. Tuition or Transport." confirmLabel="Create category" busy={createCategory.isPending} onClose={()=>setCategoryOpen(false)} onSubmit={e=>{e.preventDefault();createCategory.mutate()}}>
+			<Stack gap="sm">
+				<TextInput label="Name" required value={newCategoryName} onChange={e=>setNewCategoryName(e.currentTarget.value)}/>
+				<TextInput label="Code" required value={newCategoryCode} onChange={e=>setNewCategoryCode(e.currentTarget.value)}/>
+			</Stack>
+		</ActionDialog>
+
+		<ActionDialog open={itemOpen} title="New fee item" description="Fee items are the billable lines a fee structure can include." confirmLabel="Create item" busy={createItem.isPending} onClose={()=>setItemOpen(false)} onSubmit={e=>{e.preventDefault();createItem.mutate()}}>
+			<Stack gap="sm">
+				<Select label="Category" required placeholder={allCategories.data?.results.length?"Select category":"Create a category first"} disabled={!allCategories.data?.results.length} data={allCategories.data?.results.map(c=>({value:c.id,label:c.name}))??[]} value={itemCategory||null} onChange={value=>setItemCategory(value??"")}/>
+				<TextInput label="Name" required value={itemName} onChange={e=>setItemName(e.currentTarget.value)}/>
+				<TextInput label="Code" required value={itemCode} onChange={e=>setItemCode(e.currentTarget.value)}/>
+				<Checkbox label="Optional fee item" checked={itemOptional} onChange={e=>setItemOptional(e.currentTarget.checked)}/>
 			</Stack>
 		</ActionDialog>
 	</>;

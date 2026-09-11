@@ -7,6 +7,7 @@ import { canAccess, useAuth } from "./auth";
 import { navRequirementsFor } from "./navigation";
 const FinanceOverview=lazy(()=>import("../features/finance").then(m=>({default:m.FinanceOverview})));
 const FeeStructuresPage=lazy(()=>import("../features/finance").then(m=>({default:m.FeeStructuresPage})));
+const FeeItemsPage=lazy(()=>import("../features/finance").then(m=>({default:m.FeeItemsPage})));
 const AssignmentsPage=lazy(()=>import("../features/finance").then(m=>({default:m.AssignmentsPage})));
 const InvoicesPage=lazy(()=>import("../features/finance").then(m=>({default:m.InvoicesPage})));
 const PaymentsPage=lazy(()=>import("../features/finance").then(m=>({default:m.PaymentsPage})));
@@ -58,6 +59,7 @@ export function App(){
  else if(path==="/admissions")page=<MissingPage/>;
  else if(path==="/finance")page=<FinanceOverview/>;
  else if(path==="/finance/fees")page=<FeeStructuresPage/>;
+ else if(path==="/finance/fee-items")page=<FeeItemsPage/>;
  else if(path==="/finance/assignments")page=<AssignmentsPage/>;
  else if(path==="/finance/invoices")page=<InvoicesPage/>;
  else if(path==="/finance/payments")page=<PaymentsPage/>;

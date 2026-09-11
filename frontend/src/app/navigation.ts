@@ -31,6 +31,7 @@ export const navigation:NavItem[]=[
  {label:"Finance",icon:IconWallet,module:"finance",children:[
   {label:"Finance overview",path:"/finance",icon:IconChartBar,permissions:["finance.invoice.view","finance.payment.view"]},
   {label:"Fee structures",path:"/finance/fees",icon:IconStack2,permissions:["finance.fee_structure.view"],section:"Billing"},
+  {label:"Fee items",path:"/finance/fee-items",icon:IconStack2,permissions:["finance.setup.view"],section:"Billing"},
   {label:"Assignments",path:"/finance/assignments",icon:IconUsers,permissions:["finance.fee_structure.view"],section:"Billing"},
   {label:"Invoices",path:"/finance/invoices",icon:IconFileText,permissions:["finance.invoice.view"],section:"Billing"},
   {label:"Payments",path:"/finance/payments",icon:IconWallet,permissions:["finance.payment.view"],section:"Payments"},
