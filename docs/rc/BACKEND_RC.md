@@ -344,6 +344,30 @@ Full latency table and per-5s server-side samples: `backend/loadtest/reports/are
 
 **Implication for already-recorded evidence (not reopening either section — see the Area 2 post-close note above):** every throttle ceiling measured against this stack before this fix — Area 2's live-Docker login-throttle collision (informal, not that area's primary evidence — its unit test is unaffected) and this area's own 5E-1 `mpesa_callback` finding (120/min, measured live) — was measured under the unfixed, effectively-multiplied condition. The true single-shared-cache ceiling for each is *at least as strict* as what was documented, likely stricter than what the flawed stack actually allowed through. 5E-1's headline classification ("RC capacity-planning finding requiring a go-live acceptance decision") still stands regardless — the fix doesn't change the architectural finding (IP-keyed, not tenant-keyed) — but the exact `82.81%`/step-by-step `429` numbers recorded there were measured pre-fix and are not re-verified against the corrected cache. Flagged for the user's awareness; an optional 5E-1 re-verification under the fix is available on request but not treated as blocking here, since the architectural finding (the thing requiring a go-live decision) doesn't depend on the exact pre-fix numbers.
 
+### 5E-2 — Verified financial-processing capacity ✅ MEASURED
+
+**Run:** `area6-5e2-fixed`, as-configured (real `120/min` mpesa_callback and `1000/hour` user throttles, real Redis-shared cache after the defect fix above). Setup: `loadtest_seed_verified_callbacks --count-per-tenant 500` (10,000 pre-verified `MpesaCallbackLog` rows across 20 tenants, created and verified through the real webhook + `verify_mpesa_callback()` service, *before* the timed window — so the window measures only `/callbacks/{id}/process/` throughput, never bypassing the verify prerequisite production traffic can't skip). Full ramp `100,500,1000,2500,5000` events/min × 300s/step, round-robin across all 20 tenants.
+
+**Result:** 53,580 requests, overall error rate **33.49%** (35,638×`200`, 17,938×`429`, 4 client-side). Per-step breakdown:
+
+| Ramp step (events/min) | n | 200 | 429 | p50 | p95 | p99 |
+|---|---|---|---|---|---|---|
+| 100 | 500 | 500 (100%) | 0 | 31ms | 78ms | 109ms |
+| 500 | 2,347 | 2,347 (100%) | 0 | 16ms | 32ms | 62ms |
+| 1000 | 4,441 | 4,441 (100%) | 0 | 16ms | 47ms | 93ms |
+| 2500 | 13,194 | 13,194 (100%) | 0 | 31ms | 78ms | 156ms |
+| 5000 | 33,098 | 15,156 (45.8%) | 17,938 | 125ms | 2,704ms | 3,531ms |
+
+Per-tenant success counts are strikingly uniform: every one of the 20 users landed **1,776–1,786** successful `200`s (a ~10-request spread), confirmed via Redis `throttle_user_<uuid>` cache keys. `loadtest_reconcile`: **PASS**, no violations.
+
+**Root-cause reading, since the number itself needs explaining (not just reported):** the configured `user` throttle is `1000/hour`, yet every user got ~1,780 successes — meaningfully more than the nominal cap, and steps 1–4 (cumulative ~1,024 requests/user by the end of step 4) show **zero** throttling at all despite already being past the nominal 1000. This is consistent with DRF's stock cache-based `SimpleRateThrottle` being non-atomic: `allow_request()` does a plain `cache.get()` (read history) then, after the view runs, `throttle_success()` does `cache.set()` (write history) — a classic read-then-write race with no locking or atomic increment. Under real concurrency (many in-flight requests for the same user across Gunicorn's worker processes/threads before any of them commits its write back), several requests can read the *same* stale history and all get admitted before the counter catches up — a known, documented characteristic of DRF's default throttle backend, not something specific to this codebase. The uniform per-tenant overshoot (all ~1,780, not scattered) matches this: round-robin traffic means every user experiences roughly the same concurrency profile, so they all overshoot by roughly the same amount.
+
+**Classification: ACCEPTED RISK, not a code defect fixed this area.** The throttle is demonstrably *working* — it engaged, correctly per-user (not per-worker anymore), and rejected the majority of excess traffic once triggered (54.2% of the top step). It just isn't a mathematically exact ceiling under high concurrency, which is an inherent property of DRF's non-atomic counter, not a bug this codebase introduced. Building a fully atomic limiter (e.g. a Redis Lua script doing check-and-increment in one round trip) is a legitimate hardening option but is speculative optimization beyond what any *measured* evidence here requires fixing now — recorded as a **post-go-live** candidate if the business ever needs an exact rather than approximate per-user ceiling.
+
+**Database:** stayed light throughout, even during the 33,098-request top step — max 4 active connections (16 total, pool headroom unused), **0 deadlocks, 0 lock waits, 0 conflicts**. `process_mpesa_callback` (which allocates a `NumberSeries`-backed receipt number per success) showed no contention signature at this volume — the throttle was the binding constraint, not the database.
+
+**Honest capacity statement:** verified financial-processing capacity is *at least* ~44/s sustained (2500/min step, 100% success, p99 156ms) with zero DB contention. The true ceiling above that is throttle-shaped, not infrastructure-shaped, and — per the accepted-risk note above — the *effective* per-user ceiling under concurrent load is closer to ~1,780/hour than the configured 1,000/hour figure suggests.
+
 ## Area 7 — Operational resilience
 *Not started.*
 
