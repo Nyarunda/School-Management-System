@@ -246,8 +246,14 @@ async def run_operator_pool(client, base_url, tenant_entry, *, operators, phase,
             # A pacing floor even on a successful, non-empty poll: without
             # one, operators loop back to the next poll as fast as the
             # network allows whenever a backlog exists, which reproduces the
-            # same throttle-storm the moment the window recovers.
-            await asyncio.sleep(1 if results else 0.5)
+            # same throttle-storm the moment the window recovers. 4s (not 1s):
+            # this account's throttle budget (1000/hour = 16.7/min) is shared
+            # with verify+process calls for whatever the poll finds *and*
+            # with c2b/interactive-read/stk traffic on the same tenant -- at
+            # 1s, `operators` workers alone could claim up to operators*60
+            # list-polls/min, which is many times that whole shared budget by
+            # itself before a single verify/process call is even counted.
+            await asyncio.sleep(4 if results else 1)
 
     await asyncio.gather(*(worker() for _ in range(operators)))
 
@@ -269,7 +275,11 @@ async def run_stk_trickle(client, base_url, tenant_entry, *, rate_per_minute, ph
             client, "POST", f"{base_url}/api/v1/finance/mpesa/stk-push/", headers=headers, json=payload, timeout=15,
         )
         recorder.record_metric(traffic_class="stk_push", tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
-        await asyncio.sleep(interval)
+        # Same shared-per-tenant-account reasoning as run_operator_pool: on a
+        # 429, wait long enough for the window to actually recover instead of
+        # retrying at the configured rate and re-consuming whatever budget
+        # regenerates.
+        await asyncio.sleep(20 if status_code == 429 else interval)
 
 
 def _tenant_weights(tenants):
@@ -314,7 +324,11 @@ async def run_interactive_reads(client, base_url, tenant_entry, *, rate_per_minu
         traffic_class, url = (endpoints + per_student_endpoints)[n % (len(endpoints) + len(per_student_endpoints))]
         status_code, latency_ms = await _timed_request(client, "GET", url, headers=headers, timeout=15)
         recorder.record_metric(traffic_class=traffic_class, tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
-        await asyncio.sleep(interval)
+        # Same shared-per-tenant-account reasoning as run_operator_pool: on a
+        # 429, wait long enough for the window to actually recover instead of
+        # retrying at the configured rate and re-consuming whatever budget
+        # regenerates.
+        await asyncio.sleep(20 if status_code == 429 else interval)
 
 
 async def run_5e2(client, base_url, seeded_path, *, ramp, step_duration, recorder, concurrency_limit):
