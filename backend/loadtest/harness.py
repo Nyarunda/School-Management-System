@@ -197,21 +197,40 @@ async def run_operator_pool(client, base_url, tenant_entry, *, operators, phase,
 
     async def worker():
         while not stop_event.is_set():
-            status_code, latency_ms = await _timed_request(
-                client, "GET", f"{base_url}/api/v1/finance/mpesa/callbacks/?status=RECEIVED&page_size=20",
-                headers=headers, timeout=15,
-            )
+            # One call, not two: a prior version called _timed_request (for
+            # status/latency) and then re-fetched via client.get() (to read
+            # the body), doubling this endpoint's real request volume for no
+            # reason -- found while investigating 5E-3's near-100% callback_
+            # list error rate.
+            start = time.monotonic()
+            try:
+                response = await client.get(
+                    f"{base_url}/api/v1/finance/mpesa/callbacks/?status=RECEIVED&page_size=20", headers=headers, timeout=15,
+                )
+                status_code = response.status_code
+            except httpx.HTTPError:
+                response = None
+                status_code = None
+            latency_ms = (time.monotonic() - start) * 1000
             recorder.record_metric(traffic_class="callback_list", tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
+            if status_code == 429:
+                # Every operator in this pool shares one per-tenant account
+                # (_tenant_headers caches by slug), so a 429 here isn't a
+                # one-off blip against an otherwise-healthy budget -- it means
+                # that shared account's throttle window is already exhausted.
+                # Retrying on the same short backoff as a generic error (1s)
+                # re-consumes whatever budget regenerates almost as fast as it
+                # appears, which keeps the whole tenant locked out for the
+                # rest of the run instead of ever recovering. Found live: a
+                # 5E-3 run with this backoff measured ~99% errors on this
+                # endpoint, which was the throttle self-sustaining, not a
+                # real backend capacity ceiling.
+                await asyncio.sleep(20)
+                continue
             if status_code != 200:
                 await asyncio.sleep(1)
                 continue
-            # A fresh request is needed to read the body; _timed_request only
-            # returns status/latency, so re-fetch here deliberately (keeps
-            # the hot polling loop's shape simple, at the cost of one call).
-            response = await client.get(
-                f"{base_url}/api/v1/finance/mpesa/callbacks/?status=RECEIVED&page_size=20", headers=headers, timeout=15,
-            )
-            results = response.json().get("results", []) if response.status_code == 200 else []
+            results = response.json().get("results", [])
             for item in results:
                 callback_id = item["id"]
                 status_code, latency_ms = await _timed_request(
@@ -224,13 +243,18 @@ async def run_operator_pool(client, base_url, tenant_entry, *, operators, phase,
                     headers=headers, timeout=15,
                 )
                 recorder.record_metric(traffic_class="callback_process", tenant=tenant_entry["slug"], latency_ms=latency_ms, status_code=status_code, phase=phase)
-            if not results:
-                await asyncio.sleep(0.5)
+            # A pacing floor even on a successful, non-empty poll: without
+            # one, operators loop back to the next poll as fast as the
+            # network allows whenever a backlog exists, which reproduces the
+            # same throttle-storm the moment the window recovers.
+            await asyncio.sleep(1 if results else 0.5)
 
     await asyncio.gather(*(worker() for _ in range(operators)))
 
 
 async def run_stk_trickle(client, base_url, tenant_entry, *, rate_per_minute, phase, recorder, stop_event):
+    if rate_per_minute <= 0:
+        return
     headers = await _tenant_headers(client, base_url, tenant_entry)
     interval = 60.0 / rate_per_minute
     counter = itertools.count()
