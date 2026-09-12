@@ -475,7 +475,100 @@ Reviewing the full retained evidence set together (5E-1/5E-1-explore, the shared
 **Closing this area** on that basis: every defect the evidence surfaced has its own fix, commit, and live re-verification; the capacity figures above are real measurements against the live stack, not projections; and the one unresolved item (the per-user throttle ceiling at sustained scale) is explicitly carried forward as a go-live decision rather than closed out quietly.
 
 ## Area 7 — Operational resilience
-*Not started.*
+*In progress.*
+
+**Baseline under test:** `769fd69` (Area 6 close). **Date started:** 2026-09-12.
+
+**Scope:** Areas 5-6 already proved resilience under *component-level* failure while the rest of the stack kept running (Redis outage, worker `SIGKILL`, redelivery races, one Postgres connection killed mid-transaction, bounded lock waits, 8h sustained load with zero leak). Area 7 does not repeat any of that. It closes the remaining gaps specific to *operational* events — restart, redeploy, cold start, and whole-stack interruption — that a production deployment will actually encounter but that no prior area exercised: a full Postgres/Redis container restart (not one connection), a graceful (not crashed) Celery worker/Beat restart, a full-stack `down`/`up` cycle with durable work genuinely in flight, cold startup ordering, and a live backend redeploy.
+
+**Ground rule:** run the existing system as-is. Do not preemptively add Postgres/Redis healthchecks, wait-for scripts, Beat scheduler configuration, or restart policies before any check demonstrates a concrete failure. If a check does demonstrate one, classify it and make the smallest justified correction — this area is measurement first, same discipline as Areas 5-6.
+
+**Overarching invariant, every check:** infrastructure interruption → requests may temporarily fail cleanly → service recovers automatically → **NO** cross-tenant contamination, duplicate financial effect, partial committed transaction, permanently stuck durable work, runaway retry/backlog, or manual database repair. A 503 during a real Postgres restart can be entirely correct behavior; corrupting or duplicating a payment while avoiding that 503 is not — availability and correctness are judged separately for every check.
+
+**Backup/restore — operational-readiness finding, recorded at scoping (no test needed to discover it):** no backup/restore tooling, script, or documented recovery procedure exists anywhere in this repository for PostgreSQL data (finance, student, attendance, assessment, audit, document records) as of this baseline — confirmed by searching the full repo tree. **Not fixed in Area 7 itself** (building backup infrastructure now would be inventing a new subsystem, not proving resilience of what exists), but explicitly **not accepted as an ordinary risk either** — a school ERP holding finance/student/audit data must not reach go-live without a defined recovery mechanism. Required before go-live: decide whether the deployment target supplies managed PostgreSQL backups (and document the RPO/RTO and restore procedure it provides) or build a dedicated backup job, then run an actual restore drill as its own bounded gate once a mechanism is chosen. Carried to Area 8 for explicit sign-off, same treatment as Area 3's go-live acceptance decisions.
+
+**Checklist, in approved execution order** (cold-start first since a broken startup ordering would compromise every later full-stack check; backend redeploy last since it's partly a deployment-architecture question rather than application correctness):
+
+| # | Check | Status |
+|---|---|---|
+| 1 | Cold startup / dependency readiness | ✅ PASS |
+| 2 | PostgreSQL full container restart under live load | ✅ PASS |
+| 3 | Redis full container restart, cache/throttle path | ✅ PASS |
+| 4 | Celery worker graceful restart mid-task | Paused mid-check (see note) |
+| 5 | Celery Beat restart — schedule integrity | Not started |
+| 6 | Full-stack outage with durable work in-flight | Not started |
+| 7 | Backend redeploy under live traffic | Not started |
+
+### Check 1 — Cold startup / dependency readiness ✅ DONE
+
+**Claim under test:** `docker-compose.yml` has no `healthcheck`/`condition: service_healthy` on `postgres` or `redis` — plain `depends_on` only sequences container *start*, not readiness. Does `backend`/`celery-worker`/`celery-beat` tolerate Postgres/Redis not yet accepting connections at the moment they start, or does a fresh `docker compose up` crash-loop?
+
+**Method:** `docker compose down` (no `-v` — confirmed the named volume `schoolmanagementsystem_postgres_data` survived) removing every container and the network, then `docker compose up -d` from fully stopped, with per-second `/readyz/` polling and full container logs captured from the moment of `up`.
+
+**Observed:** zero crash loops — `RestartCount=0` on every container (`postgres`, `redis`, `backend`, `celery-worker`, `celery-beat`) after settling. No connection-refused or retry errors in any log. Timeline from `up -d` (t=0): `postgres`/`redis` containers report `Started` almost immediately; `backend`'s dev server (autoreload + system checks) doesn't start listening until **t≈16s**, first successful `/readyz/` 200 at **t≈19s**; `celery-worker` connects to Redis and reports `ready` at **t≈15s**, immediately picks up 3 already-due Beat tasks; `celery-beat` starts dispatching scheduled tasks at **t≈12s**. No task or request failed.
+
+**Honest caveat — this run did not actually force the race it set out to probe.** Postgres/Redis (`-alpine` images, pre-initialized volume, no fresh `initdb`) become ready in a couple of seconds, well inside the ~12-19s head start that Django's own multi-stage dev-server boot (autoreloader, system checks) and Celery's own startup sequence naturally provide even with no explicit wait mechanism. So "no crash observed" is real evidence of this specific run, but doesn't independently prove the case where a request/connection attempt genuinely arrives before Postgres/Redis are listening.
+
+**That losing case is nonetheless covered, by code inspection rather than by this run:**
+- Celery: `CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True` (`config/settings.py`) is explicit, not a default left to chance — worker/beat retry-connect to Redis on boot instead of crashing if it isn't ready yet.
+- Django/gunicorn: DB access is lazy and per-request, not a boot-time dependency — gunicorn's master/worker processes start accepting connections immediately regardless of Postgres state. A request arriving before Postgres is reachable gets a clean, already-proven-clean failure (`/readyz/`'s hard-Postgres-dependency 503, Area 1 bonus check) on that one request, not a process crash — the next request retries a fresh connection.
+- A genuinely fresh volume (first-ever boot, real `initdb`) would give Postgres *more* absolute startup time, not less, and that time entirely precedes Postgres opening its listening socket — `depends_on`'s lack of a health condition doesn't change this dynamic, it only affects the (harmless, self-healing) window of individual failed requests before Postgres is reachable.
+
+**Integrity invariant:** N/A for this check (availability/operability only, no data path exercised).
+
+**Classification:** **PASS**, no defect. The stated ground rule (don't preemptively add healthchecks) holds — the two mechanisms that make this safe already exist for the reasons that matter (explicit Celery startup retry, Django's inherently lazy/self-healing DB access), not by accident. No code change made.
+
+### Check 2 — PostgreSQL full container restart under live load ✅ DONE
+
+**Claim under test:** Area 5 Check 4 proved a *single* connection killed mid-transaction rolls back cleanly. A full `docker compose restart postgres` is a different failure mode — every connection is severed at once, not one at a time, and there's a genuine (if brief) window where Postgres isn't listening at all. Does the same clean-rollback/no-corruption guarantee hold under a real whole-instance restart with many concurrent transactions in flight, not just one isolated connection?
+
+**First attempt invalidated, recorded rather than discarded silently:** ran the harness's 5e3 traffic mix against the **plain dev stack** (its default `5/min` login throttle, no `THROTTLE_RATE_LOGIN` override). All 60 background traffic tasks (operator pools/STK trickle/interactive reads across 20 tenants) hit `429` on their very first login call almost immediately — well before the restart — and the harness crashed with an unhandled `HTTPStatusError` before ever calling `recorder.write()`, so no metrics were saved. Own mistake: this tooling assumes the loadtest overlay's raised `THROTTLE_RATE_LOGIN=1000/min` (`docker-compose.loadtest.yml`), which the plain stack doesn't have. Corrected by bringing up the loadtest overlay (matching Area 6's own established methodology) and re-running.
+
+**Method (valid run):** loadtest overlay (real gunicorn 4×2, shared Redis cache), harness `--phase 5e3 --run-id area7-check2-pg-restart --ramp 100 --step-duration 300 --operators 3 --stk-rate 5 --interactive-rate 100` against the 20 existing loadtest tenants. `docker compose restart postgres` issued ~93s into the run while traffic was flowing, with `/readyz/` polled every 1s throughout.
+
+**Observed:**
+- `/readyz/` stayed 200 on every sampled second — the actual outage window was short enough to fall between 1s samples (an earlier, separate poll during the invalid first attempt did catch one 503 at t+1s, back to 200 by t+2s, consistent with a sub-2-second real gap for a graceful `postgres` container restart, not a crash-and-recover).
+- Harness-level errors: 22 of 2,098 events in the ±10s/+30s window around the restart, **all clustered in a ~2.7s window** (t+0.43s to t+3.17s relative to the restart) — `callback_verify`/`callback_process`/`callback_list` 500s, one `stk_push` 500, one `c2b_confirmation` 500, and **3 `callback_process` 400s carrying the `_select_for_update_or_conflict` `ValidationError` translation from the Area 6 `lock_timeout` fix (`72c32b1`)** — the fix correctly converting real lock contention during the recovery scramble into a clean, retryable error rather than a hang or an opaque 500. No errors of any kind from t+3.17s onward in the sampled window (two much-later, unrelated singleton events at t+17.78s/t+23.76s — an ordinary `404` and a connection hiccup, isolated, not part of the restart cluster).
+- Integrity: `loadtest_reconcile --run-id area7-check2-pg-restart` — **335 violations, all `missing_payment`, zero `duplicate_payment`, zero `cross_tenant_contamination`** (the hard gate holds). Verified directly against `MpesaCallbackLog`, not just the reconcile summary: 989 rows total, every `PROCESSED` row has both `processed_at` and `verified_at` set (zero missing either), every `RECEIVED` row has `attempts=0` and empty `last_error` (durably queued, not corrupted or silently failed), zero `REJECTED`. No row anywhere shows a partial or inconsistent state from the restart.
+
+**Integrity invariant:** held — no partial commit, no duplicate financial effect, no cross-tenant contamination, service recovered automatically with zero manual intervention.
+
+**Classification:** **PASS**, no defect. A full Postgres restart under live load behaves exactly like the invariant predicts: a short, real, correctly-surfaced availability gap (clean 5xx/400s clustered tightly around the restart, not spread out or hidden), zero correctness violations, automatic recovery. No code change made — this is the same guarantee Area 5 Check 4 proved for one connection, now shown to hold under a real whole-instance restart with concurrent traffic too.
+
+### Check 3 — Redis full container restart, cache/throttle path ✅ DONE
+
+**Claim under test:** Area 5 proved the Celery-broker-reconnect leg of a Redis outage (`docker compose stop`/`start redis`, worker reconnects on its own). This checks the leg Area 5 didn't: `FailOpenRedisCache` (the throttle/cache client), under a live `docker compose restart redis` (not stop/start) while real mixed traffic — including throttled endpoints — is flowing. Same physical Redis instance backs both the Celery broker (`db0`) and Django's cache (`db1`) in this compose setup, so this check necessarily exercises both paths at once, not cache in isolation — noted as environmental fact, not a test flaw.
+
+**Method:** loadtest overlay, harness `--phase 5e3 --run-id area7-check3-redis-restart` (same parameters as Check 2), `docker compose restart redis` issued ~90s into the run, `/readyz/` polled every 1s with its full JSON body captured (to see the `cache: degraded` state specifically, not just the status code).
+
+**Observed:**
+- `/readyz/` stayed `{"database": "ok", "cache": "ok", "status": "ok"}` on every sampled second — the actual outage window was too brief to land on a 1s sample (Area 1 already directly proved the `degraded` state fires correctly under a sustained `docker compose stop redis`; this restart's real gap was evidently shorter than that).
+- Harness-level errors in the ±10s/+40s window (2,445 events): **zero 5xx of any kind** — only 3 ordinary `c2b_confirmation` `404`s (scattered, not clustered at the restart, unrelated) and 26 `callback_list` `429`s (ordinary throttle enforcement). This is the `FailOpenRedisCache` design working exactly as intended, live, under real concurrent traffic, not just reasoned from code.
+- Throttle behavior across the restart is itself informative: 429s occurred steadily before the restart (t-8 to t-1.3s) and resumed steadily from t+8.96s onward, with **no 429s in between** (t-1.3s to t+8.96s, a ~10s window) — consistent with the cache briefly failing open (requests let through, unthrottled but not erroring) during the actual outage, then throttling correctly re-enforcing once the cache reconnects. Exactly the intended fail-open-then-recover behavior, not silently broken.
+- Celery broker leg, confirmed via `celery-worker` logs: `21:37:26.953 WARNING consumer: Connection to broker lost. Trying to re-establish the connection...` → `21:37:28.998 INFO Connected to redis://redis:6379/0` → mingle → resumed receiving tasks by `21:37:52`. ~2s automatic reconnect, no manual intervention — generalizes Area 5's stop/start-based proof to a live `restart` under real load too.
+- Integrity: `loadtest_reconcile --run-id area7-check3-redis-restart` — **144 violations, all `missing_payment`, zero `duplicate_payment`, zero `cross_tenant_contamination`.**
+
+**Integrity invariant:** held — zero 5xx caused by the outage itself, zero correctness violations, automatic recovery on both the cache and broker legs with no manual intervention.
+
+**Classification:** **PASS**, no defect. Confirms Area 1's fail-open design and Area 5's broker-reconnect proof both hold under a live container restart with real concurrent traffic, not just the more controlled conditions each was originally proven under. No code change made.
+
+### Opportunistic finding — backend container replacement / nginx upstream DNS lifecycle ✅ FIXED
+
+Not one of the original seven checks — discovered incidentally while working Check 4 (a `backend` container recreation to apply that check's `exec` fix), then reconfirmed live when the user's own browser hit it for real. Recorded here rather than folded silently into Check 4, per this area's own evidence standard.
+
+**Finding:** `frontend/nginx.conf` proxied `/api/` to `http://backend:8000` with a bare hostname and no `resolver` directive — nginx resolves that hostname's IP once and caches it for the `frontend` container's entire lifetime (no periodic re-resolution). Any time `backend` is recreated (a redeploy, or this session's own `docker compose up -d backend`) while `frontend` keeps running, Docker assigns the new container a different internal IP, but nginx keeps sending every proxied request to the old, now-dead address — **every API call 502s until `frontend` itself is restarted**, even though both services are otherwise completely healthy. Confirmed directly, not inferred: `frontend` started at `18:17:42`, `backend` was recreated at `18:46:40` with a new IP (`172.21.0.5`, was `172.21.0.4`), and nginx's own error log showed `connect() failed (111: Connection refused)` against the stale address while a parallel `docker exec frontend curl http://backend:8000/...` (a fresh DNS lookup, not nginx's cached one) succeeded immediately — isolating the bug to nginx's resolution caching specifically, not general connectivity, DNS, or backend health.
+
+**Fixed:** `frontend/nginx.conf` now sets `resolver 127.0.0.11 valid=10s;` (Docker's embedded DNS, 10s TTL) and moves `proxy_pass` to a `set`-assigned variable (`$backend_upstream`) rather than a literal hostname — the standard, well-established nginx pattern for this exact class of bug, since a literal-hostname `proxy_pass` is resolved once at config load while a variable-based one re-resolves per the `resolver` TTL.
+
+**Verified live:** rebuilt `frontend`, then recreated `backend` **twice** in a row while `frontend` was left completely untouched. Both times, API calls through nginx recovered cleanly with no persistent 502s and no frontend restart needed (confirmed via `loadtest`-independent direct calls to `/api/v1/session/`, 200 within ~150ms of backend finishing its own boot). Before the fix, a single recreation was sufficient to break it, as directly demonstrated moments earlier in this same investigation.
+
+**Classification:** **RC defect — fixed and verified**, commit (nginx.conf only, code change). **Integrity impact:** availability/routing only — no evidence of financial or tenant-data corruption; this is a request-routing failure, not a data-path one. Directly relevant to Check 7 (backend redeploy under live traffic, not yet run) — this failure mode is now closed ahead of that check, rather than left to make Check 7 fail for an unrelated reason.
+
+### Check 4 — Celery worker graceful restart mid-task ⏸️ PAUSED mid-check
+
+**Real defect found and fixed before the main experiment could even run:** `docker top` on `celery-worker` showed PID 1 was `sh -c "pip install -r requirements/loadtest.txt && celery -A config worker ..."` — the shell, not celery — because `docker-compose.loadtest.yml`'s `command:` chains via `&&` without `exec`. This is the exact same signal-forwarding defect the Dockerfile's own gunicorn `CMD` already had to fix in Milestone 22.3 (see its comment), reintroduced here. It also affected `backend`'s gunicorn command in the same overlay file. **Fixed**: added `exec` before the final command in both `docker-compose.loadtest.yml` overrides (`backend`, `celery-worker`); verified via `docker top` post-fix that PID 1 is now the real process in both containers, not a wrapping shell. This means every graceful-shutdown-under-live-load check already run this area (Checks 2-3) benefits from the fix going forward, though it doesn't retroactively invalidate them (neither tested backend's/celery's own restart).
+
+**Remaining part of this check, not yet completed:** engineering a real, Celery-dispatched task to genuinely block mid-execution (to observe whether the now-correctly-signaled graceful restart lets it finish rather than needing Area 5's stale-lease-reclaim safety net) proved harder than expected — `apps.activity.durable_work.claim_due()` uses `select_for_update(skip_locked=True)` by design (Area 5 Check 3), so it never blocks on a locked row, it skips it; a second attempt using `apps.finance.tasks.resweep_unmatched_incoming_payments` (which does use a plain, blocking `select_for_update()` inside `_attempt_auto_match`) short-circuited before reaching that lock because the synthetic `IncomingPayment` used to trigger it didn't satisfy `_recognize_student_from_reference`'s matching precondition. Paused here rather than continuing to force a contrived business scenario — picked back up per the user's next direction, interrupted by a higher-priority frontend performance report mid-session. `celery-beat` (stopped during setup to remove an unrelated race) was restarted before pausing; no other state left dangling.
 
 ## Area 8 — RC evidence and decision
 *Not started — this section becomes the final sign-off once Areas 1-7 close.*
