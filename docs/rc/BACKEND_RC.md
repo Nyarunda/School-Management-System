@@ -475,7 +475,7 @@ Reviewing the full retained evidence set together (5E-1/5E-1-explore, the shared
 **Closing this area** on that basis: every defect the evidence surfaced has its own fix, commit, and live re-verification; the capacity figures above are real measurements against the live stack, not projections; and the one unresolved item (the per-user throttle ceiling at sustained scale) is explicitly carried forward as a go-live decision rather than closed out quietly.
 
 ## Area 7 — Operational resilience
-*In progress.*
+✅ CLOSED
 
 **Baseline under test:** `769fd69` (Area 6 close). **Date started:** 2026-09-12.
 
@@ -497,7 +497,7 @@ Reviewing the full retained evidence set together (5E-1/5E-1-explore, the shared
 | 4 | Celery worker graceful restart mid-task | ✅ PASS |
 | 5 | Celery Beat restart — schedule integrity | ✅ PASS |
 | 6 | Full-stack outage with durable work in-flight | ✅ PASS |
-| 7 | Backend redeploy under live traffic | Not started |
+| 7 | Backend redeploy under live traffic | ✅ PASS |
 
 ### Check 1 — Cold startup / dependency readiness ✅ DONE
 
@@ -635,6 +635,60 @@ Not one of the original seven checks — discovered incidentally while working C
 - Stack reached normal healthy operation automatically — ✅ (`/readyz/` 200, all six containers healthy, no manual restart of anything beyond the `down`/`up` under test)
 
 **Classification:** **PASS**, no defect, no code change. This is a genuine escalation over Area 5 Check 2 (single-component crash, everything else alive) to a full-stack cold outage, and the same claim/lease/reap design holds without modification — the only thing that changed was which component orphaned the lease (the whole stack, not one worker), and the recovery mechanism doesn't need to know or care which.
+
+### Check 7 — Backend redeploy under live traffic ✅ DONE
+
+**Claim under test:** this deployment is a single `backend` container behind plain Compose — no blue/green swap, no readiness-gated load-balancer draining, no replicas. `docker compose up -d --build backend` (the real redeploy operation) stops and removes the running container and starts a freshly built one in its place. Does the previously-fixed nginx DNS-caching defect (opportunistic finding, above) actually hold under a real redeploy with live traffic flowing — and, separately from availability, does the system preserve financial/durable-write correctness (no partial commit, no duplicate effect, no stuck work) across the interruption?
+
+**Method:** loadtest overlay (same topology as Checks 2-6 — one backend container, real gunicorn, raised login throttle, shared Redis throttle cache; the overlay does not add replicas or change the single-container architecture under test). Traffic generated through **nginx** (`--base-url http://localhost:5173`, not `:8000` directly) so the actual client → nginx → backend path is exercised. Modest, deliberately not capacity-testing: `--phase 5e3 --run-id area7-check7-redeploy --ramp 30 --step-duration 600 --operators 2 --stk-rate 2 --interactive-rate 30 --drain-timeout 90` — ordinary interactive reads (student/attendance/assessment lists and detail views) plus a small continuous stream of real financial/durable-write operations (C2B confirmations, STK pushes, operator verify/process), all reconcilable afterward the same way Areas 6-7 already reconcile every run. A dedicated 0.5s-interval poller (independent of the harness, hitting both `http://localhost:5173/api/v1/session/` and `http://localhost:8000/readyz/` directly) ran throughout specifically to bound the outage window precisely. The old container's own logs were followed live (`docker logs -f`) to capture its shutdown sequence before it was removed. Redeploy triggered 120s into the run, after traffic had stabilized: `docker compose -f docker-compose.yml -f docker-compose.loadtest.yml up -d --build backend`.
+
+**Observed timeline** (all timestamps real, UTC):
+
+| Time | Event |
+|---|---|
+| 20:03:02 | Harness, poller, and old-container log follower all started |
+| 20:05:02 | Redeploy triggered: `docker compose up -d --build backend` |
+| 20:05:59.326 | First client-visible failure (poller, via nginx): `502` |
+| 20:05:59.503 | Old container receives and acts on SIGTERM (`Handling signal: term`) |
+| 20:05:59.55–.62 | All 4 gunicorn workers exit cleanly (`Worker exiting`) |
+| 20:06:01.320 | Old master process shutdown complete (`Shutting down: Master`) |
+| 20:06:07.391 | New container `Started` |
+| 20:06:19.797 | New gunicorn listening on `:8000` |
+| 20:06:20.14 | All 4 new workers booted |
+| 20:06:30.490 | Direct `:8000 /readyz/` first `200` |
+| 20:06:31–33 | Thundering-herd burst: queued/retried requests from the outage window land the instant gunicorn opens up — 6-7.6s per-request latency, but **zero 5xx** in this burst (`200`/`201`/`401`, all correct outcomes, just slow) |
+| 20:06:33.892 | nginx routing itself recovers (first clean `401` via `:5173`) — the ~3.4s gap after direct-backend health is the resolver's `valid=10s` TTL working as designed, not a defect |
+| 20:06:34 | Latency fully normalized to ms-level |
+| 20:15:16 | Harness run complete (313 events, 2,448 metric samples) |
+
+**Redeploy duration:** SIGTERM (20:05:59.503) to nginx-clean-recovery (20:06:33.892) ≈ **34.4s** total client-visible interruption. Direct-backend-only outage ≈ 31s of that; nginx's own added lag on top of backend health ≈ 3.4s, bounded by the configured resolver TTL exactly as intended (see the opportunistic finding above — this is that fix, proven under the real scenario it was built for, not just a targeted re-creation test).
+
+**Availability, by request-status class (2,448 harness samples across the full 10-minute run):** `200`×2,035, `201`×297, `404`×9, `502`×68, connection-level failure (`None`)×39 — 95.3% success. The 68 `502`s are entirely clustered in the redeploy window (harness's own coarser per-tenant polling cadence saw failures from 20:05:59.59 to 20:06:19.51 — a narrower slice of the same outage the dedicated 0.5s poller bounded more precisely above). The remaining 48 non-2xx samples are unrelated background noise, not redeploy artifacts: the 39 connection-level failures are a single one-time burst at 20:03:21.9 (the harness's own traffic ramp-up, 100s before the redeploy was even triggered), and the 9 `404`s are evenly spaced roughly once per minute throughout the *entire* run (20:04:04 through 20:12:46) at an unchanged rate before, during, and after the redeploy — the same "scattered, isolated, not clustered at the event under test" pattern already seen and dismissed in Checks 2-3.
+
+**Honest caveat — some of the measured window is test-harness plumbing, not pure production redeploy cost.** The loadtest overlay's `backend` command re-runs `pip install -r requirements/loadtest.txt` on every container start (all `already satisfied`, ~1.3s) before `exec gunicorn`, and the image build itself includes a `chown -R app:app /app` step that took 24.5s this run — neither is representative of a real production image (which would ship dependencies baked in and use a leaner ownership-setting approach). The redeploy's real single-container-topology-caused interruption (SIGTERM → new gunicorn accepting connections) is the ~31s figure above; it is not inflated by these two factors since they occur during the *build*, which happens concurrently before the old container is even touched (the `Recreate` step only starts after `Image ... Built`) — but they do add real wall-clock time to the overall `up -d --build` invocation, worth knowing if this number is ever compared against a real deploy pipeline's prebuilt-image redeploy time.
+
+**Write reconciliation:** `loadtest_reconcile --run-id area7-check7-redeploy` — **303 violations, all `missing_payment`, zero `duplicate_payment`, zero `cross_tenant_contamination`** — the hard gate holds. `missing_payment` here is the same accepted capacity characteristic on record since Area 6 (this run's small 2-operator-per-tenant pool was additionally competing against the ~25,489-row backlog still outstanding from the `area6-soak1` run in the same shared database — most of this run's own 313 C2B events legitimately queued rather than being verified/processed inside a 10-minute window), not a correctness defect introduced by the redeploy. No row anywhere shows a partial or duplicated financial effect.
+
+**Frontend/nginx never touched, confirmed directly:** `frontend` container `Created`/`StartedAt` both `2026-09-12T19:35:1x` (from Check 6's cold start, over 30 minutes before this check), `RestartCount=0` throughout — nginx rediscovered the replacement backend entirely on its own, no restart of anything but `backend` itself.
+
+**Operational note, not a finding against this check:** partway through the harness's post-redeploy traffic window (20:08:51 UTC), the host working directory was switched to a different git branch by an action outside this check's own tooling (confirmed via `git reflog`, not something this check's scripts do). Effect assessed directly rather than assumed: zero container restarts occurred at or after that moment (`docker ps` showed unbroken uptime for every service), so the already-running gunicorn/Celery processes — which had loaded their code into memory before the switch — were unaffected; the only concrete casualty was `docker-compose.loadtest.yml` (tracked on this branch only) temporarily missing from disk, which briefly blocked the final `loadtest_reconcile` invocation until the branch was restored. PostgreSQL (the actual source of truth for reconciliation) is a named volume, entirely independent of host git state, and was never at risk. Reconciliation above was run after switching back and reflects the real, complete run.
+
+**Integrity invariant:** held — zero partial commits, zero duplicate financial effects, zero cross-tenant contamination, no request reported successful without its real database effect (verified: every `200`/`201` in the sampled window corresponds to a real, reconciled state — the only violations are `missing_payment`, i.e. legitimately-still-queued work, never a false success), no manual DB/application repair, stack returned to healthy operation automatically.
+
+**Classification:** **PASS**, with an accepted availability characteristic, not a defect: a single-container Compose backend replacement produces a bounded (~34s) client-visible outage; the service recovers automatically; nginx rediscovers the replacement backend without a frontend restart (the fix from the opportunistic finding above, now proven under the actual redeploy scenario it exists for); financial/durable-write correctness holds throughout. Zero-downtime deployment is not provided by the current topology — that is a deployment-architecture property to weigh at go-live (multiple backend replicas behind a readiness-gated load balancer would close this gap; not built here per this area's ground rule of not adding infrastructure to make a check pass). No code change made this check.
+
+## Area 7 summary
+
+Reviewing the full retained evidence set together (Checks 1-7, the nginx opportunistic finding, and the backup/restore operational-readiness finding) before closing this area, per this project's RC process:
+
+- **All seven checks PASS.** Cold startup tolerates Postgres/Redis not yet ready (Check 1); a full Postgres restart under live load produces a short, correctly-surfaced availability gap with zero correctness violations (Check 2); the same holds for a full Redis restart, exercising both the cache fail-open path and the Celery broker reconnect path together (Check 3); graceful Celery worker shutdown is real but bounded, not indefinite — correctness rests on the claim/lease design, not on warm shutdown completing (Check 4); Celery Beat's persisted-schedule loss costs at most one interval of cadence drift, never a duplicate storm or permanent loss (Check 5); a genuine full-stack cold outage with durable work in-flight is recovered automatically by the unmodified claim/lease/reap machinery, with byte-identical lease-state survival directly proven, not just inferred from the final outcome (Check 6); and a live backend redeploy produces a bounded (~34s) interruption with zero correctness violations, the nginx fix holding under the real scenario it was built for (Check 7).
+- **One real defect found and fixed opportunistically, not one of the original seven checks:** `frontend/nginx.conf`'s DNS-resolution caching on backend-container-recreate (commit `621cd0c`). Directly relevant to Check 7, and now verified under that exact real scenario rather than only a targeted re-creation test.
+- **One validation-infrastructure defect found and fixed, distinct from the application code:** `docker-compose.loadtest.yml`'s missing `exec` on `backend`/`celery-worker`, which would have silently invalidated every graceful-shutdown check run against that overlay (commit `3402e62`).
+- **One accepted, explicitly-not-fixed availability characteristic:** a single-container Compose backend redeploy has a real, bounded (~30-35s) interruption window. Not a defect — a property of the deployment topology, to be weighed against go-live availability requirements. If sub-second or zero-downtime redeploys are required, that needs different infrastructure (replicas + readiness-gated draining), not an application fix.
+- **One unresolved operational-readiness finding, carried forward, not closed by this area's successes:** no backup/restore tooling or documented recovery procedure exists for PostgreSQL data anywhere in this repository (recorded at Area 7's scoping, re-confirmed still true — nothing in Checks 1-7 built or exercised one, by design, since building backup infrastructure to pass a resilience check would be inventing a new subsystem rather than proving what exists). Seven successful resilience experiments prove the *running* system recovers from operational interruption; they say nothing about recovery from data loss or corruption that isn't self-healing (a bad migration, accidental deletion, storage failure). **This does not get quietly resolved by Area 7's clean results** — it is carried to Area 8 for explicit go-live sign-off, same treatment as Area 3's acceptance decisions.
+- **Integrity, across every check in this area:** zero `duplicate_payment`, zero `cross_tenant_contamination`, zero partial commits, zero permanently-stuck durable work, zero manual database repair — in every single check that touched financial/durable-write state (Checks 2, 3, 6, 7). Every observed failure mode was either a clean, bounded, correctly-surfaced error (never a silent false success) or an already-accepted capacity/backlog characteristic on record since Area 6.
+
+**Closing this area** on that basis: every check ran against the real live stack with real measured evidence, not simulation; both defects the evidence surfaced (nginx DNS caching, loadtest `exec` config) have their own commit and live re-verification; the one accepted availability limitation (single-container redeploy window) is explicitly named rather than hidden inside a clean checklist; and the one unresolved item (backup/restore) is carried forward loudly, not allowed to disappear under seven passing checks.
 
 ## Area 8 — RC evidence and decision
 *Not started — this section becomes the final sign-off once Areas 1-7 close.*
