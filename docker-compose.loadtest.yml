@@ -9,7 +9,14 @@
 services:
   backend:
     build: ./backend
-    command: sh -c "pip install -r requirements/loadtest.txt && gunicorn config.wsgi:application --workers 4 --threads 2 --bind 0.0.0.0:8000"
+    # `exec` before the final command matters here for the same reason as
+    # the Dockerfile's own gunicorn CMD (see its comment): without it, this
+    # `sh -c` wrapper -- not gunicorn -- is PID 1, so `docker stop`/`restart`'s
+    # SIGTERM never reaches gunicorn and every shutdown silently degrades to
+    # the hard SIGKILL timeout instead of a graceful one. Found live during
+    # RC Area 7 Check 4 (`docker top` showed `sh -c ...` as PID 1, celery as
+    # a child) before it could quietly invalidate a graceful-shutdown check.
+    command: sh -c "pip install -r requirements/loadtest.txt && exec gunicorn config.wsgi:application --workers 4 --threads 2 --bind 0.0.0.0:8000"
     environment:
       MPESA_SANDBOX_BASE_URL: "http://fake-daraja:9999"
       # RC Area 6 defect fix: without this, DRF throttle counters use
@@ -28,7 +35,8 @@ services:
       THROTTLE_RATE_LOGIN: "1000/min"
 
   celery-worker:
-    command: sh -c "pip install -r requirements/loadtest.txt && celery -A config worker --loglevel=info --concurrency=4"
+    # See the `backend` command above -- same `exec` fix, same reason.
+    command: sh -c "pip install -r requirements/loadtest.txt && exec celery -A config worker --loglevel=info --concurrency=4"
     environment:
       MPESA_SANDBOX_BASE_URL: "http://fake-daraja:9999"
 
