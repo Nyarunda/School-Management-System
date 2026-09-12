@@ -2,7 +2,6 @@ import uuid
 
 from django.db import models
 
-from apps.documents.models import Document
 from apps.tenancy.models import TenantOwnedModel, User
 
 
@@ -37,12 +36,9 @@ class Application(TenantOwnedModel):
 
 
 class ApplicationDocument(TenantOwnedModel):
-    """document_type is Admissions' own domain categorization; storage
-    metadata (including uploader/upload time) lives on the referenced
-    Document row.
-    """
-
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     application = models.ForeignKey(Application, on_delete=models.CASCADE, related_name="documents")
     document_type = models.CharField(max_length=80)
-    document = models.ForeignKey(Document, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")
+    file_name = models.CharField(max_length=255)
+    uploaded_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True)
+    uploaded_at = models.DateTimeField(auto_now_add=True)

@@ -1,2 +1,0 @@
-.column-resizer{position:absolute;right:0;top:0;bottom:0;width:8px;display:grid;place-items:center;cursor:col-resize;color:#b4bdca;user-select:none}.column-resizer:hover{background:#e8ecf6;color:var(--primary)}.mantine-Table-th{white-space:nowrap}.mantine-Pagination-control{font-size:12px}.mantine-ScrollArea-viewport{overscroll-behavior:contain}
-.app-shell-navbar .mantine-NavLink-root:not([data-active]):hover{background-color:oklch(96.7% 0.003 264)}
