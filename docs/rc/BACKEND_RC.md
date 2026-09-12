@@ -496,7 +496,7 @@ Reviewing the full retained evidence set together (5E-1/5E-1-explore, the shared
 | 3 | Redis full container restart, cache/throttle path | ✅ PASS |
 | 4 | Celery worker graceful restart mid-task | ✅ PASS |
 | 5 | Celery Beat restart — schedule integrity | ✅ PASS |
-| 6 | Full-stack outage with durable work in-flight | Not started |
+| 6 | Full-stack outage with durable work in-flight | ✅ PASS |
 | 7 | Backend redeploy under live traffic | Not started |
 
 ### Check 1 — Cold startup / dependency readiness ✅ DONE
@@ -593,6 +593,48 @@ Not one of the original seven checks — discovered incidentally while working C
 **What a missing schedule file actually costs, stated plainly (not disguised):** a periodic task's effective next-run time shifts to `(new boot time) + (its own interval)`, which can be later than where the old, lost schedule would have put it (worst case: up to one full interval of extra delay for whatever was closest to due when state was lost). It never causes an immediate duplicate-fire storm and never permanently loses a task — every entry keeps running on its own cadence indefinitely once booted. Combined with the standing Milestone 22.3 rule that every Celery task must already be safe under at-least-once delivery, this satisfies the user's stated bar directly: no harmful duplicates (confirmed — nothing fires early or extra), nothing permanently lost (confirmed — every task resumes its normal cadence immediately from boot), eventual resumption (confirmed, empirically, not just by reading `PersistentScheduler`'s source).
 
 **Classification:** **PASS**, no defect, no code change. Worth carrying into any future deployment-infrastructure decision (not this area's scope to build): if the schedule file's dev-bind-mount persistence is ever relied upon as if it were a deliberate guarantee, it isn't — a real deploy without that bind mount gets the Test B behavior, which is safe but not identical (cadence resets to boot time, not the old schedule's remaining countdown).
+
+### Check 6 — Full-stack outage with durable work in-flight ✅ DONE
+
+**Claim under test:** Area 5 proved lease/reap recovery for a single-component crash (worker `SIGKILL`, everything else — Postgres, Redis, the row's committed state — kept running throughout). A genuine whole-stack outage is different: every container and the network are gone simultaneously, and only the named Postgres volume is expected to survive. Does the same claim/lease/reap machinery still discover and recover orphaned durable work with nothing else changed, no shortened settings, no manual intervention?
+
+**Method — real production lease duration used throughout, not shortened for speed (per explicit instruction):**
+1. Recorded the Postgres named volume's identity first: `schoolmanagementsystem_postgres_data`, created `2026-09-09T18:24:14Z` — the baseline to confirm nothing recreated it.
+2. `docker compose stop celery-worker` (same race-avoidance as Area 5's checks — keeps the real worker from claiming the row before the deliberate manual claim below).
+3. Created one genuine `NotificationOutbox` row via a real invite (`demo-academy`). Called the actual `apps.activity.durable_work.claim_due()` primitive directly — the same call `dispatch_pending_notifications` itself makes, with **no `lease_seconds` override** (real default, 300s) — confirming the row: `PROCESSING`, `attempts=1`, `lease_expires_at=19:39:54.748773`. Zero `NotificationDeliveryAttempt` rows existed at this point.
+4. **`docker compose down`** (no `-v`, no `--volumes`, no `docker volume rm`, no pruning) at `19:35:03` — every container and the network removed, confirmed via `docker compose ps -a` showing nothing. Volume re-inspected immediately after: same name, same `CreatedAt` (`2026-09-09T18:24:14Z`, unchanged) — direct proof it was never touched, not just assumed from the flags used.
+5. **`docker compose up -d`** at `19:35:12` — a genuine cold start of the unchanged stack (same images, same compose file, nothing modified for this check). `/readyz/` first returned 200 at `19:35:37`.
+6. **The specific extra evidence requested**: queried the row *immediately* on recovery, before either the lease could expire (`19:39:54`, still 4+ minutes away) or any reap cycle could run. Result: `PROCESSING`, `attempts=1`, `lease_expires_at=2026-09-12 19:39:54.748773+00:00` — **the identical value, to the microsecond**, as the original claim. This is direct proof PostgreSQL preserved the exact pre-outage in-flight state through a full teardown/recreate, not an inference from the final outcome alone.
+7. Left the stack running unattended and polled every 10s (real settings throughout — no shortened lease, no shortened Beat interval) until the row reached `PROCESSED`.
+
+**Observed timeline** (all timestamps real, from container logs and direct queries, UTC):
+
+| Time | Event |
+|---|---|
+| 19:34:54 | Row claimed: `PROCESSING`, `attempts=1`, lease expires `19:39:54` |
+| 19:35:03 | `docker compose down` issued |
+| 19:35:12 | Containers/network confirmed gone, volume confirmed preserved; `docker compose up -d` issued |
+| 19:35:37 | `/readyz/` first 200 |
+| 19:35:43 | Row confirmed still `PROCESSING`, **identical** `lease_expires_at` — captured before any recovery mechanism was even eligible to act |
+| 19:36:26 | First post-restart `reap_stale_notifications` cycle (Beat's own cadence, freshly counted from its own reboot per Check 5's finding) — lease not yet expired, correctly reclaims nothing |
+| 19:39:54 | Lease naturally expires (real, unshortened 300s) |
+| 19:41:26.549 | Second `reap_stale_notifications` cycle reclaims the row (`PROCESSING`→`PENDING`, `last_error` stamped `"Processing lease expired before completion"`) |
+| 19:41:26.820 | Same Beat tick, `dispatch_pending_notifications` claims the now-`PENDING` row |
+| 19:41:26.954 | `PROCESSED`, `attempts=2`. Exactly **one** `NotificationDeliveryAttempt` (`attempt_number=2`, `SENT`, `EMAIL`, tenant `demo-academy`) — the interrupted `attempt_number=1` never got far enough to create a delivery attempt at all, matching Area 5 Check 2's identical finding, so there is nothing to deduplicate. |
+
+**Recovery duration, reported as measured, not against an invented target:** ~92 seconds from lease expiry to reclaim (bounded by the real 300s reap interval, as expected — this is the actual configured RTO, not shortened for the test), ~5 min 49s from cold-start readiness to fully `PROCESSED`. If this RTO is judged operationally unacceptable for a specific class of durable work, that's a tuning decision for `lease_seconds`/the reap Beat interval — not something to silently shorten to make this check pass faster.
+
+**Hard PASS criteria, checked individually:**
+- PostgreSQL data survives the full teardown/recreate — ✅ (volume identity/creation-time unchanged; row state byte-identical, not just "eventually correct")
+- Interrupted work eventually processed — ✅
+- Exactly-once business effect — ✅ (1 delivery attempt, not 2)
+- No row left permanently `PROCESSING` — ✅
+- No duplicate financial/business effect — ✅
+- No cross-tenant effect — ✅ (tenant `demo-academy` throughout)
+- No manual database repair or lease manipulation — ✅ (every transition driven by the unmodified, already-scheduled Beat/worker tasks)
+- Stack reached normal healthy operation automatically — ✅ (`/readyz/` 200, all six containers healthy, no manual restart of anything beyond the `down`/`up` under test)
+
+**Classification:** **PASS**, no defect, no code change. This is a genuine escalation over Area 5 Check 2 (single-component crash, everything else alive) to a full-stack cold outage, and the same claim/lease/reap design holds without modification — the only thing that changed was which component orphaned the lease (the whole stack, not one worker), and the recovery mechanism doesn't need to know or care which.
 
 ## Area 8 — RC evidence and decision
 *Not started — this section becomes the final sign-off once Areas 1-7 close.*
