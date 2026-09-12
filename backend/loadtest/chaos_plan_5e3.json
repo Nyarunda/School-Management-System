@@ -1,0 +1,5 @@
+[
+  {"scenario": "redis-outage", "at_seconds": 400, "duration_seconds": 90},
+  {"scenario": "kill-worker", "at_seconds": 800, "duration_seconds": 90},
+  {"scenario": "postgres-connection-kill", "at_seconds": 1200, "duration_seconds": 15}
+]

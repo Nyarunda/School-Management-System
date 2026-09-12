@@ -11,3 +11,14 @@ dist/
 .test-postgres/
 .test-deps/
 .test-postgres.log
+backend/document_storage/
+
+# Milestone 5E load-test run output -- disposable, regenerated per run
+backend/loadtest/manifest.json
+backend/loadtest/seeded_verified_callbacks.json
+backend/loadtest/events/*.json
+backend/loadtest/reports/*.json
+backend/loadtest/reports/*.md
+backend/celerybeat-schedule
+backend/.cache/*
+backend/.local/*

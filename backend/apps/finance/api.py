@@ -1,41 +1,68 @@
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
+from django.db import IntegrityError
+from django.db.models import Sum
+from django.http import HttpResponse
 from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from django.utils.dateparse import parse_date
 from rest_framework import serializers, status
 from rest_framework.exceptions import NotFound, PermissionDenied
-from rest_framework.generics import ListAPIView, ListCreateAPIView, RetrieveUpdateAPIView
+from rest_framework.generics import ListAPIView, ListCreateAPIView, RetrieveAPIView, RetrieveUpdateAPIView
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from apps.academics.models import AcademicLevel, AcademicYear
+from apps.academics.models import AcademicLevel, AcademicYear, ClassGroup, Term
+from apps.activity.services import record_activity
 from apps.students.models import Student
+from apps.platform.services import require_module_enabled
 from apps.tenancy.services import require_permission
 
 from .models import (
+    AllocationReversal,
     CreditNote,
+    CreditNoteStatus,
     FeeCategory,
     FeeItem,
     FeeStructure,
     FeeStructureLine,
     FinanceSetup,
+    IncomingPayment,
     Invoice,
     InvoiceLine,
+    InvoiceStatus,
     NumberSeries,
+    Payment,
+    PaymentAllocation,
+    PaymentMethod,
+    PaymentReversal,
+    PaymentStatus,
+    Receipt,
     StudentFeeAssignment,
     StudentLedgerEntry,
 )
 from .selectors import student_balance
+from .statement_pdf import render_fee_statement_pdf, send_fee_statement_email
 from .services import (
     add_fee_structure_line,
+    allocate_payment,
     approve_fee_structure,
     assign_fee_structure,
+    bulk_assign_fee_structure,
+    bulk_generate_invoices_for_term,
     create_fee_structure,
     generate_invoice,
+    ignore_incoming_payment,
+    ingest_incoming_payment,
     issue_credit_note,
     issue_invoice,
+    match_incoming_payment,
+    record_payment,
+    reverse_allocation,
+    reverse_payment,
 )
 
 
@@ -50,13 +77,30 @@ def resolve_finance_tenant(request, permission):
     if not slug:
         raise NotFound("Tenant context is required")
     try:
-        return require_permission(user=request.user, tenant_slug=slug, permission=permission).tenant
+        membership = require_permission(user=request.user, tenant_slug=slug, permission=permission)
+        require_module_enabled(tenant=membership.tenant, module_code="finance")
+        return membership.tenant
     except ValidationError as error:
         raise PermissionDenied(error.messages) from error
 
 
 def api_validation_error(error):
     return Response({"detail": error.messages}, status=status.HTTP_400_BAD_REQUEST)
+
+
+def resolve_tenant_object(queryset, pk):
+    """Fetch a tenant-scoped object by primary key.
+
+    A malformed identifier (e.g. a non-UUID string) makes Django's ORM raise
+    a bare ValidationError while resolving the lookup, which DRF's default
+    exception handler does not translate into a response. Treat a malformed
+    identifier the same as a missing one (404) instead of letting it surface
+    as an unhandled 500.
+    """
+    try:
+        return get_object_or_404(queryset, pk=pk)
+    except ValidationError as error:
+        raise NotFound("No matching record for the given identifier") from error
 
 
 class FinanceSetupSerializer(serializers.ModelSerializer):
@@ -80,6 +124,16 @@ class FinanceSetupView(RetrieveUpdateAPIView):
         serializer = self.get_serializer(setup, data=request.data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+        # Bounded metadata only -- never the raw configuration payload, which
+        # is arbitrary tenant-supplied JSON and may itself carry sensitive data.
+        record_activity(
+            tenant=tenant,
+            actor=request.user,
+            action="finance_setup.updated",
+            resource_type="finance_setup",
+            resource_id=str(setup.id),
+            metadata={"changed_fields": sorted(request.data.keys())},
+        )
         return Response(serializer.data)
 
 
@@ -120,8 +174,31 @@ class FeeItemListCreateView(ListCreateAPIView):
 
     def perform_create(self, serializer):
         tenant = resolve_finance_tenant(self.request, "finance.setup.manage")
-        category = get_object_or_404(FeeCategory.objects.for_tenant(tenant), pk=self.request.data.get("category"))
+        category = resolve_tenant_object(FeeCategory.objects.for_tenant(tenant), self.request.data.get("category"))
         serializer.save(tenant=tenant, category=category)
+
+
+class PaymentMethodSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PaymentMethod
+        fields = ["id", "name", "code", "is_active"]
+        read_only_fields = fields
+
+
+class PaymentMethodListView(ListAPIView):
+    """Read-only catalogue -- PaymentMethod rows are only ever created by the
+    M-Pesa gateway's auto-provisioning (code="MPESA") or directly via
+    shell/tests today; this exists only so the record-payment UI can
+    populate a picker from existing rows, the same shape as the
+    academics.api academic-year/level catalogues.
+    """
+
+    permission_classes = [IsAuthenticated]
+    serializer_class = PaymentMethodSerializer
+    pagination_class = FinancePagination
+
+    def get_queryset(self):
+        return PaymentMethod.objects.for_tenant(resolve_finance_tenant(self.request, "finance.setup.view")).order_by("name")
 
 
 class FeeStructureLineSerializer(serializers.ModelSerializer):
@@ -138,7 +215,7 @@ class FeeStructureSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = FeeStructure
-        fields = ["id", "name", "academic_year", "academic_level", "is_active", "is_approved", "lines"]
+        fields = ["id", "name", "academic_year", "academic_level", "term", "is_active", "is_approved", "lines"]
         read_only_fields = ["id", "is_approved", "lines"]
 
 
@@ -149,21 +226,23 @@ class FeeStructureListCreateView(ListCreateAPIView):
 
     def get_queryset(self):
         tenant = resolve_finance_tenant(self.request, "finance.fee_structure.view")
-        return FeeStructure.objects.for_tenant(tenant).select_related("academic_year", "academic_level").prefetch_related("lines__fee_item").order_by("name")
+        return FeeStructure.objects.for_tenant(tenant).select_related("academic_year", "academic_level", "term").prefetch_related("lines__fee_item").order_by("name")
 
     def create(self, request, *args, **kwargs):
         tenant = resolve_finance_tenant(request, "finance.fee_structure.create")
         try:
             academic_year = get_object_or_404(AcademicYear.objects.for_tenant(tenant), pk=request.data.get("academic_year"))
             academic_level = get_object_or_404(AcademicLevel.objects.for_tenant(tenant), pk=request.data.get("academic_level"))
+            term = get_object_or_404(Term.objects.for_tenant(tenant), pk=request.data.get("term"))
             structure = create_fee_structure(
                 user=request.user,
                 tenant=tenant,
                 name=request.data["name"],
                 academic_year=academic_year,
                 academic_level=academic_level,
+                term=term,
             )
-        except (KeyError, ValidationError) as error:
+        except (KeyError, ValidationError, IntegrityError) as error:
             return api_validation_error(error if isinstance(error, ValidationError) else ValidationError(str(error)))
         return Response(self.get_serializer(structure).data, status=status.HTTP_201_CREATED)
 
@@ -174,7 +253,7 @@ class FeeStructureLineCreateView(APIView):
     def post(self, request, structure_id):
         tenant = resolve_finance_tenant(request, "finance.fee_structure.edit")
         structure = get_object_or_404(FeeStructure.objects.for_tenant(tenant), pk=structure_id)
-        fee_item = get_object_or_404(FeeItem.objects.for_tenant(tenant), pk=request.data.get("fee_item"))
+        fee_item = resolve_tenant_object(FeeItem.objects.for_tenant(tenant), request.data.get("fee_item"))
         try:
             line = add_fee_structure_line(
                 user=request.user,
@@ -184,7 +263,7 @@ class FeeStructureLineCreateView(APIView):
                 amount=Decimal(str(request.data["amount"])),
                 is_required=request.data.get("is_required", True),
             )
-        except (KeyError, ValidationError, ValueError) as error:
+        except (KeyError, ValidationError, ValueError, InvalidOperation, IntegrityError) as error:
             return api_validation_error(error if isinstance(error, ValidationError) else ValidationError(str(error)))
         return Response(FeeStructureLineSerializer(line).data, status=status.HTTP_201_CREATED)
 
@@ -195,11 +274,25 @@ class FeeStructureApproveView(APIView):
     def post(self, request, structure_id):
         tenant = resolve_finance_tenant(request, "finance.fee_structure.approve")
         structure = get_object_or_404(FeeStructure.objects.for_tenant(tenant), pk=structure_id)
+        approve_fee_structure(user=request.user, tenant=tenant, fee_structure=structure)
+        return Response(FeeStructureSerializer(structure).data)
+
+
+class FeeStructureBulkAssignView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, structure_id):
+        tenant = resolve_finance_tenant(request, "finance.invoice.create")
+        structure = get_object_or_404(FeeStructure.objects.for_tenant(tenant), pk=structure_id)
+        class_group = None
+        class_group_id = request.data.get("class_group")
+        if class_group_id:
+            class_group = resolve_tenant_object(ClassGroup.objects.for_tenant(tenant), class_group_id)
         try:
-            approve_fee_structure(user=request.user, tenant=tenant, fee_structure=structure)
+            result = bulk_assign_fee_structure(user=request.user, tenant=tenant, fee_structure=structure, class_group=class_group, issue=bool(request.data.get("issue")))
         except ValidationError as error:
             return api_validation_error(error)
-        return Response(FeeStructureSerializer(structure).data)
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class AssignmentSerializer(serializers.ModelSerializer):
@@ -223,12 +316,9 @@ class AssignmentListCreateView(ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         tenant = resolve_finance_tenant(request, "finance.invoice.create")
-        student = get_object_or_404(Student.objects.for_tenant(tenant), pk=request.data.get("student"))
-        structure = get_object_or_404(FeeStructure.objects.for_tenant(tenant), pk=request.data.get("fee_structure"))
-        try:
-            assignment = assign_fee_structure(user=request.user, tenant=tenant, student=student, fee_structure=structure)
-        except ValidationError as error:
-            return api_validation_error(error)
+        student = resolve_tenant_object(Student.objects.for_tenant(tenant), request.data.get("student"))
+        structure = resolve_tenant_object(FeeStructure.objects.for_tenant(tenant), request.data.get("fee_structure"))
+        assignment = assign_fee_structure(user=request.user, tenant=tenant, student=student, fee_structure=structure)
         return Response(self.get_serializer(assignment).data, status=status.HTTP_201_CREATED)
 
 
@@ -259,7 +349,12 @@ class InvoiceListView(ListAPIView):
         tenant = resolve_finance_tenant(self.request, "finance.invoice.view")
         queryset = Invoice.objects.for_tenant(tenant).select_related("student", "assignment").prefetch_related("lines").order_by("-created_at")
         student_id = self.request.query_params.get("student")
-        return queryset.filter(student_id=student_id) if student_id else queryset
+        if not student_id:
+            return queryset
+        try:
+            return queryset.filter(student_id=student_id)
+        except ValidationError as error:
+            raise NotFound("No matching record for the given identifier") from error
 
 
 class InvoiceGenerateView(APIView):
@@ -268,11 +363,21 @@ class InvoiceGenerateView(APIView):
     def post(self, request, assignment_id):
         tenant = resolve_finance_tenant(request, "finance.invoice.create")
         assignment = get_object_or_404(StudentFeeAssignment.objects.for_tenant(tenant), pk=assignment_id)
+        invoice = generate_invoice(user=request.user, tenant=tenant, assignment=assignment)
+        return Response(InvoiceSerializer(invoice).data, status=status.HTTP_201_CREATED)
+
+
+class TermInvoiceGenerateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, term_id):
+        tenant = resolve_finance_tenant(request, "finance.invoice.create")
+        term = resolve_tenant_object(Term.objects.for_tenant(tenant), term_id)
         try:
-            invoice = generate_invoice(user=request.user, tenant=tenant, assignment=assignment)
+            result = bulk_generate_invoices_for_term(user=request.user, tenant=tenant, term=term, issue=bool(request.data.get("issue")))
         except ValidationError as error:
             return api_validation_error(error)
-        return Response(InvoiceSerializer(invoice).data, status=status.HTTP_201_CREATED)
+        return Response(result, status=status.HTTP_200_OK)
 
 
 class InvoiceIssueView(APIView):
@@ -281,10 +386,7 @@ class InvoiceIssueView(APIView):
     def post(self, request, invoice_id):
         tenant = resolve_finance_tenant(request, "finance.invoice.issue")
         invoice = get_object_or_404(Invoice.objects.for_tenant(tenant), pk=invoice_id)
-        try:
-            invoice = issue_invoice(user=request.user, tenant=tenant, invoice=invoice)
-        except ValidationError as error:
-            return api_validation_error(error)
+        invoice = issue_invoice(user=request.user, tenant=tenant, invoice=invoice)
         return Response(InvoiceSerializer(invoice).data)
 
 
@@ -306,9 +408,9 @@ class CreditNoteListCreateView(ListCreateAPIView):
 
     def create(self, request, *args, **kwargs):
         tenant = resolve_finance_tenant(request, "finance.credit_note.create")
-        student = get_object_or_404(Student.objects.for_tenant(tenant), pk=request.data.get("student"))
+        student = resolve_tenant_object(Student.objects.for_tenant(tenant), request.data.get("student"))
         invoice_id = request.data.get("invoice")
-        invoice = get_object_or_404(Invoice.objects.for_tenant(tenant), pk=invoice_id) if invoice_id else None
+        invoice = resolve_tenant_object(Invoice.objects.for_tenant(tenant), invoice_id) if invoice_id else None
         try:
             credit_note = issue_credit_note(
                 user=request.user,
@@ -318,22 +420,399 @@ class CreditNoteListCreateView(ListCreateAPIView):
                 amount=Decimal(str(request.data["amount"])),
                 reason=request.data["reason"],
             )
-        except (KeyError, ValidationError, ValueError) as error:
+        except (KeyError, ValidationError, ValueError, InvalidOperation) as error:
             return api_validation_error(error if isinstance(error, ValidationError) else ValidationError(str(error)))
         return Response(self.get_serializer(credit_note).data, status=status.HTTP_201_CREATED)
 
 
-class StudentFinanceView(APIView):
+class ReceiptSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Receipt
+        fields = ["id", "receipt_number", "issued_at"]
+        read_only_fields = fields
+
+
+class PaymentAllocationSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PaymentAllocation
+        fields = ["id", "payment", "invoice", "amount", "allocated_at"]
+        read_only_fields = fields
+
+
+class AllocationReversalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AllocationReversal
+        fields = ["id", "allocation", "amount", "reason", "reversed_at"]
+        read_only_fields = fields
+
+
+# Money amounts use a plain serializers.Serializer with an explicit DecimalField
+# (max_digits/decimal_places matching the model, min_value rejecting zero/negative)
+# rather than Decimal(str(request.data[...])). DRF's DecimalField already rejects
+# non-finite input (NaN, Infinity, -Infinity) and wrong precision/scale at the
+# request boundary, before any domain/service code ever sees it.
+class PaymentCreateSerializer(serializers.Serializer):
+    student = serializers.UUIDField()
+    payment_method = serializers.UUIDField()
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    idempotency_key = serializers.CharField(max_length=120)
+    external_reference = serializers.CharField(max_length=120, required=False, allow_blank=True, default="")
+
+
+class PaymentAllocationCreateSerializer(serializers.Serializer):
+    invoice = serializers.UUIDField()
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+
+
+class AllocationReversalCreateSerializer(serializers.Serializer):
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    reason = serializers.CharField(max_length=240)
+
+
+class PaymentReversalSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PaymentReversal
+        fields = ["id", "reversal_number", "reason", "reversed_at"]
+        read_only_fields = fields
+
+
+class PaymentReversalCreateSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=240)
+
+
+class PaymentSerializer(serializers.ModelSerializer):
+    receipt = ReceiptSerializer(read_only=True)
+    allocations = PaymentAllocationSerializer(many=True, read_only=True)
+    reversal = PaymentReversalSerializer(read_only=True)
+    allocated_amount = serializers.SerializerMethodField()
+    unallocated_amount = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Payment
+        fields = [
+            "id", "student", "payment_method", "amount", "external_reference",
+            "idempotency_key", "status", "received_at", "created_at",
+            "receipt", "allocations", "reversal", "allocated_amount", "unallocated_amount",
+        ]
+        read_only_fields = ["id", "status", "received_at", "created_at", "receipt", "allocations", "reversal", "allocated_amount", "unallocated_amount"]
+
+    def get_allocated_amount(self, payment):
+        # Net of reversals: a reversed allocation frees that cash again.
+        # Relies on "allocations__reversals" being prefetched by the caller.
+        total = Decimal("0")
+        for allocation in payment.allocations.all():
+            total += allocation.amount - sum((reversal.amount for reversal in allocation.reversals.all()), Decimal("0"))
+        return total
+
+    def get_unallocated_amount(self, payment):
+        if payment.status == PaymentStatus.REVERSED:
+            return Decimal("0")
+        return payment.amount - self.get_allocated_amount(payment)
+
+
+class PaymentListCreateView(ListCreateAPIView):
     permission_classes = [IsAuthenticated]
+    serializer_class = PaymentSerializer
+    pagination_class = FinancePagination
+
+    def get_queryset(self):
+        tenant = resolve_finance_tenant(self.request, "finance.payment.view")
+        queryset = (
+            Payment.objects.for_tenant(tenant)
+            .select_related("student", "payment_method")
+            .prefetch_related("allocations__reversals", "receipt", "reversal")
+            .order_by("-received_at")
+        )
+        student_id = self.request.query_params.get("student")
+        if not student_id:
+            return queryset
+        try:
+            return queryset.filter(student_id=student_id)
+        except ValidationError as error:
+            raise NotFound("No matching record for the given identifier") from error
+
+    def create(self, request, *args, **kwargs):
+        tenant = resolve_finance_tenant(request, "finance.payment.record")
+        input_serializer = PaymentCreateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+        student = resolve_tenant_object(Student.objects.for_tenant(tenant), str(data["student"]))
+        payment_method = resolve_tenant_object(PaymentMethod.objects.for_tenant(tenant), str(data["payment_method"]))
+        payment = record_payment(
+            user=request.user,
+            tenant=tenant,
+            student=student,
+            payment_method=payment_method,
+            amount=data["amount"],
+            idempotency_key=data["idempotency_key"],
+            external_reference=data["external_reference"],
+        )
+        return Response(self.get_serializer(payment).data, status=status.HTTP_201_CREATED)
+
+
+class PaymentDetailView(RetrieveAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = PaymentSerializer
+
+    def get_object(self):
+        tenant = resolve_finance_tenant(self.request, "finance.payment.view")
+        queryset = (
+            Payment.objects.for_tenant(tenant)
+            .select_related("student", "payment_method")
+            .prefetch_related("allocations__reversals", "receipt", "reversal")
+        )
+        return resolve_tenant_object(queryset, self.kwargs["payment_id"])
+
+
+class PaymentReversalView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, payment_id):
+        tenant = resolve_finance_tenant(request, "finance.payment.reverse")
+        payment = resolve_tenant_object(Payment.objects.for_tenant(tenant), payment_id)
+        input_serializer = PaymentReversalCreateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        reversal = reverse_payment(user=request.user, tenant=tenant, payment=payment, reason=input_serializer.validated_data["reason"])
+        return Response(PaymentReversalSerializer(reversal).data, status=status.HTTP_201_CREATED)
+
+
+class PaymentAllocateView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, payment_id):
+        tenant = resolve_finance_tenant(request, "finance.payment.allocate")
+        payment = resolve_tenant_object(Payment.objects.for_tenant(tenant), payment_id)
+        input_serializer = PaymentAllocationCreateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+        invoice = resolve_tenant_object(Invoice.objects.for_tenant(tenant), str(data["invoice"]))
+        allocation = allocate_payment(user=request.user, tenant=tenant, payment=payment, invoice=invoice, amount=data["amount"])
+        return Response(PaymentAllocationSerializer(allocation).data, status=status.HTTP_201_CREATED)
+
+
+class AllocationReversalView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, allocation_id):
+        tenant = resolve_finance_tenant(request, "finance.allocation.reverse")
+        allocation = resolve_tenant_object(PaymentAllocation.objects.for_tenant(tenant), allocation_id)
+        input_serializer = AllocationReversalCreateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+        reversal = reverse_allocation(user=request.user, tenant=tenant, allocation=allocation, amount=data["amount"], reason=data["reason"])
+        return Response(AllocationReversalSerializer(reversal).data, status=status.HTTP_201_CREATED)
+
+
+class LedgerEntrySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = StudentLedgerEntry
+        fields = ["id", "entry_type", "amount", "posted_at", "invoice", "credit_note", "payment_allocation", "allocation_reversal"]
+        read_only_fields = fields
+
+
+class StudentLedgerListView(ListAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = LedgerEntrySerializer
+    pagination_class = FinancePagination
+
+    def get_queryset(self):
+        tenant = resolve_finance_tenant(self.request, "finance.student_account.view")
+        queryset = StudentLedgerEntry.objects.for_tenant(tenant).order_by("-posted_at")
+        student_id = self.request.query_params.get("student")
+        if not student_id:
+            return queryset
+        try:
+            return queryset.filter(student_id=student_id)
+        except ValidationError as error:
+            raise NotFound("No matching record for the given identifier") from error
+
+
+class StudentFinanceView(APIView):
+    """A bounded snapshot for a student's account -- summary totals plus a
+    short recent-activity preview. Full history is independently paginated
+    through /invoices/, /payments/, and /ledger-entries/ with ?student=,
+    not returned here in full (see docs/architecture/api-query-performance.md).
+    """
+
+    permission_classes = [IsAuthenticated]
+    RECENT_LIMIT = 5
 
     def get(self, request, student_id):
         tenant = resolve_finance_tenant(request, "finance.student_account.view")
         student = get_object_or_404(Student.objects.for_tenant(tenant), pk=student_id)
-        invoices = Invoice.objects.for_tenant(tenant).filter(student=student).prefetch_related("lines").order_by("-created_at")
-        ledger = StudentLedgerEntry.objects.for_tenant(tenant).filter(student=student).order_by("-posted_at")
+
+        invoices = Invoice.objects.for_tenant(tenant).filter(student=student)
+        total_invoiced = invoices.filter(status=InvoiceStatus.ISSUED).aggregate(total=Sum("total"))["total"] or Decimal("0")
+
+        credit_notes = CreditNote.objects.for_tenant(tenant).filter(student=student, status=CreditNoteStatus.ISSUED)
+        total_credited = credit_notes.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+
+        payments = Payment.objects.for_tenant(tenant).filter(student=student)
+        total_received = payments.aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        allocated = PaymentAllocation.objects.filter(tenant=tenant, payment__student=student).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        reversed_amount = AllocationReversal.objects.filter(tenant=tenant, allocation__payment__student=student).aggregate(total=Sum("amount"))["total"] or Decimal("0")
+        total_paid = allocated - reversed_amount
+
+        recent_invoices = invoices.prefetch_related("lines").order_by("-created_at")[: self.RECENT_LIMIT]
+        recent_payments = (
+            payments.select_related("payment_method")
+            .prefetch_related("allocations__reversals", "receipt", "reversal")
+            .order_by("-received_at")[: self.RECENT_LIMIT]
+        )
+        recent_ledger_entries = StudentLedgerEntry.objects.for_tenant(tenant).filter(student=student).order_by("-posted_at")[: self.RECENT_LIMIT]
+
         return Response({
             "student": {"id": student.id, "admission_number": student.admission_number, "name": student.full_name},
-            "balance": student_balance(tenant=tenant, student=student),
-            "invoices": InvoiceSerializer(invoices, many=True).data,
-            "ledger": [{"id": entry.id, "entry_type": entry.entry_type, "amount": entry.amount, "posted_at": entry.posted_at} for entry in ledger],
+            "summary": {
+                "outstanding_balance": student_balance(tenant=tenant, student=student),
+                "total_invoiced": total_invoiced,
+                "total_credited": total_credited,
+                "total_paid": total_paid,
+                "unapplied_cash": total_received - total_paid,
+            },
+            "recent_invoices": InvoiceSerializer(recent_invoices, many=True).data,
+            "recent_payments": PaymentSerializer(recent_payments, many=True).data,
+            "recent_ledger_entries": LedgerEntrySerializer(recent_ledger_entries, many=True).data,
         })
+
+
+def _resolve_statement_as_of(request):
+    as_of_raw = request.query_params.get("as_of") or request.data.get("as_of")
+    as_of = parse_date(as_of_raw) if as_of_raw else timezone.now().date()
+    if as_of is None:
+        raise ValidationError("as_of must be a valid date")
+    return as_of
+
+
+class StudentFeeStatementPdfView(APIView):
+    """Same underlying data as the generic finance.fee_statement report --
+    this is a formatted-document rendering of it for a parent/guardian, not
+    a second data source. Gated on the export capability (not just view):
+    downloading a portable file is the same "takes data out of the
+    interactive UI" action the reports app itself distinguishes with
+    reports.finance.export vs .view.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, student_id):
+        tenant = resolve_finance_tenant(request, "reports.finance.export")
+        student = get_object_or_404(Student.objects.for_tenant(tenant), pk=student_id)
+        try:
+            as_of = _resolve_statement_as_of(request)
+            pdf_bytes = render_fee_statement_pdf(tenant=tenant, student=student, as_of=as_of)
+        except ValidationError as error:
+            return api_validation_error(error)
+        response = HttpResponse(pdf_bytes, content_type="application/pdf")
+        response["Content-Disposition"] = f'attachment; filename="fee-statement-{student.admission_number}-{as_of.isoformat()}.pdf"'
+        return response
+
+
+class StudentFeeStatementEmailView(APIView):
+    """Emails the same PDF to the student's guardian on file. Same
+    export-level gate as the PDF download above -- this releases the same
+    data outside the system, just by a different channel.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, student_id):
+        tenant = resolve_finance_tenant(request, "reports.finance.export")
+        student = get_object_or_404(Student.objects.for_tenant(tenant), pk=student_id)
+        try:
+            as_of = _resolve_statement_as_of(request)
+            sent_to = send_fee_statement_email(tenant=tenant, student=student, as_of=as_of)
+        except ValidationError as error:
+            return api_validation_error(error)
+        record_activity(
+            tenant=tenant,
+            actor=request.user,
+            action="fee_statement.emailed",
+            resource_type="student",
+            resource_id=str(student.id),
+            metadata={"as_of": as_of.isoformat()},
+        )
+        return Response({"sent_to": sent_to})
+
+
+class IncomingPaymentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = IncomingPayment
+        fields = [
+            "id", "payment_method", "amount", "external_reference", "external_transaction_id",
+            "status", "matched_payment", "ignored_reason", "received_at", "created_at",
+        ]
+        read_only_fields = ["id", "status", "matched_payment", "ignored_reason", "created_at"]
+
+
+class IncomingPaymentCreateSerializer(serializers.Serializer):
+    payment_method = serializers.UUIDField()
+    amount = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal("0.01"))
+    external_reference = serializers.CharField(max_length=240, required=False, allow_blank=True, default="")
+    external_transaction_id = serializers.CharField(max_length=120)
+
+
+class IncomingPaymentMatchSerializer(serializers.Serializer):
+    student = serializers.UUIDField()
+
+
+class IncomingPaymentIgnoreSerializer(serializers.Serializer):
+    reason = serializers.CharField(max_length=240)
+
+
+class IncomingPaymentListCreateView(ListCreateAPIView):
+    permission_classes = [IsAuthenticated]
+    serializer_class = IncomingPaymentSerializer
+    pagination_class = FinancePagination
+
+    def get_queryset(self):
+        tenant = resolve_finance_tenant(self.request, "finance.reconciliation.view")
+        queryset = IncomingPayment.objects.for_tenant(tenant).select_related("payment_method").order_by("-received_at")
+        status_param = self.request.query_params.get("status")
+        if status_param:
+            queryset = queryset.filter(status=status_param)
+        received_after = self.request.query_params.get("received_after")
+        if received_after:
+            queryset = queryset.filter(received_at__gte=received_after)
+        return queryset
+
+    def create(self, request, *args, **kwargs):
+        tenant = resolve_finance_tenant(request, "finance.reconciliation.ingest")
+        input_serializer = IncomingPaymentCreateSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        data = input_serializer.validated_data
+        payment_method = resolve_tenant_object(PaymentMethod.objects.for_tenant(tenant), str(data["payment_method"]))
+        incoming = ingest_incoming_payment(
+            user=request.user,
+            tenant=tenant,
+            payment_method=payment_method,
+            amount=data["amount"],
+            external_reference=data["external_reference"],
+            external_transaction_id=data["external_transaction_id"],
+        )
+        return Response(self.get_serializer(incoming).data, status=status.HTTP_201_CREATED)
+
+
+class IncomingPaymentMatchView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, incoming_payment_id):
+        tenant = resolve_finance_tenant(request, "finance.reconciliation.match")
+        incoming = resolve_tenant_object(IncomingPayment.objects.for_tenant(tenant), incoming_payment_id)
+        input_serializer = IncomingPaymentMatchSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        student = resolve_tenant_object(Student.objects.for_tenant(tenant), str(input_serializer.validated_data["student"]))
+        matched = match_incoming_payment(user=request.user, tenant=tenant, incoming=incoming, student=student)
+        return Response(IncomingPaymentSerializer(matched).data)
+
+
+class IncomingPaymentIgnoreView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, incoming_payment_id):
+        tenant = resolve_finance_tenant(request, "finance.reconciliation.ignore")
+        incoming = resolve_tenant_object(IncomingPayment.objects.for_tenant(tenant), incoming_payment_id)
+        input_serializer = IncomingPaymentIgnoreSerializer(data=request.data)
+        input_serializer.is_valid(raise_exception=True)
+        ignored = ignore_incoming_payment(user=request.user, tenant=tenant, incoming=incoming, reason=input_serializer.validated_data["reason"])
+        return Response(IncomingPaymentSerializer(ignored).data)
