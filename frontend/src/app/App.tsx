@@ -1,5 +1,5 @@
-import { lazy, Suspense } from "react";
-import { Box, Loader, Stack, Text } from "@mantine/core";
+import { lazy, Suspense, useEffect, useState } from "react";
+import { Group, Loader, Text } from "@mantine/core";
 import { AppShell, PlatformShell } from "../components/Shell";
 import { Loading, usePath } from "../components/ui";
 import { DashboardPage, EmployeePage, InvitePage, LoginPage, MissingPage, ResourcePage, resources, SetupPage, StaffPage, StudentPage, StudentsPage } from "../pages/pages";
@@ -28,22 +28,30 @@ const NotificationOutboxPage=lazy(()=>import("../features/notifications").then(m
 const RolesPage=lazy(()=>import("../features/tenancy").then(m=>({default:m.RolesPage})));
 const UsersPage=lazy(()=>import("../features/tenancy").then(m=>({default:m.UsersPage})));
 
+function BootScreen(){
+ // Delayed by 200ms so a fast bootstrap (the common case) opens straight
+ // into the app instead of flashing this screen for one frame.
+ const [show,setShow]=useState(false);
+ useEffect(()=>{const timer=setTimeout(()=>setShow(true),200);return()=>clearTimeout(timer)},[]);
+ if(!show)return null;
+ return (
+  <main className="boot-screen">
+   <div className="boot-loader">
+    <Group gap={9}>
+     <img src="/logo.png" alt="" width={28} height={28}/>
+     <Text fw={700} size="lg">Stemic Schools</Text>
+    </Group>
+    <Text size="sm" c="dimmed">Loading</Text>
+    <Loader type="dots" size="sm" color="gray"/>
+   </div>
+  </main>
+ );
+}
+
 export function App(){
  const path=usePath();const {session,loading,platformAccess}=useAuth();
  if(path==="/accept-invite")return <InvitePage/>;
- if(loading)return (
-  <main className="boot-screen">
-   <Stack align="center" gap="md">
-    <img src="/logo.png" alt="" width={50} height={50} style={{ borderRadius: 14, boxShadow: "0 8px 24px rgba(99,102,241,0.4)", objectFit: "cover" }} />
-    <Box>
-     <Text fw={800} size="xl" c="white" style={{ letterSpacing: "-0.02em" }}>Stemic Schools</Text>
-     <Text size="xs" c="indigo.2" fw={500}>School ERP & Fintech</Text>
-    </Box>
-    <Loader type="dots" color="indigo" size="md" mt="xs" />
-    <Text size="xs" c="gray.4" fw={500}>Opening your workspace...</Text>
-   </Stack>
-  </main>
- );
+ if(loading)return <BootScreen/>;
  if(!session)return <LoginPage/>;
  if(path.startsWith("/platform")){
   if(!platformAccess)return <AppShell><MissingPage/></AppShell>;
