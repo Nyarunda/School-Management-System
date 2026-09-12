@@ -2,6 +2,7 @@ import uuid
 
 from django.db import models
 
+from apps.documents.models import Document
 from apps.tenancy.models import Campus, TenantOwnedModel
 
 
@@ -41,8 +42,11 @@ class Student(TenantOwnedModel):
 
 
 class StudentDocument(TenantOwnedModel):
+    """document_type is Students' own domain categorization (e.g. "Birth
+    certificate"); storage metadata lives on the referenced Document row.
+    """
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name="documents")
     document_type = models.CharField(max_length=80)
-    file_name = models.CharField(max_length=255)
-    uploaded_at = models.DateTimeField(auto_now_add=True)
+    document = models.ForeignKey(Document, on_delete=models.SET_NULL, null=True, blank=True, related_name="+")

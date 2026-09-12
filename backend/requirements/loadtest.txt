@@ -1,0 +1,5 @@
+# Only needed to run Milestone 5E load tests -- not a runtime dependency
+# of the application itself. Install with: pip install -r requirements/loadtest.txt
+# (gunicorn is now a base.txt dependency -- see Milestone 22.3)
+-r base.txt
+httpx>=0.27,<1.0
