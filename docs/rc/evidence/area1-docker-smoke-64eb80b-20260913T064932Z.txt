@@ -1,0 +1,186 @@
+[06:49:32] Backend RC Area 1 Docker smoke test
+[06:49:32] Git commit: 64eb80b59f37aade84451cecad342695b399fba4
+[06:49:33] Docker version: Docker version 29.7.2, build a7dcaa6
+[06:49:33] Building image school-management-backend:rc-64eb80b
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 2.70kB 0.0s done
+#1 DONE 0.1s
+
+#2 [internal] load metadata for docker.io/library/python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+#2 DONE 0.1s
+
+#3 [internal] load .dockerignore
+#3 transferring context: 2B done
+#3 DONE 0.0s
+
+#4 [internal] load build context
+#4 DONE 0.0s
+
+#5 [1/6] FROM docker.io/library/python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254
+#5 resolve docker.io/library/python:3.12-slim-bookworm@sha256:782412e85d0f0984994c290652577d4018aff08145c85b262bb63dc0c7522254 0.1s done
+#5 DONE 0.1s
+
+#4 [internal] load build context
+#4 transferring context: 3.12MB 1.6s done
+#4 DONE 1.7s
+
+#6 [2/6] WORKDIR /app
+#6 CACHED
+
+#7 [3/6] COPY requirements/base.txt requirements/base.txt
+#7 CACHED
+
+#8 [4/6] RUN pip install --no-cache-dir -r requirements/base.txt
+#8 CACHED
+
+#9 [5/6] COPY . .
+#9 DONE 2.8s
+
+#10 [6/6] RUN groupadd --gid 1000 app && useradd --uid 1000 --gid app --home-dir /app --no-create-home app     && chown -R app:app /app
+#10 DONE 14.8s
+
+#11 exporting to image
+#11 exporting layers
+#11 exporting layers 8.1s done
+#11 exporting manifest sha256:fb5a4ffe3b9108d994de5a1ad5365ebbb133d57876aa2dda407cc8870e3756bc 0.1s done
+#11 exporting config sha256:d23970e7643dc3f0e37402eaaf14499e902170dded152a537970f45755731022 0.1s done
+#11 exporting attestation manifest sha256:72d5bb906c32d9d908200a4a0f1a4f76a2b00dfd0a6d29b0b1a58bbf54aa56cb
+#11 exporting attestation manifest sha256:72d5bb906c32d9d908200a4a0f1a4f76a2b00dfd0a6d29b0b1a58bbf54aa56cb 0.1s done
+#11 exporting manifest list sha256:7f45c8f34de87996de8e7839b27c6614e3d7e5051e35e7b9712c5c7cdfafcd65 0.1s done
+#11 naming to docker.io/library/school-management-backend:rc-64eb80b
+#11 naming to docker.io/library/school-management-backend:rc-64eb80b 0.0s done
+#11 unpacking to docker.io/library/school-management-backend:rc-64eb80b
+#11 unpacking to docker.io/library/school-management-backend:rc-64eb80b 4.4s done
+#11 DONE 13.1s
+
+ [33m1 warning found (use docker --debug to expand):
+[0m - JSONArgsRecommended: JSON arguments recommended for CMD to prevent unintended behavior related to OS signals (line 44)
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/915pgmx7lpuay1jtu2emk5gwm
+[06:50:09] Starting postgres:17-alpine and redis:7-alpine on isolated network school-rc-16873-net
+[06:50:11] Waiting for postgres readiness
+[06:50:14] Running migrate against the fresh database
+Operations to perform:
+  Apply all migrations: academics, activity, admissions, assessments, attendance, auth, authtoken, contenttypes, documents, finance, guardians, leave, notifications, platform, reporting, sessions, staff, students, tenancy, timetable
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0001_initial... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+  Applying auth.0010_alter_group_name_max_length... OK
+  Applying auth.0011_update_proxy_permissions... OK
+  Applying auth.0012_alter_user_first_name_max_length... OK
+  Applying tenancy.0001_initial... OK
+  Applying students.0001_initial... OK
+  Applying academics.0001_initial... OK
+  Applying academics.0002_studentenrollment_academics_s_tenant__a1d42a_idx_and_more... OK
+  Applying activity.0001_initial... OK
+  Applying documents.0001_initial... OK
+  Applying admissions.0001_initial... OK
+  Applying admissions.0002_remove_applicationdocument_file_name_and_more... OK
+  Applying students.0002_student_students_st_tenant__b74932_idx_and_more... OK
+  Applying assessments.0001_initial... OK
+  Applying assessments.0002_gradingscheme_unique_active_grading_scheme_per_level... OK
+  Applying attendance.0001_initial... OK
+  Applying attendance.0002_attendancesession_status_and_more... OK
+  Applying authtoken.0001_initial... OK
+  Applying authtoken.0002_auto_20160226_1747... OK
+  Applying authtoken.0003_tokenproxy... OK
+  Applying authtoken.0004_alter_tokenproxy_options... OK
+  Applying finance.0001_initial... OK
+  Applying finance.0002_invoice_creditnote_invoiceline_studentfeeassignment_and_more... OK
+  Applying finance.0003_allocationreversal_payment_paymentallocation_receipt... OK
+  Applying finance.0004_extend_studentledgerentry_for_payments... OK
+  Applying finance.0005_payment_status_paymentreversal... OK
+  Applying finance.0006_incomingpayment... OK
+  Applying finance.0007_mpesacallbacklog_mpesastkpushrequest_and_more... OK
+  Applying finance.0008_mpesa_recovery_and_verification... OK
+  Applying finance.0009_feestructure_term... OK
+  Applying guardians.0001_initial... OK
+  Applying guardians.0002_initial... OK
+  Applying staff.0001_initial... OK
+  Applying leave.0001_initial... OK
+  Applying notifications.0001_initial... OK
+  Applying notifications.0002_alter_notificationoutbox_channel_and_more... OK
+  Applying notifications.0003_notification_event_and_hardening... OK
+  Applying platform.0001_initial... OK
+  Applying platform.0002_seed_default_plan... OK
+  Applying platform.0003_platformauditevent... OK
+  Applying reporting.0001_initial... OK
+  Applying reporting.0002_reportexportjob_idempotency_key_and_more... OK
+  Applying sessions.0001_initial... OK
+  Applying staff.0002_remove_employeedocument_file_name_and_more... OK
+  Applying students.0003_remove_studentdocument_file_name_and_more... OK
+  Applying tenancy.0002_membership_invite_accepted_at... OK
+  Applying timetable.0001_initial... OK
+[06:50:39] Starting the application container
+[06:50:41] Waiting for the app to accept connections
+[06:50:45] --- Baseline: everything healthy ---
+[06:50:46] PASS: healthz baseline status code (got 200)
+[06:50:49] PASS: readyz baseline status code (got 200)
+[06:50:49] PASS: readyz baseline status field (got ok)
+[06:50:49] PASS: readyz baseline database field (got ok)
+[06:50:49] PASS: readyz baseline cache field (got ok)
+[06:50:50] --- Redis down: must degrade, not fail ---
+[06:50:58] PASS: readyz status code with redis down (got 200)
+[06:50:58] PASS: readyz status field with redis down (got degraded)
+[06:50:58] PASS: readyz cache field with redis down (got unavailable)
+[06:50:58] PASS: healthz status code with redis down (got 200)
+[06:51:01] --- Postgres down: must fail readiness, liveness unaffected ---
+[06:51:10] PASS: readyz status code with postgres down (got 503)
+[06:51:10] PASS: readyz status field with postgres down (got unhealthy)
+[06:51:11] PASS: readyz database field with postgres down (got error)
+[06:51:11] PASS: healthz status code with postgres down (got 200)
+[06:51:14] PASS: readyz status code after postgres recovers (got 200)
+[06:51:14] --- Graceful shutdown on SIGTERM ---
+[2026-09-13 06:50:41 +0000] [1] [INFO] Starting gunicorn 22.0.0
+[2026-09-13 06:50:41 +0000] [1] [INFO] Listening at: http://0.0.0.0:8000 (1)
+[2026-09-13 06:50:41 +0000] [1] [INFO] Using worker: gthread
+[2026-09-13 06:50:41 +0000] [7] [INFO] Booting worker with pid: 7
+[2026-09-13 06:50:41 +0000] [8] [INFO] Booting worker with pid: 8
+[2026-09-13 06:50:41 +0000] [9] [INFO] Booting worker with pid: 9
+[2026-09-13 06:50:41 +0000] [10] [INFO] Booting worker with pid: 10
+{"timestamp": "2026-09-13T09:50:45+0300", "level": "INFO", "logger": "http.request", "message": "GET /healthz/ -> 200 (1733.8ms)", "request_id": null, "event": "http_request", "method": "GET", "path": "/healthz/", "status": 200, "duration_ms": 1733.8}
+172.22.0.1 - - [13/Sep/2026:09:50:45 +0300] "GET /healthz/ HTTP/1.1" 200 16 "-" "curl/8.12.1"
+{"timestamp": "2026-09-13T09:50:46+0300", "level": "INFO", "logger": "http.request", "message": "GET /healthz/ -> 200 (1397.3ms)", "request_id": null, "event": "http_request", "method": "GET", "path": "/healthz/", "status": 200, "duration_ms": 1397.3}
+172.22.0.1 - - [13/Sep/2026:09:50:46 +0300] "GET /healthz/ HTTP/1.1" 200 16 "-" "curl/8.12.1"
+{"timestamp": "2026-09-13T09:50:47+0300", "level": "INFO", "logger": "http.request", "message": "GET /readyz/ -> 200 (99.2ms)", "request_id": null, "event": "http_request", "method": "GET", "path": "/readyz/", "status": 200, "duration_ms": 99.2}
+172.22.0.1 - - [13/Sep/2026:09:50:47 +0300] "GET /readyz/ HTTP/1.1" 200 49 "-" "curl/8.12.1"
+{"timestamp": "2026-09-13T09:50:48+0300", "level": "INFO", "logger": "http.request", "message": "GET /readyz/ -> 200 (1764.5ms)", "request_id": null, "event": "http_request", "method": "GET", "path": "/readyz/", "status": 200, "duration_ms": 1764.5}
+172.22.0.1 - - [13/Sep/2026:09:50:48 +0300] "GET /readyz/ HTTP/1.1" 200 49 "-" "curl/8.12.1"
+{"timestamp": "2026-09-13T09:50:55+0300", "level": "INFO", "logger": "http.request", "message": "GET /readyz/ -> 200 (2588.8ms)", "request_id": null, "event": "http_request", "method": "GET", "path": "/readyz/", "status": 200, "duration_ms": 2588.8}
+172.22.0.1 - - [13/Sep/2026:09:50:55 +0300] "GET /readyz/ HTTP/1.1" 200 64 "-" "curl/8.12.1"
+{"timestamp": "2026-09-13T09:50:57+0300", "level": "INFO", "logger": "http.request", "message": "GET /readyz/ -> 200 (2305.3ms)", "request_id": null, "event": "http_request", "method": "GET", "path": "/readyz/", "status": 200, "duration_ms": 2305.3}
+172.22.0.1 - - [13/Sep/2026:09:50:57 +0300] "GET /readyz/ HTTP/1.1" 200 64 "-" "curl/8.12.1"
+{"timestamp": "2026-09-13T09:50:58+0300", "level": "INFO", "logger": "http.request", "message": "GET /healthz/ -> 200 (0.8ms)", "request_id": null, "event": "http_request", "method": "GET", "path": "/healthz/", "status": 200, "duration_ms": 0.8}
+172.22.0.1 - - [13/Sep/2026:09:50:58 +0300] "GET /healthz/ HTTP/1.1" 200 16 "-" "curl/8.12.1"
+{"timestamp": "2026-09-13T09:51:07+0300", "level": "INFO", "logger": "http.request", "message": "GET /readyz/ -> 503 (2610.3ms)", "request_id": null, "event": "http_request", "method": "GET", "path": "/readyz/", "status": 503, "duration_ms": 2610.3}
+{"timestamp": "2026-09-13T09:51:07+0300", "level": "ERROR", "logger": "django.request", "message": "Service Unavailable: /readyz/", "request_id": null}
+172.22.0.1 - - [13/Sep/2026:09:51:07 +0300] "GET /readyz/ HTTP/1.1" 503 59 "-" "curl/8.12.1"
+{"timestamp": "2026-09-13T09:51:10+0300", "level": "INFO", "logger": "http.request", "message": "GET /readyz/ -> 503 (2298.2ms)", "request_id": null, "event": "http_request", "method": "GET", "path": "/readyz/", "status": 503, "duration_ms": 2298.2}
+{"timestamp": "2026-09-13T09:51:10+0300", "level": "ERROR", "logger": "django.request", "message": "Service Unavailable: /readyz/", "request_id": null}
+172.22.0.1 - - [13/Sep/2026:09:51:10 +0300] "GET /readyz/ HTTP/1.1" 503 59 "-" "curl/8.12.1"
+{"timestamp": "2026-09-13T09:51:10+0300", "level": "INFO", "logger": "http.request", "message": "GET /healthz/ -> 200 (0.6ms)", "request_id": null, "event": "http_request", "method": "GET", "path": "/healthz/", "status": 200, "duration_ms": 0.6}
+172.22.0.1 - - [13/Sep/2026:09:51:10 +0300] "GET /healthz/ HTTP/1.1" 200 16 "-" "curl/8.12.1"
+{"timestamp": "2026-09-13T09:51:14+0300", "level": "INFO", "logger": "http.request", "message": "GET /readyz/ -> 200 (18.5ms)", "request_id": null, "event": "http_request", "method": "GET", "path": "/readyz/", "status": 200, "duration_ms": 18.5}
+172.22.0.1 - - [13/Sep/2026:09:51:14 +0300] "GET /readyz/ HTTP/1.1" 200 49 "-" "curl/8.12.1"
+[2026-09-13 06:51:15 +0000] [1] [INFO] Handling signal: term
+[2026-09-13 09:51:15 +0300] [10] [INFO] Worker exiting (pid: 10)
+[2026-09-13 09:51:15 +0300] [7] [INFO] Worker exiting (pid: 7)
+[2026-09-13 09:51:15 +0300] [8] [INFO] Worker exiting (pid: 8)
+[2026-09-13 09:51:15 +0300] [9] [INFO] Worker exiting (pid: 9)
+[2026-09-13 06:51:16 +0000] [1] [INFO] Shutting down: Master
+[06:51:17] PASS: app container exit code after docker stop (got 0)
+[06:51:17] PASS: graceful shutdown completed in 2s (under the 30s --time bound -- SIGKILL was not needed)
+[06:51:17] Image kept for evidence: school-management-backend:rc-64eb80b
+[06:51:17] RESULT: ALL CHECKS PASSED
+[06:51:17] Cleaning up containers/network (image school-management-backend:rc-64eb80b is kept).

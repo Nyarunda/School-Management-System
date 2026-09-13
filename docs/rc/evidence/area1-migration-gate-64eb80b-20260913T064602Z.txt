@@ -1,0 +1,153 @@
+[06:46:02] Backend RC Area 1 migration gate
+[06:46:03] Source commit (pre-existing schema+data baseline): 12ba0c7
+[06:46:03] Target commit (RC candidate under test): 64eb80b59f37aade84451cecad342695b399fba4
+[06:46:11] --- Step 1: migrate from zero (current HEAD, school_management_zero) ---
+Operations to perform:
+  Apply all migrations: academics, activity, admissions, assessments, attendance, auth, authtoken, contenttypes, documents, finance, guardians, leave, notifications, platform, reporting, sessions, staff, students, tenancy, timetable
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0001_initial... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+  Applying auth.0010_alter_group_name_max_length... OK
+  Applying auth.0011_update_proxy_permissions... OK
+  Applying auth.0012_alter_user_first_name_max_length... OK
+  Applying tenancy.0001_initial... OK
+  Applying students.0001_initial... OK
+  Applying academics.0001_initial... OK
+  Applying academics.0002_studentenrollment_academics_s_tenant__a1d42a_idx_and_more... OK
+  Applying activity.0001_initial... OK
+  Applying documents.0001_initial... OK
+  Applying admissions.0001_initial... OK
+  Applying admissions.0002_remove_applicationdocument_file_name_and_more... OK
+  Applying students.0002_student_students_st_tenant__b74932_idx_and_more... OK
+  Applying assessments.0001_initial... OK
+  Applying assessments.0002_gradingscheme_unique_active_grading_scheme_per_level... OK
+  Applying attendance.0001_initial... OK
+  Applying attendance.0002_attendancesession_status_and_more... OK
+  Applying authtoken.0001_initial... OK
+  Applying authtoken.0002_auto_20160226_1747... OK
+  Applying authtoken.0003_tokenproxy... OK
+  Applying authtoken.0004_alter_tokenproxy_options... OK
+  Applying finance.0001_initial... OK
+  Applying finance.0002_invoice_creditnote_invoiceline_studentfeeassignment_and_more... OK
+  Applying finance.0003_allocationreversal_payment_paymentallocation_receipt... OK
+  Applying finance.0004_extend_studentledgerentry_for_payments... OK
+  Applying finance.0005_payment_status_paymentreversal... OK
+  Applying finance.0006_incomingpayment... OK
+  Applying finance.0007_mpesacallbacklog_mpesastkpushrequest_and_more... OK
+  Applying finance.0008_mpesa_recovery_and_verification... OK
+  Applying finance.0009_feestructure_term... OK
+  Applying guardians.0001_initial... OK
+  Applying guardians.0002_initial... OK
+  Applying staff.0001_initial... OK
+  Applying leave.0001_initial... OK
+  Applying notifications.0001_initial... OK
+  Applying notifications.0002_alter_notificationoutbox_channel_and_more... OK
+  Applying notifications.0003_notification_event_and_hardening... OK
+  Applying platform.0001_initial... OK
+  Applying platform.0002_seed_default_plan... OK
+  Applying platform.0003_platformauditevent... OK
+  Applying reporting.0001_initial... OK
+  Applying reporting.0002_reportexportjob_idempotency_key_and_more... OK
+  Applying sessions.0001_initial... OK
+  Applying staff.0002_remove_employeedocument_file_name_and_more... OK
+  Applying students.0003_remove_studentdocument_file_name_and_more... OK
+  Applying tenancy.0002_membership_invite_accepted_at... OK
+  Applying timetable.0001_initial... OK
+[06:47:17] PASS: migrate from zero succeeded
+[06:47:17] --- Step 2: check --deploy against a real production-shaped env ---
+System check identified no issues (0 silenced).
+[06:47:28] PASS: check --deploy is clean under real production env
+[06:47:28] --- Step 3: pending-migration hygiene ---
+No changes detected
+[06:47:40] PASS: makemigrations --check --dry-run exits 0 (no model changes missing a migration) (got 0)
+[06:47:51] PASS: migrate --check confirms all migrations are applied to school_management_zero
+[06:47:51] --- Step 4: migrate forward (old schema+data at 12ba0c7 -> current HEAD, school_management_forward) ---
+Preparing worktree (detached HEAD 12ba0c7)
+Updating files:  82% (219/267)Updating files:  83% (222/267)Updating files:  84% (225/267)Updating files:  85% (227/267)Updating files:  86% (230/267)Updating files:  87% (233/267)Updating files:  88% (235/267)Updating files:  89% (238/267)Updating files:  90% (241/267)Updating files:  91% (243/267)Updating files:  92% (246/267)Updating files:  93% (249/267)Updating files:  94% (251/267)Updating files:  95% (254/267)Updating files:  96% (257/267)Updating files:  97% (259/267)Updating files:  98% (262/267)Updating files:  99% (265/267)Updating files: 100% (267/267)Updating files: 100% (267/267), done.
+HEAD is now at 12ba0c7 Milestone 22.3: Performance, Observability & Deployment Hardening
+[06:47:53] Confirmed loadtest_provision.py exists at 12ba0c7
+Operations to perform:
+  Apply all migrations: academics, activity, admissions, assessments, attendance, auth, contenttypes, documents, finance, guardians, leave, notifications, platform, reporting, sessions, staff, students, tenancy, timetable
+Running migrations:
+  Applying contenttypes.0001_initial... OK
+  Applying contenttypes.0002_remove_content_type_name... OK
+  Applying auth.0001_initial... OK
+  Applying auth.0002_alter_permission_name_max_length... OK
+  Applying auth.0003_alter_user_email_max_length... OK
+  Applying auth.0004_alter_user_username_opts... OK
+  Applying auth.0005_alter_user_last_login_null... OK
+  Applying auth.0006_require_contenttypes_0002... OK
+  Applying auth.0007_alter_validators_add_error_messages... OK
+  Applying auth.0008_alter_user_username_max_length... OK
+  Applying auth.0009_alter_user_last_name_max_length... OK
+  Applying auth.0010_alter_group_name_max_length... OK
+  Applying auth.0011_update_proxy_permissions... OK
+  Applying auth.0012_alter_user_first_name_max_length... OK
+  Applying tenancy.0001_initial... OK
+  Applying students.0001_initial... OK
+  Applying academics.0001_initial... OK
+  Applying academics.0002_studentenrollment_academics_s_tenant__a1d42a_idx_and_more... OK
+  Applying activity.0001_initial... OK
+  Applying documents.0001_initial... OK
+  Applying admissions.0001_initial... OK
+  Applying admissions.0002_remove_applicationdocument_file_name_and_more... OK
+  Applying students.0002_student_students_st_tenant__b74932_idx_and_more... OK
+  Applying assessments.0001_initial... OK
+  Applying assessments.0002_gradingscheme_unique_active_grading_scheme_per_level... OK
+  Applying attendance.0001_initial... OK
+  Applying attendance.0002_attendancesession_status_and_more... OK
+  Applying finance.0001_initial... OK
+  Applying finance.0002_invoice_creditnote_invoiceline_studentfeeassignment_and_more... OK
+  Applying finance.0003_allocationreversal_payment_paymentallocation_receipt... OK
+  Applying finance.0004_extend_studentledgerentry_for_payments... OK
+  Applying finance.0005_payment_status_paymentreversal... OK
+  Applying finance.0006_incomingpayment... OK
+  Applying finance.0007_mpesacallbacklog_mpesastkpushrequest_and_more... OK
+  Applying finance.0008_mpesa_recovery_and_verification... OK
+  Applying guardians.0001_initial... OK
+  Applying guardians.0002_initial... OK
+  Applying staff.0001_initial... OK
+  Applying leave.0001_initial... OK
+  Applying notifications.0001_initial... OK
+  Applying notifications.0002_alter_notificationoutbox_channel_and_more... OK
+  Applying notifications.0003_notification_event_and_hardening... OK
+  Applying platform.0001_initial... OK
+  Applying platform.0002_seed_default_plan... OK
+  Applying platform.0003_platformauditevent... OK
+  Applying reporting.0001_initial... OK
+  Applying reporting.0002_reportexportjob_idempotency_key_and_more... OK
+  Applying sessions.0001_initial... OK
+  Applying staff.0002_remove_employeedocument_file_name_and_more... OK
+  Applying students.0003_remove_studentdocument_file_name_and_more... OK
+  Applying timetable.0001_initial... OK
+Provisioned loadtest-0 (50 students, noisy=True)
+Provisioned loadtest-1 (5 students, noisy=False)
+Provisioned loadtest-2 (5 students, noisy=False)
+Wrote manifest for 3 tenants to C:\Users\hp\AppData\Local\Temp\tmp.zMGSyK6PVi\backend\loadtest\manifest.json
+[06:48:57] Pre-migration data checksum (school_management_forward): 1811a3730920364b12ae62de3126324f
+Operations to perform:
+  Apply all migrations: academics, activity, admissions, assessments, attendance, auth, authtoken, contenttypes, documents, finance, guardians, leave, notifications, platform, reporting, sessions, staff, students, tenancy, timetable
+Running migrations:
+  Applying authtoken.0001_initial... OK
+  Applying authtoken.0002_auto_20160226_1747... OK
+  Applying authtoken.0003_tokenproxy... OK
+  Applying authtoken.0004_alter_tokenproxy_options... OK
+  Applying finance.0009_feestructure_term... OK
+  Applying tenancy.0002_membership_invite_accepted_at... OK
+[06:49:10] PASS: forward migration (current HEAD onto 12ba0c7's populated schema) succeeded
+[06:49:11] PASS: authtoken_token table exists after forward migration (got t)
+[06:49:12] Post-migration data checksum (school_management_forward): 1811a3730920364b12ae62de3126324f
+[06:49:12] PASS: representative data unchanged by forward migration (got 1811a3730920364b12ae62de3126324f)
+[06:49:12] 
+[06:49:12] Source commit: 12ba0c7  |  Target commit: 64eb80b59f37aade84451cecad342695b399fba4
+[06:49:12] RESULT: ALL CHECKS PASSED
+[06:49:12] Cleaning up: removing worktree and disposable postgres container.
