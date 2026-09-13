@@ -1,3 +1,4 @@
+from django.core.management import call_command
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 from django.test import TransactionTestCase
@@ -34,4 +35,12 @@ class GatewayMigrationTests(TransactionTestCase):
             self.assertIsNone(migrated.idempotency_key)
             self.assertEqual(migrated.provider_query, {})
         finally:
-            MigrationExecutor(connection).migrate(after)
+            # Restore to the app's actual latest migration, not the
+            # hardcoded `after` target -- `after` is a snapshot of "latest"
+            # only as of when this test was written. Hardcoding it here
+            # left the schema permanently stuck at 0008 for the rest of any
+            # test run that includes this TransactionTestCase, silently
+            # breaking every later finance test that touches a column added
+            # by a subsequent migration (found live during RC Area 8, via
+            # `FeeStructure.term` from migration 0009).
+            call_command("migrate", "finance", verbosity=0)
