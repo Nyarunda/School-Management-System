@@ -690,5 +690,90 @@ Reviewing the full retained evidence set together (Checks 1-7, the nginx opportu
 
 **Closing this area** on that basis: every check ran against the real live stack with real measured evidence, not simulation; both defects the evidence surfaced (nginx DNS caching, loadtest `exec` config) have their own commit and live re-verification; the one accepted availability limitation (single-container redeploy window) is explicitly named rather than hidden inside a clean checklist; and the one unresolved item (backup/restore) is carried forward loudly, not allowed to disappear under seven passing checks.
 
-## Area 8 — RC evidence and decision
-*Not started — this section becomes the final sign-off once Areas 1-7 close.*
+## Area 8 — RC evidence and decision ✅ CLOSED
+
+**Purpose:** synthesize Areas 1-7 into a release decision — not another measurement area. No new load/chaos/restart/concurrency/resilience experiments were introduced here; where this area found a real gap, it was resolved with the smallest justified fix (test-first, per this project's RC discipline) or explicitly named as an unresolved go-live item, never silently absorbed.
+
+**Backend code candidate:** `64eb80b` (`feature/finance-foundation`).
+**RC evidence/documentation tip:** `a6d3cf4` (adds only Area 1's refreshed evidence files on top of `64eb80b` — no application-code difference).
+
+**Provenance, for audit:** RC Areas 1-7 were performed on `feature/payments`, culminating at `888872e`. That tree was merged into `feature/finance-foundation` (`d9d69cd`), independently verified byte-identical to `888872e`, and confirmed against the complete 871-module backend suite (871/871 passing). Two further fixes were then found and resolved by this Area 8 synthesis itself (`a508a25`, `e2c5e63` on `feature/payments`, re-verified at 872/872), merged forward to produce the code candidate `64eb80b`, against which Area 1's build/migration gates were freshly re-run (`a6d3cf4`).
+
+### 1. Areas 1-7 — final status
+
+| Area | Status | Headline evidence |
+|---|---|---|
+| 1. Build, configuration & migrations | ✅ CLOSED | Original evidence at `b4d160f`; **refreshed against the actual candidate this area** (`64eb80b`) — see §5. |
+| 2. Authentication, tenancy & security | ✅ CLOSED (`b085030`) | Invite/accept replay defect fixed; login throttle scoped; new tenant-provisioning API. 779/779 tests. |
+| 3. Critical business journeys | ✅ CLOSED (`8ad5a13`) | All 9 journeys E2E-verified; 1 BLOCKER fixed (admissions enrollment had no reachable API); 3 campus-scope DEFECTs fixed. 822/822 tests. |
+| 4. Finance & M-Pesa integrity | ✅ CLOSED (`4b6d3d6`) | No BLOCKER in a mature, heavily-tested subsystem; 2 DEFECTs fixed. 830/830 tests. |
+| 5. Concurrency & failure recovery | ✅ CLOSED | 4/4 real induced-failure checks PASS — zero code changes needed; `durable_work.py`'s design held under every real injection. |
+| 6. Performance & capacity | ✅ CLOSED (`769fd69`) | 4 real defects found+fixed; capacity measured; 8h soak with zero leak/degradation signature. |
+| 7. Operational resilience | ✅ CLOSED (`888872e`) | 7/7 checks PASS; 2 defects found+fixed (nginx DNS caching, loadtest `exec` config). |
+| 8. RC evidence and decision | ✅ CLOSED (this section) | 1 defect found+fixed (tenant-shared M-Pesa callback throttle); Area 1 evidence refreshed against the real candidate; final go/no-go recorded below. |
+
+**Integrity gate, across all eight areas, without exception:** zero `duplicate_payment`, zero `cross_tenant_contamination`, zero partial commits, zero permanently-stuck durable work, zero manual database repair — in every single check that touched financial or durable-write state.
+
+### 2. Release blockers
+
+| # | Item | Status |
+|---|---|---|
+| **B1** | **PostgreSQL backup/restore — RELEASE BLOCKER FOR PRODUCTION GO-LIVE, not a backend-application defect** | **Unresolved.** No backup/restore tooling or documented recovery procedure exists anywhere in this repository for PostgreSQL data (finance, student, attendance, audit records) — confirmed at Area 7's scoping, re-confirmed here, still true. **Binary resolution criteria (not "a backup exists somewhere"):** B1 is resolved only when (a) the production PostgreSQL backup mechanism is configured, (b) retention and RPO/RTO are documented, and (c) at least one backup has been restored into an isolated environment and validated. All three, not a subset — a configured-but-never-restored backup does not satisfy this. |
+| **B2** | ~~`mpesa_callback` throttle shared by source IP across every tenant~~ — **RESOLVED** | Found during this synthesis (Area 6's 5E-1 finding, never revisited after being flagged, at risk of falling through the cracks between areas). Classified PRE-GO-LIVE RC DEFECT: violated this codebase's standing tenant-isolation invariant (one tenant's own webhook traffic, or any shared source IP such as Safaricom's Daraja infrastructure, could exhaust every other tenant's throttle budget). Fixed test-first — `test_callback_throttle_isolates_tenants_from_each_others_budget` (`apps/finance/mpesa_api_tests.py`) confirmed the defect against the unfixed code before any correction was made — then resolved with the smallest change: `CallbackTokenThrottle(ScopedRateThrottle)`, keying the throttle cache by the URL's own `callback_token` instead of source IP. Same rate/scope config preserved. Committed `a508a25`, re-verified (872/872 tests), merged into the candidate. |
+
+**No remaining release blockers against the backend application itself** — only B1, which is an infrastructure/operational readiness gate, not a code defect.
+
+### 3. Go-live decisions / accepted risks
+
+**Must explicitly accept before production** (business/security decisions — none of these silently became engineering work during this area):
+
+| Item | Decision needed |
+|---|---|
+| M-Pesa operator `1000/hour` per-user throttle (Area 6 soak) | Raise the rate for M-Pesa operator accounts specifically, or accept visible throttling during busy periods. |
+| Finance organizational/campus scope (Area 3, re-confirmed unchanged at Area 4) | Are bursar/finance users ever campus-restricted in practice? Determines whether Finance needs its own scope model. |
+| DRF auth token has no expiry (Area 1, carried through Area 2) | Accept indefinite tokens, or add expiry/rotation before launch. |
+| M-Pesa webhook security model — URL-token + mandatory human verification, no HMAC/IP allowlist (Area 3) | Accept the existing compensating control (already proven correct), or add stronger provider-side auth. |
+| SMS/Email notification channels are stub-only; only `IN_APP` delivery is real (Area 3) | Only matters if real external delivery is a declared launch requirement. |
+
+**Clearly post-go-live** (no decision blocks launch; nothing here needs sign-off before shipping):
+
+- Assessment approval chain segregation-of-duties enhancement (Area 3).
+- Operational dashboard/alerting on aged stuck M-Pesa STK requests (Area 4).
+- Notification delivery-confirmation webhook — `DELIVERED` status modeled but never set (Area 3, Journey 7).
+- No notification on leave cancel/withdraw (Area 3, Journey 6).
+- Enrollment capacity/date-window validation (Area 3, Journey 1).
+- Formal credit-note/invoice void/reversal workflow (Area 3/4) — manual-escalation workaround exists today.
+- DRF's non-atomic throttle counter allows ~1.78x overshoot under high concurrency (Area 6, 5E-2) — only matters if an exact per-user ceiling is ever required.
+- Tightening the Redis cache client's connect-timeout to shorten the fail-open latency window during a Redis outage (Area 6, 5E-3).
+- Single-container ~34.4s redeploy outage (Area 7, Check 7) — accepted deployment-topology limitation; only becomes relevant if zero-downtime deployment becomes a stated requirement.
+
+### 4. Pre-production operational actions
+
+1. **Before CI becomes an authoritative release gate, CI MUST invoke a canonical full-suite command/script that cannot silently fall back to the current 48-test discovery behavior.** Found this area: bare `manage.py test` discovers only 48 of 872 tests (`apps/` has no `__init__.py` anywhere, so unittest's `discover()` silently skips it — even `--pattern="*test*.py"` doesn't help). Not a backend application defect — the complete suite runs correctly today when the real module list is passed explicitly (872/872 passing, verified repeatedly this session). Required before CI is wired up: a `scripts/test_backend.sh` (or equivalent) that runs the genuine complete suite and fails loudly if discovery collapses, rather than package-structure surgery (`__init__.py` additions) done under RC pressure — that refactor, if ever done, is a separate, later decision.
+2. **Decide the backup/restore path and satisfy B1's three-part resolution criteria** — the one item on this list that's an actual release gate, not a checklist formality.
+3. **Land explicit sign-off** on each of the five "must accept" items in §3, so nothing ships silently undecided.
+
+### 5. Area 1 evidence refresh (closing the staleness gap)
+
+Area 1's original evidence (`docs/rc/evidence/area1-*-b4d160f-*.txt`) was captured at baseline `b4d160f` — 127 commits and roughly a dozen new Django apps (Platform, Leave, Notifications, Documents, Reporting, Timetable, Staff, Activity) with 40+ new migrations have landed since. `manage.py check`/`makemigrations --check` were already re-verified clean at the true tip during the `feature/finance-foundation` merge, but the from-zero migrate, production image build, and gunicorn-boot/SIGTERM smoke test had not been. Re-ran both gate scripts directly against the real candidate:
+
+- `scripts/rc/migration_gate.sh` against `64eb80b`: **ALL CHECKS PASSED** — clean migrate-from-zero (~35 migrations spanning every app added since `b4d160f`), `check --deploy` clean under a real production-shaped env, zero pending migrations, forward-migration from the old `12ba0c7` populated-schema baseline with an **identical data checksum** before and after. Evidence: `docs/rc/evidence/area1-migration-gate-64eb80b-20260913T064602Z.txt`.
+- `scripts/rc/docker_smoke_test.sh` against `64eb80b`: **ALL CHECKS PASSED** — production image builds and boots, `/healthz/`/`/readyz/` correct under both Redis-down (`degraded`, zero 5xx) and Postgres-down (`503`/`unhealthy`) with automatic recovery on both, graceful SIGTERM shutdown in 2s (well under the 30s bound). Evidence: `docs/rc/evidence/area1-docker-smoke-64eb80b-20260913T064932Z.txt`.
+
+### 6. Final recommendation
+
+```
+BACKEND APPLICATION                      PRODUCTION GO-LIVE
+        │                                        │
+        ├── Areas 1-7 PASS                       ├── Backup mechanism configured?
+        ├── 872/872 tests PASS                   ├── Retention/RPO/RTO defined?
+        ├── Area 1 gates refreshed, PASS          └── Restore actually demonstrated?
+        ├── B2 found, fixed, regression-tested             │
+        └── BACKEND RC = PASS                          NO ─┴─→ BLOCKED
+```
+
+**Backend Application RC: PASS.** Every one of the eight areas is closed with real, live-measured evidence — no simulated failures, no findings waved off, no stale evidence left standing once discovered. The one code defect this synthesis itself surfaced (B2) has been fixed, tested, and merged, not left as a caveat. No outstanding backend-application defects remain.
+
+**Production Go-Live: BLOCKED pending demonstrated PostgreSQL backup/restore capability (B1)**, per the binary criteria in §2 — not resolved by an infrastructure checkbox alone.
+
+Frontend RC and UAT remain separate gates, unaffected by this document. No further backend functionality is added under this RC; the next release work moves to Frontend RC/UAT while the infrastructure track resolves B1.
