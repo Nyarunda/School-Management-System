@@ -231,11 +231,12 @@ class MpesaApiTests(TestCase):
         self.assertEqual(Receipt.objects.count(), 0)
 
     def test_webhook_views_are_throttled_on_their_own_scope(self):
-        from apps.finance.mpesa_api import MpesaC2BConfirmationView, MpesaC2BValidationView, MpesaStkCallbackView
+        from apps.finance.mpesa_api import CallbackTokenThrottle, MpesaC2BConfirmationView, MpesaC2BValidationView, MpesaStkCallbackView
         from rest_framework.throttling import ScopedRateThrottle
 
         for view_class in (MpesaC2BValidationView, MpesaC2BConfirmationView, MpesaStkCallbackView):
-            self.assertEqual(view_class.throttle_classes, [ScopedRateThrottle])
+            self.assertEqual(view_class.throttle_classes, [CallbackTokenThrottle])
+            self.assertTrue(issubclass(CallbackTokenThrottle, ScopedRateThrottle))
             self.assertEqual(view_class.throttle_scope, "mpesa_callback")
 
     def test_a_throttled_webhook_request_leaves_no_partial_state(self):
@@ -273,6 +274,68 @@ class MpesaApiTests(TestCase):
             self.assertEqual(second.status_code, 429)
 
         self.assertEqual(MpesaCallbackLog.objects.filter(status="RECEIVED").count(), 1)
+
+    def test_callback_throttle_isolates_tenants_from_each_others_budget(self):
+        """RC Area 8 (backend RC synthesis): the public webhook throttle must
+        isolate tenants from each other's capacity, the same way every other
+        operational allowance in this codebase is scoped per-tenant. DRF's
+        stock ScopedRateThrottle keys anonymous requests by source IP
+        (SimpleRateThrottle.get_ident), not by the callback token that
+        already resolves the request to exactly one tenant -- so today, one
+        tenant's own webhook traffic can exhaust *every* tenant's shared
+        bucket if their callbacks happen to arrive from the same source IP
+        (plausible in production: Safaricom's Daraja callbacks and any
+        shared NAT/load-balancer path on our side). This test proves that
+        directly: exhaust School A's budget, then confirm School B's very
+        next webhook call -- a different tenant, a different callback token,
+        the same test client/source IP -- is unaffected.
+        """
+        from django.core.cache import cache
+        from rest_framework.throttling import ScopedRateThrottle
+
+        config_a = self._configure()
+        cache.clear()
+        self.addCleanup(cache.clear)
+
+        school_b = Tenant.objects.create(name="School B", slug="school-b")
+        user_b = User.objects.create_user(username="bursar-b", password="secret")
+        role_b = Role.objects.create(tenant=school_b, name="Finance administrator", permissions=["finance.mpesa.configure"])
+        Membership.objects.create(tenant=school_b, user=user_b, role=role_b)
+        client_b = APIClient()
+        client_b.force_authenticate(user_b)
+        response = client_b.post(
+            "/api/v1/finance/mpesa-config/",
+            {"environment": "SANDBOX", "shortcode": "600001", "consumer_key": "key", "consumer_secret": "secret", "passkey": "passkey"},
+            format="json", HTTP_X_TENANT_SLUG="school-b",
+        )
+        self.assertEqual(response.status_code, 201)
+        config_b = response.data
+
+        with patch.object(ScopedRateThrottle, "THROTTLE_RATES", {"mpesa_callback": "1/min"}):
+            first_a = self.client.post(
+                f"/api/v1/finance/mpesa/{config_a['callback_token']}/c2b/validation/",
+                {"TransID": "ISO-A-1", "TransAmount": "1000", "BillRefNumber": self.student.admission_number},
+                format="json",
+            )
+            self.assertEqual(first_a.status_code, 200)
+            exhausted_a = self.client.post(
+                f"/api/v1/finance/mpesa/{config_a['callback_token']}/c2b/validation/",
+                {"TransID": "ISO-A-2", "TransAmount": "1000", "BillRefNumber": self.student.admission_number},
+                format="json",
+            )
+            self.assertEqual(exhausted_a.status_code, 429)
+
+            first_b = self.client.post(
+                f"/api/v1/finance/mpesa/{config_b['callback_token']}/c2b/validation/",
+                {"TransID": "ISO-B-1", "TransAmount": "1000", "BillRefNumber": "irrelevant"},
+                format="json",
+            )
+            self.assertEqual(
+                first_b.status_code, 200,
+                "School B's webhook was throttled by School A's own traffic -- "
+                "the mpesa_callback throttle bucket is shared by source IP, "
+                "not isolated per tenant.",
+            )
 
     def test_stk_push_malformed_student_id_is_a_400_not_a_500(self):
         self._configure()

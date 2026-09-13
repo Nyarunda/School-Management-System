@@ -122,10 +122,27 @@ def _resolve_mpesa_config_or_404(callback_token):
         raise NotFound("No matching M-Pesa configuration for this callback URL") from error
 
 
+class CallbackTokenThrottle(ScopedRateThrottle):
+    """Same scope/rate mechanism as `ScopedRateThrottle`, but keyed by the
+    URL's own `callback_token` instead of source IP. The stock throttle's
+    `get_cache_key` falls back to request-IP identity for anonymous
+    requests -- correct for a single shared anonymous endpoint, but wrong
+    here: these webhook URLs already carry an unguessable per-tenant
+    token, so keying by IP means one tenant's own traffic (or any shared
+    source IP, such as Safaricom's Daraja callback infrastructure) can
+    exhaust every other tenant's budget on the same bucket. Found live
+    during RC Area 8 synthesis (`test_callback_throttle_isolates_tenants_from_each_others_budget`).
+    """
+
+    def get_cache_key(self, request, view):
+        ident = view.kwargs.get("callback_token") or self.get_ident(request)
+        return self.cache_format % {"scope": self.scope, "ident": ident}
+
+
 class MpesaC2BValidationView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [CallbackTokenThrottle]
     throttle_scope = "mpesa_callback"
 
     def post(self, request, callback_token):
@@ -137,7 +154,7 @@ class MpesaC2BValidationView(APIView):
 class MpesaC2BConfirmationView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [CallbackTokenThrottle]
     throttle_scope = "mpesa_callback"
 
     def post(self, request, callback_token):
@@ -151,7 +168,7 @@ class MpesaC2BConfirmationView(APIView):
 class MpesaStkCallbackView(APIView):
     permission_classes = [AllowAny]
     authentication_classes = []
-    throttle_classes = [ScopedRateThrottle]
+    throttle_classes = [CallbackTokenThrottle]
     throttle_scope = "mpesa_callback"
 
     def post(self, request, callback_token, request_id=None):
